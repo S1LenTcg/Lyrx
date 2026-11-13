@@ -5,12 +5,12 @@ using Musebase.Core.Search;
 namespace Musebase.Core.Translation;
 
 /// <summary>
-/// DeepL API v2 번역기.
-/// 키가 ":fx"로 끝나면 무료 티어(api-free.deepl.com), 아니면 프로(api.deepl.com).
+/// DeepL API v2 翻译器。
+/// 密钥以 ":fx" 结尾则为免费档（api-free.deepl.com），否则为专业档（api.deepl.com）。
 /// </summary>
 public sealed class DeeplTranslator : ITranslator
 {
-    /// <summary>DeepL 요청당 최대 텍스트 수</summary>
+    /// <summary>DeepL 单次请求的最大文本数</summary>
     private const int MaxTextsPerRequest = 50;
 
     private readonly HttpClient _http;

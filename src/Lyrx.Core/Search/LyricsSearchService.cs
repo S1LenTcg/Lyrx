@@ -5,9 +5,9 @@ using System.Threading.Channels;
 namespace Musebase.Core.Search;
 
 /// <summary>
-/// 다중 제공자 병렬 검색 집계. LyricsKit의 Provider/Group.swift에 해당.
-/// 모든 제공자를 동시에 돌리고 결과를 도착 순으로 스트리밍하거나,
-/// 품질 순으로 정렬해 반환한다.
+/// 多提供者并行搜索聚合。对应 LyricsKit 的 Provider/Group.swift。
+/// 同时运行所有提供者，按到达顺序流式输出结果，
+/// 或按质量排序后返回。
 /// </summary>
 public sealed class LyricsSearchService
 {
@@ -21,10 +21,10 @@ public sealed class LyricsSearchService
     }
 
     /// <summary>
-    /// 모든 제공자 결과를 도착 순으로 스트리밍 (제공자 간 순서 비보장).
-    /// 원본 검색어와 함께 정제 변형(피처링/리마스터 등 제거)도 검색해 커버리지를 넓히고,
-    /// (제공자, 곡 토큰) 기준으로 중복 결과를 제거한다.
-    /// <paramref name="diagnostics"/>를 주면 소스별 히트·지연을 집계한다(텔레메트리용, 곡 정보 없음).
+    /// 按到达顺序流式输出所有提供者的结果（提供者之间顺序不保证）。
+    /// 除原始搜索词外，还搜索清理后的变体（去掉 featuring/重制版等）以扩大覆盖范围，
+    /// 并按（提供者，歌曲 token）去掉重复结果。
+    /// 传入 <paramref name="diagnostics"/> 时按来源统计命中与延迟（供遥测使用，不含歌曲信息）。
     /// </summary>
     public async IAsyncEnumerable<Lyrics> SearchAsync(
         LyricsSearchRequest request,
@@ -49,7 +49,7 @@ public sealed class LyricsSearchService
                 {
                     if (!hit)
                     {
-                        hit = true; // 중복 제거 전 판정 — 제공자가 결과를 냈다는 사실 자체를 기록
+                        hit = true; // 去重之前判定 —— 记录提供者确实产出了结果这一事实本身
                         diagnostics?.ReportHit(provider.ServiceName, sw!.ElapsedMilliseconds);
                     }
                     bool fresh;
@@ -59,7 +59,7 @@ public sealed class LyricsSearchService
             }
             catch (OperationCanceledException)
             {
-                // 취소는 조용히
+                // 取消时静默处理
             }
             finally
             {
@@ -81,7 +81,7 @@ public sealed class LyricsSearchService
             yield return lyrics;
     }
 
-    /// <summary>중복 판정 키: 같은 제공자의 같은 곡(토큰)이면 동일. 토큰이 없으면 제목+첫 줄로 대체.</summary>
+    /// <summary>去重键：同一提供者的同一首歌（token）即视为相同。没有 token 时改用标题+首行。</summary>
     private static string DedupKey(Lyrics lyrics)
     {
         var service = lyrics.Metadata.ServiceName ?? "?";
@@ -93,7 +93,7 @@ public sealed class LyricsSearchService
         return $"{service}|{title}|{first}";
     }
 
-    /// <summary>전체 결과를 모아 품질 내림차순으로 반환</summary>
+    /// <summary>收集全部结果，按质量降序返回</summary>
     public async Task<List<Lyrics>> SearchAllAsync(LyricsSearchRequest request, CancellationToken ct = default)
     {
         var results = new List<Lyrics>();
@@ -102,7 +102,7 @@ public sealed class LyricsSearchService
         return results.OrderByDescending(l => l.Quality()).ToList();
     }
 
-    /// <summary>최고 품질 후보 1건 (없으면 null)</summary>
+    /// <summary>质量最高的 1 个候选（没有则为 null）</summary>
     public async Task<Lyrics?> SearchBestAsync(LyricsSearchRequest request, CancellationToken ct = default)
     {
         var all = await SearchAllAsync(request, ct).ConfigureAwait(false);

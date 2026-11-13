@@ -6,25 +6,25 @@ using Musebase.Core.Search;
 namespace Musebase.Core.Meaning;
 
 /// <summary>
-/// Google Gemini Developer API(<c>generativelanguage.googleapis.com</c>)로 의미를 쓴다.
+/// 通过 Google Gemini Developer API（<c>generativelanguage.googleapis.com</c>）撰写意义。
 ///
-/// **Vertex AI가 아니라 Developer API를 쓰는 이유**: 인증이 API 키 한 줄이라
-/// <see cref="Translation.GoogleTranslateTranslator"/>와 완전히 같은 패턴이고(서비스 계정·ADC 불필요),
-/// 무료 티어가 있어 보유 곡 전체를 0원에 채울 수 있다. IAM·데이터 레지던시 같은 거버넌스가
-/// 필요해지면 그때 Vertex로 옮기면 된다.
+/// **用 Developer API 而非 Vertex AI 的原因**：认证只需一行 API 密钥，
+/// 与 <see cref="Translation.GoogleTranslateTranslator"/> 完全同一套模式（无需服务账号、无需 ADC），
+/// 而且有免费额度，可以用 0 元补齐整个曲库。若日后需要 IAM、数据驻留这类治理能力，
+/// 到那时再迁到 Vertex 即可。
 ///
-/// 키는 <see href="https://aistudio.google.com/apikey"/>에서 만든다. **$300 무료 체험
-/// 크레딧은 Gemini API에 쓸 수 없다**(공식 문서에 명시된 제외 항목) — 별개인 "Gemini API
-/// 무료 티어"가 있고, 그건 **결제를 연결하지 않은 프로젝트에만** 적용된다. 결제를 붙이는
-/// 순간 그 프로젝트는 Tier 1(유료)이 되고 무료 티어는 사라지므로, 무료로 쓰려면 결제가
-/// 없는 프로젝트에서 키를 만들어야 한다. 다만 요약 한 번은 매우 싸서(곡당 사실상 0원)
-/// 유료 티어로 두는 선택도 합리적이다 — 그쪽은 보낸 내용이 학습에 쓰이지 않는다.
+/// 密钥在 <see href="https://aistudio.google.com/apikey"/> 创建。**300 美元的免费试用
+/// 额度不能用于 Gemini API**（官方文档明确列为排除项）—— 另有一个独立的"Gemini API
+/// 免费额度"，它只对**未绑定结算的项目**生效。一旦绑定结算，
+/// 该项目就成为 Tier 1（付费），免费额度随即消失；所以想免费使用，
+/// 就必须在未绑定结算的项目里创建密钥。不过摘要单次极其便宜（每首歌实际上 0 元），
+/// 因此留在付费档也是合理选择 —— 那一档不会把发送的内容用于训练。
 /// </summary>
 public sealed class GeminiMeaningWriter : IMeaningWriter
 {
     /// <summary>
-    /// 가장 싼 경량 모델. 요약 작업엔 충분하다. <c>gemini-2.5-flash-lite</c>는 2026-09 기준
-    /// "신규 사용자에게 더 이상 제공되지 않는다"(404)며 이 모델을 권한다.
+    /// 最便宜的轻量模型，做摘要足够。<c>gemini-2.5-flash-lite</c> 自 2026-09 起
+    /// 提示"不再向新用户提供"（404），并推荐改用本模型。
     /// </summary>
     public const string DefaultModel = "gemini-3.5-flash-lite";
 
@@ -81,7 +81,7 @@ public sealed class GeminiMeaningWriter : IMeaningWriter
             using var response = await _http.SendAsync(request, cts.Token).ConfigureAwait(false);
             if (!response.IsSuccessStatusCode)
             {
-                // 본문을 버리지 않는다 — "잔액 부족"·"모델 없음" 같은 진짜 이유가 여기에만 있다.
+                // 不丢弃响应正文 —— "余额不足"、"模型不存在"之类的真实原因只存在于这里。
                 var error = await response.Content.ReadAsStringAsync(cts.Token).ConfigureAwait(false);
                 return MeaningWriteResult.FromStatus(response.StatusCode, error);
             }
@@ -91,25 +91,25 @@ public sealed class GeminiMeaningWriter : IMeaningWriter
                 .FirstOrDefault()?.Content?.Parts?
                 .FirstOrDefault(p => !string.IsNullOrWhiteSpace(p.Text))?.Text;
             return string.IsNullOrWhiteSpace(text)
-                ? MeaningWriteResult.Failed with { Reason = "응답 본문이 비어 있음" }
+                ? MeaningWriteResult.Failed with { Reason = "响应正文为空" }
                 : MeaningWriteResult.Written(text!.Trim());
         }
         catch (OperationCanceledException)
         {
-            // 타임아웃이든 호출자 취소든 "결과를 모른다"는 뜻이다 — 실패로 못 박지 않는다.
-            return MeaningWriteResult.Transient with { Reason = "응답 시간 초과" };
+            // 无论是超时还是调用方取消，都表示"结果未知" —— 不要一口咬定为失败。
+            return MeaningWriteResult.Transient with { Reason = "响应超时" };
         }
         catch (HttpRequestException ex)
         {
-            return MeaningWriteResult.Transient with { Reason = MeaningWriteResult.ReasonOf(ex.Message) }; // 네트워크는 다음에 될 수 있다
+            return MeaningWriteResult.Transient with { Reason = MeaningWriteResult.ReasonOf(ex.Message) }; // 网络下次可能就通了
         }
         catch (Exception ex)
         {
-            return MeaningWriteResult.Failed with { Reason = ex.GetType().Name }; // 의미는 부가 기능 — 가사에 영향이 없어야 한다
+            return MeaningWriteResult.Failed with { Reason = ex.GetType().Name }; // 意义只是附加功能 —— 不应影响歌词
         }
     }
 
-    // ---- 요청/응답 모델(필요한 필드만) ----
+    // ---- 请求/响应模型（仅保留需要的字段）----
 
     private sealed record GeminiRequest
     {
@@ -117,7 +117,7 @@ public sealed class GeminiMeaningWriter : IMeaningWriter
         public GeminiGenerationConfig? GenerationConfig { get; init; }
     }
 
-    /// <summary>출력 상한만 쓴다(<see cref="MeaningPrompt.MaxOutputTokens"/> 참고).</summary>
+    /// <summary>只使用输出上限（参见 <see cref="MeaningPrompt.MaxOutputTokens"/>）。</summary>
     private sealed record GeminiGenerationConfig
     {
         public int MaxOutputTokens { get; init; }

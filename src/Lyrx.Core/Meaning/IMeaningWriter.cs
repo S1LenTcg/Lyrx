@@ -3,21 +3,21 @@ using System.Text;
 namespace Musebase.Core.Meaning;
 
 /// <summary>
-/// 수집한 영어 원문들을 읽고 "이 곡이 무엇에 대한 노래인지"를 대상 언어로 써 준다.
+/// 读取收集到的英文原文，用目标语言写出"这首歌是关于什么的"。
 ///
-/// 번역이 아니라 **요약**이라 <see cref="Translation.ITranslator"/>로는 안 된다 — DeepL에 긴 영어
-/// bio를 넣으면 긴 한국어 문서가 나올 뿐 "의미"가 되지 않는다. 구현은 순수 HTTP + JSON이며
-/// 엔진은 <see cref="MeaningWriterRegistry"/>로 갈아끼운다(번역 엔진과 같은 구조).
+/// 这不是翻译而是**摘要**，所以用 <see cref="Translation.ITranslator"/> 不行 —— 把很长的英文
+/// bio 塞给 DeepL 只会得到一篇很长的韩语文档，成不了"含义"。实现是纯 HTTP + JSON，
+/// 引擎通过 <see cref="MeaningWriterRegistry"/> 替换（与翻译引擎结构相同）。
 ///
-/// 실패는 예외가 아니라 <see cref="MeaningWriteResult"/>다 — 의미는 부가 기능이고, 없다고
-/// 가사가 안 뜨면 안 된다. 다만 "일시적 실패"만은 구분해서 돌려준다(그쪽 설명 참고).
+/// 失败不是异常，而是 <see cref="MeaningWriteResult"/> —— 含义是附加功能，不能因为没有它
+/// 就不显示歌词。只是"暂时性失败"要单独区分返回（见那边的说明）。
 /// </summary>
 public interface IMeaningWriter
 {
-    /// <summary>레지스트리 id(예: "gemini"). 어떤 엔진으로 만들었는지 기록해 둔다.</summary>
+    /// <summary>注册表 id（例如 "gemini"）。记录是用哪个引擎生成的。</summary>
     string EngineId { get; }
 
-    /// <summary>실제로 호출한 모델 이름(재생성 판단·기록용).</summary>
+    /// <summary>实际调用的模型名称（用于判断是否重新生成、以及记录）。</summary>
     string Model { get; }
 
     Task<MeaningWriteResult> WriteAsync(
@@ -26,32 +26,32 @@ public interface IMeaningWriter
 }
 
 /// <summary>
-/// 엔진에 상관없이 같은 프롬프트를 쓴다 — 모델을 바꿔도 결과의 성격이 흔들리지 않게 하고,
-/// 두 엔진의 출력을 나란히 비교할 수 있게 하기 위해서다.
+/// 无论哪个引擎都使用同一份提示词 —— 为了让换模型时结果的性质不漂移，
+/// 也为了能把两个引擎的输出并排比较。
 /// </summary>
 public static class MeaningPrompt
 {
-    /// <summary>원문이 아무리 길어도 이 길이까지만 넣는다(토큰 폭주 방지).</summary>
+    /// <summary>无论原文多长，最多只放这么长（防止 token 爆炸）。</summary>
     public const int MaxSourceChars = 6000;
 
     /// <summary>
-    /// 출력 상한. 3~5문장이면 충분하고, 넉넉히 잡아도 이 정도다.
-    /// **반드시 요청에 실어야 한다** — 상한을 안 보내면 공급자가 모델 최대치를 예약하려 들어
-    /// 잔액이 적은 계정에서 402로 거절당한다(OpenRouter 실측). 비용 폭주 방지이기도 하다.
+    /// 输出上限。3~5 句就够了，即使放宽也差不多是这个量。
+    /// **必须随请求一起发送** —— 不发送上限时，供方会按模型最大值去预留，
+    /// 余额较少的账号会被 402 拒掉（OpenRouter 实测）。同时也是防止费用爆炸。
     /// </summary>
     public const int MaxOutputTokens = 1200;
 
     /// <summary>
-    /// 마지막 문장이 이 프롬프트의 핵심이다 — 자료가 부족할 때 모델이 지어내지 않고
-    /// "부족하다"고 쓰게 만든다. 곡 해설은 그럴듯한 창작이 특히 쉬운 영역이다.
+    /// 最后一句是这个提示词的核心 —— 让模型在资料不足时不去编造，
+    /// 而是写出"资料不足"。歌曲解说恰恰是最容易编出像样内容的地方。
     /// </summary>
     public static string Build(
         string title, string artist, IReadOnlyList<MeaningSource> sources, string targetLang)
     {
         var language = LanguageName(targetLang);
         var sb = new StringBuilder();
-        sb.Append("다음은 한 곡에 대해 여러 웹 자료에서 모은 설명이다.\n\n");
-        sb.Append($"곡: {title}\n아티스트: {artist}\n\n");
+        sb.Append("以下是从多个网页资料中收集到的关于一首歌的说明。\n\n");
+        sb.Append($"歌曲: {title}\n艺术家: {artist}\n\n");
 
         var budget = MaxSourceChars;
         foreach (var source in sources)
@@ -63,28 +63,28 @@ public static class MeaningPrompt
         }
 
         sb.Append($"""
-            위 자료만 근거로, 이 곡이 무엇에 대한 노래인지 {language}로 3~5문장으로 써라.
+            仅以上述资料为依据，用 {language} 写 3~5 句话说明这首歌是关于什么的。
 
-            - 작곡 배경, 가사가 다루는 주제, 알려진 해석을 중심으로 쓴다.
-            - 자료에 없는 내용은 절대 지어내지 않는다. 추측하지 않는다.
-            - 자료가 부족해 이 곡이 무엇에 대한 노래인지 말할 수 없으면, 첫 줄에 정확히
-              [자료부족] 이라고 쓰고 그 뒤에 이유를 한 문장으로만 쓴다. 억지로 채우지 않는다.
-            - 차트 성적·수상 이력 같은 곡의 의미와 무관한 사실은 넣지 않는다.
-            - 자료에 인용문이나 개인적 감상("내가 밴드에 들어온 뒤…", "정말 훌륭하다")이 섞여
-              있으면 그것을 객관적 서술처럼 옮기지 않는다. 곡이 무엇에 대한 노래인지만 쓴다.
-            - 출처 이름에 "AI 분석"이 붙은 자료는 기계가 가사를 해석한 것이라 사실 근거가 약하다.
-              다른 자료와 어긋나면 다른 자료를 따르고, 그것만 있을 때는 단정하지 않는다.
-            - 머리말 없이 본문만 쓴다.
+            - 以创作背景、歌词涉及的主题、已有的解读为中心来写。
+            - 资料中没有的内容绝不编造。不做猜测。
+            - 如果资料不足、无法说明这首歌是关于什么的，就在第一行准确写出
+              [자료부족]，然后后面只用一句话写原因。不要硬凑。
+            - 不要放入榜单成绩、获奖经历这类与歌曲含义无关的事实。
+            - 如果资料里混有引语或个人感想（"我加入乐队以后……"、"真的很棒"），
+              不要把它当成客观叙述照搬。只写这首歌是关于什么的。
+            - 来源名称带 "AI 分析"的资料是机器对歌词的解读，事实依据较弱。
+              与其他资料冲突时以其他资料为准；只有它时不要下断言。
+            - 不要前言，只写正文。
             """);
         return sb.ToString();
     }
 
     private static string LanguageName(string code) => code.ToLowerInvariant() switch
     {
-        "ko" => "한국어",
-        "ja" => "일본어",
-        "en" => "영어",
-        "zh" or "zh-hans" or "zh-hant" => "중국어",
+        "ko" => "韩语",
+        "ja" => "日语",
+        "en" => "英语",
+        "zh" or "zh-hans" or "zh-hant" => "中文",
         _ => code,
     };
 }

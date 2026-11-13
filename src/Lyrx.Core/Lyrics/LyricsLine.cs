@@ -1,18 +1,18 @@
 namespace Musebase.Core;
 
 /// <summary>
-/// 타임태그 1개에 대응하는 가사 한 줄. LyricsKit의 LyricsLine 포팅.
+/// 对应一个时间标签的一行歌词。LyricsKit 的 LyricsLine 移植。
 /// </summary>
 public sealed class LyricsLine
 {
     public string Content { get; set; }
 
-    /// <summary>곡 시작 기준 위치(초)</summary>
+    /// <summary>相对歌曲起点的位置（秒）</summary>
     public double Position { get; set; }
 
     public LineAttachments Attachments { get; }
 
-    /// <summary>필터로 제외된 라인은 false (광고 문구 등)</summary>
+    /// <summary>被过滤排除的行为 false（广告文案等）</summary>
     public bool Enabled { get; set; } = true;
 
     public LyricsLine(string content, double position, LineAttachments? attachments = null)
@@ -22,7 +22,7 @@ public sealed class LyricsLine
         Attachments = attachments ?? new LineAttachments();
     }
 
-    /// <summary>[mm:ss.fff] 형식 타임태그 문자열</summary>
+    /// <summary>[mm:ss.fff] 格式的时间标签字符串</summary>
     public string TimeTag
     {
         get

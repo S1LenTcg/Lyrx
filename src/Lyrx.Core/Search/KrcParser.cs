@@ -7,9 +7,9 @@ using System.Text.RegularExpressions;
 namespace Musebase.Core.Search;
 
 /// <summary>
-/// Kugou KRC 본문 파서. LyricsKit의 KugouKrcParser.swift 포팅.
-/// [startMs,durationMs]본문 라인과 글자단위 &lt;t1,t2,0&gt; 인라인 태그를 해석하고,
-/// [language:base64] 헤더의 번역(type==1)을 라인에 병합한다.
+/// Kugou KRC 正文解析器。LyricsKit 的 KugouKrcParser.swift 移植。
+/// 解析 [startMs,durationMs]正文行与逐字 &lt;t1,t2,0&gt; 内联标签，
+/// 并把 [language:base64] 头里的译文(type==1)合并到行上。
 /// </summary>
 internal static class KrcParser
 {
@@ -62,7 +62,7 @@ internal static class KrcParser
         foreach (var (k, v) in idTags) lyrics.IdTags[k] = v;
         lyrics.Metadata.AttachmentTags = new HashSet<string> { LineAttachments.TagTimeTag };
 
-        // type == 1: 번역, type == 0: 발음(로마자). 번역만 첨부한다.
+        // type == 1: 译文, type == 0: 发音(罗马字)。只附加译文。
         var trans = languageHeader?.Content?.FirstOrDefault(c => c.Type == 1);
         if (trans?.LyricContent is { } lyricContent)
         {

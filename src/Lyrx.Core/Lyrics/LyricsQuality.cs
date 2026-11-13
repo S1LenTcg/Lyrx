@@ -1,9 +1,9 @@
 namespace Musebase.Core;
 
 /// <summary>
-/// 가사 후보 품질 산정. LyricsKit의 Lyrics+Quality.swift 포팅.
-/// 아티스트/제목/길이 유사도의 가중 평균에 번역·글자단위 타임태그 보너스,
-/// 원치 않는 반주(Instrumental/Karaoke) 변형 페널티를 적용한다.
+/// 歌词候选质量评分。LyricsKit 的 Lyrics+Quality.swift 移植。
+/// 在歌手/标题/时长相似度的加权平均之上，加上翻译与字符级时间标签的奖励，
+/// 并对不想要的伴奏（Instrumental/Karaoke）变体施加惩罚。
 /// </summary>
 public static class LyricsQuality
 {
@@ -27,7 +27,7 @@ public static class LyricsQuality
         "acapella", "a capella",
     ];
 
-    /// <summary>0~1(+보너스) 품질 점수. 결과는 Metadata에 캐시된다.</summary>
+    /// <summary>0~1（可含奖励）的质量得分。结果会缓存到 Metadata。</summary>
     public static double Quality(this Lyrics lyrics)
     {
         if (lyrics.Metadata.Quality is { } cached) return cached;
@@ -45,11 +45,11 @@ public static class LyricsQuality
         return quality;
     }
 
-    /// <summary>번역이 붙은 라인이 하나라도 있는가</summary>
+    /// <summary>是否至少有一行带有翻译</summary>
     public static bool HasTranslation(this Lyrics lyrics) =>
         lyrics.Lines.Any(l => l.Attachments.Translation() is not null);
 
-    /// <summary>제목·아티스트가 검색어와 (포함 관계 수준으로) 일치하는가 — 캐시 히트 판정용</summary>
+    /// <summary>标题与歌手是否与搜索词（达到包含关系级别）匹配 —— 用于判定缓存命中</summary>
     public static bool IsMatched(this Lyrics lyrics)
     {
         var artist = lyrics.IdTags.GetValueOrDefault(Lyrics.TagArtist);
@@ -131,7 +131,7 @@ public static class LyricsQuality
         return s1.Contains(s2) || s2.Contains(s1);
     }
 
-    /// <summary>대칭 유사도: 짧은 쪽 길이 기준, 삽입 또는 삭제 무료 중 유리한 쪽</summary>
+    /// <summary>对称相似度：以较短一方的长度为基准，在“插入免费”与“删除免费”中取更有利的一侧</summary>
     internal static double Similarity(string s1, string s2)
     {
         var len = Math.Min(s1.Length, s2.Length);
@@ -142,7 +142,7 @@ public static class LyricsQuality
         return Math.Clamp((double)(len - diff) / len, 0.0, 1.0);
     }
 
-    /// <summary>포함 유사도: s1이 검색 키워드(s2) 안에 얼마나 들어있는가</summary>
+    /// <summary>包含相似度：s1 有多少内容落在搜索关键词（s2）之中</summary>
     internal static double ContainmentSimilarity(string s1, string s2)
     {
         var len = Math.Max(s1.Length, s2.Length);
@@ -151,7 +151,7 @@ public static class LyricsQuality
         return Math.Clamp((double)(len - diff) / len, 0.0, 1.0);
     }
 
-    /// <summary>가변 비용 편집 거리 (Swift 원본의 DP 알고리즘 그대로)</summary>
+    /// <summary>可变代价编辑距离（与 Swift 原版的 DP 算法完全一致）</summary>
     internal static int EditDistance(string s1, string s2, int substitutionCost = 1, int insertionCost = 1, int deletionCost = 1)
     {
         var d = new int[s2.Length + 1];

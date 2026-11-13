@@ -4,8 +4,8 @@ using Musebase.Core.Translation;
 namespace Musebase.Engine;
 
 /// <summary>
-/// 플랫폼 무관 엔진 구성값. 설정(App)에서 채워 팩토리에 넘긴다.
-/// Windows/Android/서버가 같은 구성으로 코디네이터를 조립한다.
+/// 与平台无关的引擎配置值。由设置层（App）填充后交给工厂。
+/// Windows/Android/服务端都用同一份配置组装协调器。
 /// </summary>
 public sealed record EngineConfig(
     IReadOnlyList<string> EnabledLyricsSources,
@@ -15,27 +15,27 @@ public sealed record EngineConfig(
     bool ShowOnlyTargetTranslation,
     double ManualOffsetSeconds,
     string CacheDbPath,
-    // 주 번역 엔진 실패 시 폴백할 엔진 id(예: "libretranslate"). null=폴백 없음.
+    // 主翻译引擎失败时用于回退的引擎 id（例如 "libretranslate"）。null=不回退。
     string? TranslationFallbackEngineId = null,
-    // false면 번역 API를 호출하지 않고 캐시된 번역만 표시한다(유료 API 사용량 차단 토글).
-    // 엔진/키 설정은 그대로 유지되므로 다시 켜면 즉시 원래대로 동작한다.
+    // 为 false 时不调用翻译 API，只显示已缓存的翻译（付费 API 用量拦截开关）。
+    // 引擎/密钥设置保持不变，所以重新开启后立即恢复原样工作。
     bool ApiTranslationEnabled = true,
-    // 개인 가사 서버(선택). 비면 사용하지 않는다 — 계약은 contracts/lyrics-api.md.
+    // 个人歌词服务器（可选）。为空则不使用 —— 协议见 contracts/lyrics-api.md。
     string? LyricsServerEndpoint = null,
     string? LyricsServerToken = null,
     int LyricsServerTimeoutMs = 2500);
 
 /// <summary>
-/// 코어 서비스(가사 검색·번역·캐시)를 조합해 <see cref="LyricsCoordinator"/>를 만드는
-/// 단일 조립 지점. Program의 뚱뚱한 배선을 대체하고, 동일 조합을 다른 플랫폼이 재사용한다.
-/// 소스/엔진은 레지스트리에서 구성값에 따라 선택된다.
+/// 把核心服务（歌词搜索、翻译、缓存）组合成 <see cref="LyricsCoordinator"/> 的
+/// 唯一装配点。取代 Program 里臃肿的接线，同一组合可被其他平台复用。
+/// 来源/引擎按配置值从注册表中选择。
 /// </summary>
 public static class LyricsEngineFactory
 {
     /// <summary>
-    /// 구성·캐시로 번역 서비스를 만든다(엔진/키 변경 시 재구성용으로도 사용).
-    /// 주 엔진 + (설정 시)폴백 엔진을 CompositeTranslator로 묶어, 주 엔진 실패 시
-    /// 폴백으로 번역을 유지한다. 실패는 <paramref name="onFailure"/>로 보고(로깅·상태 힌트용).
+    /// 用配置与缓存创建翻译服务（引擎/密钥变更时也用它重新构建）。
+    /// 把主引擎 +（设置时）回退引擎用 CompositeTranslator 包起来，主引擎失败时
+    /// 由回退保持翻译。失败通过 <paramref name="onFailure"/> 上报（用于日志、状态提示）。
     /// </summary>
     public static LyricsTranslationService BuildTranslation(
         EngineConfig config, ITranslationCache cache, Action<TranslatorFailure>? onFailure = null)
@@ -44,8 +44,8 @@ public static class LyricsEngineFactory
         if (TranslatorRegistry.Build(config.TranslationEngineId, config.TranslatorOptions) is { } primary)
             chain.Add((config.TranslationEngineId, primary));
 
-        // 번역을 끈 기기(none)는 폴백도 없다 — 폴백만으로 체인을 만들면 "끔인데 공개 서버로
-        // 번역되는" 상태가 된다. 가사 서버가 있는 새 설치의 기본값이 none이라 더 중요하다.
+        // 关掉翻译的设备（none）也没有回退 —— 只用回退搭建链会变成"已关闭却
+        // 从公开服务器翻译"的状态。有歌词服务器的新安装默认值是 none，所以这一点更重要。
         var fallbackId = string.Equals(config.TranslationEngineId, TranslatorRegistry.None, StringComparison.OrdinalIgnoreCase)
             ? null
             : config.TranslationFallbackEngineId;
@@ -54,19 +54,19 @@ public static class LyricsEngineFactory
             TranslatorRegistry.Build(fallbackId!, config.TranslatorOptions) is { } fb)
             chain.Add((fallbackId!, fb));
 
-        // 체인이 비면(엔진 none/키 없음) 번역기 없음 = 서비스 비활성.
+        // 链为空时（引擎 none / 无密钥）没有翻译器 = 服务不启用。
         ITranslator? translator = chain.Count == 0 ? null : new CompositeTranslator(chain, onFailure);
         return new LyricsTranslationService(translator, cache)
         {
-            EngineId = config.TranslationEngineId, // translation 텔레메트리의 engine 식별용
-            // API 번역 끔 → 캐시된 번역만 채우고 새 요청은 보내지 않는다(엔진/키 설정은 보존).
+            EngineId = config.TranslationEngineId, // 用于 translation 遥测的 engine 标识
+            // 关闭 API 翻译 → 只填充已缓存的翻译，不发送新请求（引擎/密钥设置保留）。
             CacheOnly = !config.ApiTranslationEnabled,
         };
     }
 
     /// <summary>
-    /// 재생 소스·디스패처·구성으로 완전 배선된 코디네이터를 만든다.
-    /// <paramref name="telemetry"/> 미주입(null) 시 NoopTelemetry — 수집하지 않는다(ADR-0004).
+    /// 用播放来源、调度器与配置创建完全接好线的协调器。
+    /// <paramref name="telemetry"/> 未注入（null）时为 NoopTelemetry —— 不收集（ADR-0004）。
     /// </summary>
     public static LyricsCoordinator Create(
         INowPlayingSource source,
@@ -93,9 +93,9 @@ public static class LyricsEngineFactory
     }
 
     /// <summary>
-    /// 가사 서버 구성을 (재)적용한다 — 주소/토큰 변경 시 호출(설정 저장 등). 주소가 비면 끈다.
-    /// <see cref="LyricsCoordinator.RemoteCache"/>가 가변 속성이라 **재시작이 필요 없다**
-    /// (가사 소스 목록은 생성자 주입이라 재시작이 필요한 것과 대조적).
+    /// （重新）应用歌词服务器配置 —— 地址/令牌变更时调用（保存设置等）。地址为空则关闭。
+    /// <see cref="LyricsCoordinator.RemoteCache"/> 是可变属性，所以**无需重启**
+    /// （与歌词来源列表是构造函数注入、必须重启形成对照）。
     /// </summary>
     public static void ApplyServer(LyricsCoordinator coordinator, EngineConfig config, Action<string>? log = null)
     {
@@ -110,20 +110,20 @@ public static class LyricsEngineFactory
         {
             coordinator.RemoteCache = new HttpRemoteLyricsCache(
                 endpoint!.Trim(), config.LyricsServerToken, config.LyricsServerTimeoutMs, log);
-            log?.Invoke($"[server] 가사 서버 사용: {endpoint!.Trim()}");
+            log?.Invoke($"[server] 使用歌词服务器: {endpoint!.Trim()}");
         }
         catch (Exception e)
         {
-            // 주소 형식 오류 등 — 서버 없이 동작한다(기능 강등이지 오류가 아니다).
+            // 地址格式错误等 —— 在没有服务器的情况下继续工作（这是功能降级而非错误）。
             coordinator.RemoteCache = null;
-            log?.Invoke($"[server] 주소가 올바르지 않아 사용하지 않습니다: {e.Message}");
+            log?.Invoke($"[server] 地址无效，因此不使用: {e.Message}");
         }
     }
 
     /// <summary>
-    /// 코디네이터의 번역 구성을 (재)적용한다 — 엔진/키/대상 언어 변경 시 호출(설정 저장 등).
-    /// 번역기 실패를 코디네이터(번역 표시 상태)와 App(로깅·힌트) 양쪽으로 라우팅하고,
-    /// 현재 라인을 즉시 재발행해 새 번역/상태가 바로 반영되게 한다.
+    /// （重新）应用协调器的翻译配置 —— 引擎/密钥/目标语言变更时调用（保存设置等）。
+    /// 把翻译器失败同时路由到协调器（翻译显示状态）和 App（日志、提示），
+    /// 并立即重新发布当前行，让新的翻译/状态马上反映出来。
     /// </summary>
     public static void ApplyTranslation(
         LyricsCoordinator coordinator,

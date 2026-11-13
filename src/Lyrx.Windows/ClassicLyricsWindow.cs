@@ -26,7 +26,7 @@ internal sealed class ClassicLyricsWindow : Window
     private static readonly Color DefaultBackground = Color.FromRgb(51, 51, 51);
     private static readonly Color DefaultSubdued = Color.FromRgb(179, 179, 179);
     private static readonly Brush Muted = new SolidColorBrush(DefaultSubdued);
-    private static readonly KeySpline ScrollSpline = new(0.42, 0, 0.58, 1);
+    private static readonly KeySpline ScrollSpline = new(0.16, 1.0, 0.3, 1.0);
     private static readonly IEasingFunction TranslationEase = new CubicEase { EasingMode = EasingMode.EaseOut };
     private static readonly DependencyProperty FollowOffsetProperty = DependencyProperty.Register(
         "FollowOffset", typeof(double), typeof(ClassicLyricsWindow),
@@ -45,7 +45,7 @@ internal sealed class ClassicLyricsWindow : Window
     private readonly LyricsCoordinator _coordinator;
     private readonly NowPlayingService _player;
     private readonly AppSettings _settings;
-    private readonly DispatcherTimer _timer = new() { Interval = TimeSpan.FromMilliseconds(50) };
+    private readonly DispatcherTimer _timer = new() { Interval = TimeSpan.FromMilliseconds(25) };
     private readonly StackPanel _lines = new();
     private readonly ScrollViewer _scroll;
     private readonly Border _panel;
@@ -77,15 +77,14 @@ internal sealed class ClassicLyricsWindow : Window
     private bool _manualScroll;
     private bool _resumeScrollPending;
     private bool _transportPending;
-    private bool _seekPending;
-    private TrackInfo? _scrubTrack;
-    private double _seekPreview;
-    private long _holdSeekUntil;
     private bool _isFullscreen;
     private Rect _restoreBounds;
     private bool _wasMaximized;
     private bool _isAnimatingTranslation;
     private bool _waitingForTranslationAnimation;
+    private bool _latinMetrics;
+    private double _lineHeightScale = 1.0;
+    private double _rowGapScale = 1.0;
     private LyricRow? _translationAnchorRow;
     private double _translationAnchorViewportY;
 
@@ -220,6 +219,7 @@ internal sealed class ClassicLyricsWindow : Window
         buttons.Children.Add(_repeat);
         transport.Children.Add(buttons);
 
+        // 时间轴只做展示：进度条不再可拖拽/点击（跳转功能已移除）。
         var timeline = new Grid { Margin = new Thickness(0, 2, 0, 0) };
         timeline.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(46) });
         timeline.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
@@ -230,15 +230,6 @@ internal sealed class ClassicLyricsWindow : Window
         timeline.Children.Add(_remaining);
         timeline.Children.Add(_progress);
         transport.Children.Add(timeline);
-        _progress.ScrubStarted += () => _scrubTrack = _track;
-        _progress.ScrubCancelled += () => { _scrubTrack = null; Refresh(); };
-        ToolTipService.SetShowOnDisabled(_progress, true);
-        _progress.SeekRequested += async seconds =>
-        {
-            var track = _scrubTrack ?? _track;
-            _scrubTrack = null;
-            if (track is not null) await SeekToAsync(track, seconds);
-        };
 
         _scroll = new ScrollViewer
         {
@@ -278,7 +269,9 @@ internal sealed class ClassicLyricsWindow : Window
         var syncMenu = new ContextMenu();
         foreach (var (label, offset) in new (string, double?)[]
         {
-            ("歌词提前 0.5 秒", 0.5), ("歌词延后 0.5 秒", -0.5), ("重置歌词时间偏移", null),
+            ("歌词提前 0.2 秒", 0.2), ("歌词延后 0.2 秒", -0.2),
+            ("歌词提前 0.5 秒", 0.5), ("歌词延后 0.5 秒", -0.5),
+            ("重置歌词时间偏移", null),
         })
         {
             var item = new MenuItem { Header = label };
@@ -332,7 +325,7 @@ internal sealed class ClassicLyricsWindow : Window
                 ToggleFullscreen();
                 e.Handled = true;
             }
-            else if (e.Key == Key.Escape && _isFullscreen && !_progress.IsScrubbing)
+            else if (e.Key == Key.Escape && _isFullscreen)
             {
                 SetFullscreen(false);
                 e.Handled = true;
@@ -438,9 +431,8 @@ internal sealed class ClassicLyricsWindow : Window
         if (trackChanged)
         {
             _track = track;
-            _holdSeekUntil = default;
-            _scrubTrack = null;
-            _progress.CancelScrub();
+            _activeIndex = -1;
+            CancelScrollAnimation();
             _title.Text = track?.Title ?? "等待播放";
             _artist.Text = track?.Artist ?? "";
             _cover.Source = null;
@@ -482,25 +474,21 @@ internal sealed class ClassicLyricsWindow : Window
         }
 
         var position = track is null ? null : _player.GetEstimatedPosition();
-        var duration = track?.Duration;
+        var duration = track?.Duration ?? (lyrics?.Length > 0 ? TimeSpan.FromSeconds(lyrics.Length.Value) : (lyrics?.Lines.Count > 0 ? TimeSpan.FromSeconds(lyrics.Lines[^1].Position + 15) : null));
         if (position is { } p) position = TimeSpan.FromTicks(Math.Clamp(p.Ticks, 0, Math.Max(0, duration?.Ticks ?? long.MaxValue)));
         var state = _player.GetTransportState();
         UpdateTransport(state);
-        _progress.IsEnabled = state.CanSeek && duration is { TotalSeconds: > 0 } && !_seekPending;
-        _progress.ToolTip = _progress.IsEnabled ? "拖动或点击跳转" : "当前播放器未提供进度跳转";
-        _progress.Maximum = duration is { TotalSeconds: > 0 } length ? length.TotalSeconds : 1;
 
-        var awaitingPosition = Environment.TickCount64 < _holdSeekUntil &&
-            (position is null || Math.Abs(position.Value.TotalSeconds - _seekPreview) > 1.2);
-        var displayed = position;
-        if (_progress.IsScrubbing) displayed = TimeSpan.FromSeconds(_progress.Value);
-        else if (awaitingPosition) displayed = TimeSpan.FromSeconds(_seekPreview);
-        else _holdSeekUntil = default;
-        if (!_progress.IsScrubbing) _progress.Value = displayed?.TotalSeconds ?? 0;
-        _elapsed.Text = displayed is { } elapsed ? FormatTime(elapsed) : "–:––";
-        _remaining.Text = duration is { } total && displayed is { } current ? $"−{FormatTime(total - current)}" : "–:––";
+        // 进度条只反映真实播放位置：不拖拽、不点击、不预览。
+        var total = duration is { TotalSeconds: > 0 } known ? known : (TimeSpan?)null;
+        _progress.Maximum = total?.TotalSeconds ?? 1;
+        _progress.Value = Math.Clamp(position?.TotalSeconds ?? 0, 0, _progress.Maximum);
 
-        if (awaitingPosition) position = displayed;
+        _elapsed.Text = position is { } elapsed ? FormatTime(elapsed) : "–:––";
+        _remaining.Text = total is { } remainingTotal && position is { } current
+            ? $"−{FormatTime(remainingTotal - current)}"
+            : "–:––";
+
         if (lyrics is null || position is null) return;
 
         var adjusted = position.Value.TotalSeconds + lyrics.TimeDelay + _coordinator.ManualOffsetSeconds;
@@ -510,16 +498,38 @@ internal sealed class ClassicLyricsWindow : Window
         {
             var previousIndex = _activeIndex;
             _activeIndex = index;
-            foreach (var (rowIndex, row) in _rows)
-            {
-                if (rowIndex < Math.Min(previousIndex, index) || rowIndex > Math.Max(previousIndex, index)) continue;
-                SetRowColor(row, RowColor(rowIndex), animate: true);
-                AutomationProperties.SetItemStatus(row, rowIndex == index ? "当前歌词" : "");
-            }
-            _resumeScrollPending = true;
-        }
+            var isSequentialStep = previousIndex >= 0 && (index == previousIndex + 1);
 
-        if (_resumeScrollPending && !_manualScroll && !_isAnimatingTranslation) FollowActiveLine();
+            if (!isSequentialStep)
+            {
+                // 任意跳转 / 切歌 / 拖拽进度：瞬时对齐所有行，防止动画冲突与抽搐（鬼畜）
+                CancelScrollAnimation();
+                foreach (var (rowIndex, row) in _rows)
+                {
+                    SetRowVisual(row, rowIndex, animate: false);
+                    AutomationProperties.SetItemStatus(row, rowIndex == index ? "当前歌词" : "");
+                }
+                if (!_manualScroll && !_isAnimatingTranslation)
+                    FollowActiveLine(animate: false);
+            }
+            else
+            {
+                // 正常单句过渡：丝滑过渡（上一句淡出收拢，当前句呼吸放大点亮）
+                SetRowVisual(_rows.GetValueOrDefault(previousIndex), previousIndex, animate: true);
+                if (_rows.TryGetValue(index, out var currentRow))
+                {
+                    SetRowVisual(currentRow, index, animate: true);
+                    AutomationProperties.SetItemStatus(currentRow, "当前歌词");
+                }
+                if (!_manualScroll && !_isAnimatingTranslation)
+                    FollowActiveLine(animate: true);
+            }
+            _resumeScrollPending = false;
+        }
+        else if (_resumeScrollPending && !_manualScroll && !_isAnimatingTranslation)
+        {
+            FollowActiveLine(animate: false);
+        }
     }
 
     private void UpdateTransport(TransportState state)
@@ -552,26 +562,6 @@ internal sealed class ClassicLyricsWindow : Window
         AutomationProperties.SetName(button, text);
     }
 
-    private async Task SeekToAsync(TrackInfo track, double seconds)
-    {
-        if (_seekPending || !Equals(track, _track) || !double.IsFinite(seconds)) return;
-        _seekPending = true;
-        _seekPreview = Math.Clamp(seconds, 0, track.Duration?.TotalSeconds ?? TimeSpan.MaxValue.TotalSeconds - 1);
-        _holdSeekUntil = Environment.TickCount64 + 1500;
-        Refresh();
-        try
-        {
-            if (await _player.SeekAsync(track, TimeSpan.FromSeconds(_seekPreview)) && Equals(track, _track))
-                ResumeAutoScroll();
-            else _holdSeekUntil = default;
-        }
-        finally
-        {
-            _seekPending = false;
-            Refresh();
-        }
-    }
-
     public void ReloadLyricsDisplay()
     {
         Topmost = _settings.ClassicTopmost;
@@ -579,6 +569,8 @@ internal sealed class ClassicLyricsWindow : Window
         UpdateTranslateButton();
         SyncRowTranslations(animateIfNew: false);
         AnimateTranslation(_settings.ClassicShowTranslation ? 1d : 0d);
+        // 行距档位这类排版参数是在建行时应用的，所以必须重建一次行，否则要等下一首歌才生效
+        RenderLyrics(preserveScroll: true);
         Refresh();
         ViewStateChanged?.Invoke();
     }
@@ -718,7 +710,7 @@ internal sealed class ClassicLyricsWindow : Window
             _translationAnchorRow = null;
             BeginAnimation(TranslationProgressProperty, null);
             SetCurrentValue(TranslationProgressProperty, target);
-            if (_resumeScrollPending && !_manualScroll) FollowActiveLine();
+            if (_resumeScrollPending && !_manualScroll) FollowActiveLine(animate: false);
         };
         BeginAnimation(TranslationProgressProperty, animation);
     }
@@ -793,8 +785,12 @@ internal sealed class ClassicLyricsWindow : Window
         }
 
         var progress = CurrentTranslationProgress;
+        var (lineScale, gapScale) = _settings.LineSpacingScales;
+        _lineHeightScale = lineScale;
+        _rowGapScale = gapScale;
         if (_lyrics is { } lyrics)
         {
+            _latinMetrics = IsMostlyLatin(lyrics);
             for (var i = 0; i < lyrics.Lines.Count; i++)
             {
                 var line = lyrics.Lines[i];
@@ -802,30 +798,6 @@ internal sealed class ClassicLyricsWindow : Window
                 var mainText = string.IsNullOrWhiteSpace(line.Content) ? "♪" : line.Content;
                 var subText = ExtractTranslation(line);
                 var row = NewLine(mainText, subText, progress);
-                if (_track is { } track)
-                {
-                    var index = i;
-                    row.MouseEnter += (_, _) =>
-                    {
-                        if (!_player.CanSeek) return;
-                        row.Cursor = Cursors.Hand;
-                        row.SetUnderline(true);
-                        SetRowColor(row, Colors.White, animate: true);
-                    };
-                    row.MouseLeave += (_, _) =>
-                    {
-                        row.Cursor = Cursors.Arrow;
-                        row.SetUnderline(false);
-                        SetRowColor(row, RowColor(index), animate: true);
-                    };
-                    row.MouseLeftButtonUp += async (_, _) =>
-                    {
-                        if (!ReferenceEquals(_lyrics, lyrics)) return;
-                        var seconds = Math.Max(0, line.Position - lyrics.TimeDelay - _coordinator.ManualOffsetSeconds);
-                        if (!double.IsFinite(seconds) || seconds >= TimeSpan.MaxValue.TotalSeconds) return;
-                        await SeekToAsync(track, seconds);
-                    };
-                }
                 _rows.Add(i, row);
                 _lines.Children.Add(row);
             }
@@ -839,20 +811,49 @@ internal sealed class ClassicLyricsWindow : Window
                 LyricsStatusKind.HiddenByUser => "这首歌的歌词已隐藏",
                 _ => "正在查找歌词…",
             };
-            _lines.Children.Add(NewLine(message));
+            var emptyRow = NewLine(message);
+            emptyRow.Opacity = 1.0;
+            _lines.Children.Add(emptyRow);
         }
         else if (preserveScroll && _activeIndex >= 0)
         {
             foreach (var (rowIndex, row) in _rows)
-                SetRowColor(row, RowColor(rowIndex), animate: false);
+                SetRowVisual(row, rowIndex, animate: false);
             if (!_manualScroll && !_isAnimatingTranslation)
-                _ = Dispatcher.BeginInvoke(DispatcherPriority.Loaded, FollowActiveLine);
+                _ = Dispatcher.BeginInvoke(DispatcherPriority.Loaded, () => FollowActiveLine(animate: false));
         }
         ResizeLyrics();
     }
 
-    private LyricRow NewLine(string text, string? translation = null, double progress = 0d) =>
-        new(text, translation, _subdued, progress);
+    private LyricRow NewLine(string text, string? translation = null, double progress = 0d)
+    {
+        var row = new LyricRow(text, translation, _subdued, progress, _latinMetrics)
+        {
+            LineHeightScale = _lineHeightScale,
+            GapScale = _rowGapScale,
+        };
+        return row;
+    }
+
+    /// <summary>
+    /// 判断整首歌词是否以拉丁字母为主。英文歌用更松的行高/行距，
+    /// 中文、日文、韩文等方块字保持紧凑那套；中英混排时按字数占比取胜的一方。
+    /// </summary>
+    private static bool IsMostlyLatin(Lyrics lyrics)
+    {
+        var latin = 0;
+        var wide = 0;
+        foreach (var line in lyrics.Lines)
+        {
+            if (!line.Enabled) continue;
+            foreach (var c in line.Content)
+            {
+                if (c >= '\u2E80') wide++;            // CJK 汉字、假名、谚文、全角标点
+                else if (char.IsLetter(c)) latin++;
+            }
+        }
+        return latin > wide;
+    }
 
     private double CurrentMainFontSize()
     {
@@ -890,29 +891,36 @@ internal sealed class ClassicLyricsWindow : Window
         if (_resume.IsKeyboardFocused) _scroll.Focus();
     }
 
-    private void FollowActiveLine()
+    private void FollowActiveLine(bool animate = true)
     {
         _resumeScrollPending = false;
         if (!_rows.TryGetValue(_activeIndex, out var active))
         {
+            CancelScrollAnimation();
             _scroll.ScrollToTop();
             return;
         }
-        var y = active.Main.TranslatePoint(new Point(0, 0), _scroll).Y;
+
+        CancelScrollAnimation();
         var start = _scroll.VerticalOffset;
+        var y = active.Main.TranslatePoint(new Point(0, 0), _scroll).Y;
         var offset = Math.Clamp(start + y + (active.Main.ActualHeight - _scroll.ViewportHeight) / 2, 0, _scroll.ScrollableHeight);
         var distance = Math.Abs(offset - start);
         if (distance <= 1) return;
-        if (SystemParameters.ClientAreaAnimation)
+
+        if (animate && SystemParameters.ClientAreaAnimation)
         {
-            // Chromium's smooth programmatic scroll uses a distance-dependent ease-in-out.
-            var duration = TimeSpan.FromSeconds(Math.Min(Math.Sqrt(distance) / 60, 0.6));
+            var durationSeconds = Math.Clamp(0.45 + Math.Min(distance / 1500.0, 0.20), 0.45, 0.65);
+            var duration = TimeSpan.FromSeconds(durationSeconds);
             var animation = new DoubleAnimationUsingKeyFrames();
             animation.KeyFrames.Add(new LinearDoubleKeyFrame(start, KeyTime.FromTimeSpan(TimeSpan.Zero)));
             animation.KeyFrames.Add(new SplineDoubleKeyFrame(offset, KeyTime.FromTimeSpan(duration), ScrollSpline));
             BeginAnimation(FollowOffsetProperty, animation);
         }
-        else _scroll.ScrollToVerticalOffset(offset);
+        else
+        {
+            _scroll.ScrollToVerticalOffset(offset);
+        }
     }
 
     private void CancelScrollAnimation()
@@ -975,9 +983,12 @@ internal sealed class ClassicLyricsWindow : Window
                 EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseOut },
                 FillBehavior = FillBehavior.Stop,
             });
-        foreach (var (index, row) in _rows) SetRowColor(row, RowColor(index), animate: false);
+        foreach (var (index, row) in _rows) SetRowVisual(row, index, animate: false);
         if (_rows.Count == 0 && _lines.Children.Count > 0 && _lines.Children[0] is LyricRow emptyRow)
-            SetRowColor(emptyRow, subdued, animate: false);
+        {
+            emptyRow.Opacity = 1.0;
+            SetRowVisual(emptyRow, isActive: false, isPast: false, subdued, animate: false);
+        }
     }
 
     private Color RowColor(int index)
@@ -988,18 +999,18 @@ internal sealed class ClassicLyricsWindow : Window
             (byte)((_subdued.G + _background.G) / 2), (byte)((_subdued.B + _background.B) / 2));
     }
 
-    private static void SetRowColor(LyricRow row, Color color, bool animate)
+    private void SetRowVisual(LyricRow? row, int index, bool animate, bool isHovered = false)
     {
-        var brush = row.ForegroundBrush;
-        var current = brush.Color;
-        brush.BeginAnimation(SolidColorBrush.ColorProperty, null);
-        brush.Color = color;
-        if (animate && SystemParameters.ClientAreaAnimation && current != color)
-            brush.BeginAnimation(SolidColorBrush.ColorProperty, new ColorAnimation(current, color, TimeSpan.FromMilliseconds(100))
-            {
-                EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseOut },
-                FillBehavior = FillBehavior.Stop,
-            });
+        if (row is null) return;
+        var isActive = index == _activeIndex;
+        var isPast = index < _activeIndex;
+        var color = isHovered ? Colors.White : RowColor(index);
+        row.UpdateVisualState(isActive, isPast, color, animate, isHovered);
+    }
+
+    private static void SetRowVisual(LyricRow row, bool isActive, bool isPast, Color color, bool animate, bool isHovered = false)
+    {
+        row.UpdateVisualState(isActive, isPast, color, animate, isHovered);
     }
 
     private Button ChromeButton(ClassicTransportIcon glyph, string label, Action onClick)
@@ -1025,18 +1036,19 @@ internal sealed class ClassicLyricsWindow : Window
         return button;
     }
 
+    /// <summary>歌词面板上、左、右三条黑边的宽度；三者共用同一个值，保证看起来完全一致。</summary>
+    private const double PanelChromeGap = 6;
+
+    /// <summary>
+    /// 歌词面板与窗口边缘之间的留白。
+    /// 只保留上/左/右三条边（底边贴住播放控制条，不再留缝），三条边共用
+    /// <see cref="PanelChromeGap"/>，所以宽度一致且很窄；圆角保持 0，
+    /// 否则四个角会额外露出三角形底色，看着就像边变粗了。
+    /// </summary>
     private void UpdatePanelFrame()
     {
-        if (_isFullscreen)
-        {
-            _panel.Margin = new Thickness(0);
-            _panel.CornerRadius = new CornerRadius(0);
-            return;
-        }
-        var side = ActualWidth < 600 ? 6 : 10;
-        var bottom = ActualWidth < 600 ? 4 : 6;
-        _panel.Margin = new Thickness(side, 16, side, bottom);
-        _panel.CornerRadius = new CornerRadius(8);
+        _panel.Margin = new Thickness(PanelChromeGap, PanelChromeGap, PanelChromeGap, 0);
+        _panel.CornerRadius = new CornerRadius(0);
     }
 
     private void ToggleFullscreen() => SetFullscreen(!_isFullscreen);
@@ -1091,7 +1103,7 @@ internal sealed class ClassicLyricsWindow : Window
         }
         catch (Exception)
         {
-            // 구버전 Windows 등 DWM 속성 미지원 환경에서는 조용히 무시
+            // 旧版 Windows 等不支持 DWM 属性的环境下静默忽略
         }
     }
 
@@ -1171,7 +1183,7 @@ internal sealed class ClassicLyricsWindow : Window
     {
         while (source is not null)
         {
-            if (source is ButtonBase or ClassicPlaybackSlider) return true;
+            if (source is ButtonBase) return true;
             if (source is LyricRow row && _rows.ContainsValue(row)) return true;
             source = source is Visual or System.Windows.Media.Media3D.Visual3D
                 ? VisualTreeHelper.GetParent(source)
@@ -1189,13 +1201,29 @@ internal sealed class ClassicLyricsWindow : Window
         public string? TranslationText { get; private set; }
         public bool HasTranslation => _slot is not null;
 
+        private readonly ScaleTransform _scale = new(1.0, 1.0);
         private TranslationSlot? _slot;
         private TextBlock? _sub;
         private TranslateTransform? _subTranslate;
+        private double _mainSize = 24;
 
-        public LyricRow(string text, string? translation, Color initialColor, double progress)
+        /// <summary>整首歌词是否以拉丁字母为主（英文等）。决定行高与行间距口径。</summary>
+        private readonly bool _latinMetrics;
+
+        /// <summary>用户在设置里选的行距档位倍率（1.0 = 标准）。</summary>
+        public double LineHeightScale { get; set; } = 1.0;
+        public double GapScale { get; set; } = 1.0;
+
+        private static readonly IEasingFunction VisualEase = new CubicEase { EasingMode = EasingMode.EaseOut };
+        private static readonly TimeSpan VisualDuration = TimeSpan.FromMilliseconds(450);
+
+        public LyricRow(string text, string? translation, Color initialColor, double progress, bool latinMetrics)
         {
+            _latinMetrics = latinMetrics;
             Background = Brushes.Transparent;
+            RenderTransformOrigin = new Point(0, 0.5);
+            RenderTransform = _scale;
+            Opacity = 0.72;
             ForegroundBrush = new SolidColorBrush(initialColor);
             Main = new TextBlock
             {
@@ -1209,6 +1237,60 @@ internal sealed class ClassicLyricsWindow : Window
             SetTranslation(translation, progress);
         }
 
+        public void UpdateVisualState(bool isActive, bool isPast, Color targetColor, bool animate, bool isHovered = false)
+        {
+            var targetScale = isHovered ? (isActive ? 1.05 : 1.02) : (isActive ? 1.04 : 1.0);
+            var targetOpacity = isHovered ? 1.0 : (isActive ? 1.0 : (isPast ? 0.45 : 0.72));
+
+            if (animate && SystemParameters.ClientAreaAnimation)
+            {
+                if (Math.Abs(_scale.ScaleX - targetScale) > 0.001)
+                {
+                    var scaleAnim = new DoubleAnimation(_scale.ScaleX, targetScale, VisualDuration)
+                    {
+                        EasingFunction = VisualEase
+                    };
+                    _scale.BeginAnimation(ScaleTransform.ScaleXProperty, scaleAnim);
+                    _scale.BeginAnimation(ScaleTransform.ScaleYProperty, scaleAnim);
+                }
+
+                if (Math.Abs(Opacity - targetOpacity) > 0.001)
+                {
+                    var opacityAnim = new DoubleAnimation(Opacity, targetOpacity, VisualDuration)
+                    {
+                        EasingFunction = VisualEase
+                    };
+                    BeginAnimation(OpacityProperty, opacityAnim);
+                }
+
+                var current = ForegroundBrush.Color;
+                if (current != targetColor)
+                {
+                    ForegroundBrush.BeginAnimation(SolidColorBrush.ColorProperty, null);
+                    ForegroundBrush.Color = targetColor;
+                    var colorAnim = new ColorAnimation(current, targetColor, VisualDuration)
+                    {
+                        EasingFunction = VisualEase,
+                        FillBehavior = FillBehavior.Stop,
+                    };
+                    ForegroundBrush.BeginAnimation(SolidColorBrush.ColorProperty, colorAnim);
+                }
+            }
+            else
+            {
+                _scale.BeginAnimation(ScaleTransform.ScaleXProperty, null);
+                _scale.BeginAnimation(ScaleTransform.ScaleYProperty, null);
+                _scale.ScaleX = targetScale;
+                _scale.ScaleY = targetScale;
+
+                BeginAnimation(OpacityProperty, null);
+                Opacity = targetOpacity;
+
+                ForegroundBrush.BeginAnimation(SolidColorBrush.ColorProperty, null);
+                ForegroundBrush.Color = targetColor;
+            }
+        }
+
         public void SetTranslation(string? translation, double progress)
         {
             if (string.IsNullOrWhiteSpace(translation))
@@ -1220,6 +1302,7 @@ internal sealed class ClassicLyricsWindow : Window
                     _slot = null;
                     _sub = null;
                     _subTranslate = null;
+                    ApplySpacing(_mainSize);
                 }
                 return;
             }
@@ -1249,6 +1332,7 @@ internal sealed class ClassicLyricsWindow : Window
             };
             ApplyProgress(progress);
             Children.Add(_slot);
+            ApplySpacing(_mainSize);
         }
 
         public void ApplyProgress(double progress)
@@ -1273,18 +1357,39 @@ internal sealed class ClassicLyricsWindow : Window
             }
         }
 
+        /// <summary>
+        /// 行高与行间距按"整首歌词的主语言"取两套基准口径，再乘用户在设置里选的行距档位：
+        /// 中日韩方块字基准 1.32 行高 / 0.82 字号间距；英文等拉丁文本 1.45 / 1.00。
+        /// 英文有上下伸部、谚文有收音，都比汉字更需要行间留白，写死一套必然有一边发闷。
+        /// </summary>
         public void ApplySizing(double mainSize)
         {
+            _mainSize = mainSize;
             Main.FontSize = mainSize;
-            Main.LineHeight = mainSize * 1.2;
-            Margin = new Thickness(0, 0, 0, mainSize * 0.62);
+            Main.LineHeight = mainSize * (_latinMetrics ? 1.45 : 1.32) * LineHeightScale;
             if (_sub is not null)
             {
                 var subSize = Math.Max(14, Math.Round(mainSize * 0.56));
                 _sub.FontSize = subSize;
-                _sub.LineHeight = subSize * 1.3;
-                _sub.Margin = new Thickness(0, Math.Max(2, Math.Round(mainSize * 0.08)), 0, 0);
+                _sub.LineHeight = subSize * (_latinMetrics ? 1.4 : 1.34) * LineHeightScale;
             }
+            ApplySpacing(mainSize);
+        }
+
+        /// <summary>
+        /// 行间距放在“行内最后一个子元素”的下边距上，而不是 <see cref="FrameworkElement.Margin"/>
+        /// （那一份不属于本行的命中区域）。否则两行之间那条空白会落到窗口背景上，
+        /// 拖窗口与点击的分界就会错位。
+        /// </summary>
+        private void ApplySpacing(double mainSize)
+        {
+            Margin = new Thickness(0);
+            Main.Margin = new Thickness(0);
+            var gap = Math.Max(4, mainSize * (_latinMetrics ? 1.00 : 0.82) * GapScale);
+            if (_sub is not null)
+                _sub.Margin = new Thickness(0, Math.Max(2, Math.Round(mainSize * 0.08)), 0, gap);
+            else if (mainSize > 0)
+                Main.Margin = new Thickness(0, 0, 0, gap);
         }
 
         public void SetUnderline(bool underline)

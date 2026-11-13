@@ -7,7 +7,7 @@ using Musebase.Core.Search;
 
 namespace Musebase.Core.Translation;
 
-/// <summary>responseStatus가 숫자(200) 또는 문자열("200")로 오는 것을 모두 문자열로 읽는다.</summary>
+/// <summary>responseStatus 以数字（200）或字符串（"200"）形式出现时，都按字符串读取。</summary>
 internal sealed class FlexibleStringConverter : JsonConverter<string?>
 {
     public override string? Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options) =>
@@ -24,10 +24,10 @@ internal sealed class FlexibleStringConverter : JsonConverter<string?>
 }
 
 /// <summary>
-/// MyMemory 번역기(무키 무료·공식 API). 원문 언어는 <c>Autodetect</c>로 자동 감지한다.
-/// 익명 하루 한도(약 5000단어)가 있어, 소진 시 예외를 던져 상위 폴백/힌트가 동작하게 한다.
-/// 이메일(<see cref="TranslatorOptions.MyMemoryEmail"/>)을 주면 한도가 늘어난다(선택).
-/// 대상 언어는 DeepL식 코드(KO/EN-US/ZH-HANT)를 ISO 639-1(ko/en/zh)로 낮춰 전달한다.
+/// MyMemory 翻译器（免密钥免费·官方 API）。原文语言用 <c>Autodetect</c> 自动检测。
+/// 有匿名单日额度（约 5000 词），耗尽时抛异常，让上层的回退/提示得以生效。
+/// 填了邮箱（<see cref="TranslatorOptions.MyMemoryEmail"/>）额度会提高（可选）。
+/// 目标语言会把 DeepL 风格代码（KO/EN-US/ZH-HANT）降为 ISO 639-1（ko/en/zh）后传递。
 /// </summary>
 public sealed class MyMemoryTranslator : ITranslator
 {
@@ -47,7 +47,7 @@ public sealed class MyMemoryTranslator : ITranslator
         var target = targetLang.Split('-')[0].ToLowerInvariant(); // EN-US → en, ZH-HANT → zh
         var results = new string?[texts.Count];
 
-        // MyMemory는 단건 q만 지원 → 라인별 순차 요청(한도 완화 위해 병렬 지양). 캐시로 곡당 1회만 호출된다.
+        // MyMemory 只支持单条 q → 按行顺序请求（为缓解额度压力避免并行）。有缓存时每首歌只调用一次。
         for (var i = 0; i < texts.Count; i++)
         {
             var q = texts[i];
@@ -60,12 +60,12 @@ public sealed class MyMemoryTranslator : ITranslator
             response.EnsureSuccessStatusCode();
             var body = await response.Content.ReadFromJsonAsync<MyMemoryResponse>(ct).ConfigureAwait(false);
 
-            // responseStatus는 문자열/숫자 모두 올 수 있다. 200이 아니면 실패.
+            // responseStatus 可能是字符串也可能是数字。不是 200 即为失败。
             if (body?.ResponseStatus is { } status && status != "200")
                 throw MakeFailure(status, body.ResponseDetails);
 
             var text = body?.ResponseData?.TranslatedText;
-            // 한도 소진 등은 200으로 오되 대문자 경고문을 번역문 자리에 넣는다.
+            // 额度耗尽等情况仍返回 200，但会在译文位置放入大写警告文本。
             if (text is null || IsWarning(text))
                 throw MakeFailure("429", text);
 
@@ -75,7 +75,7 @@ public sealed class MyMemoryTranslator : ITranslator
         return results;
     }
 
-    // 한도 초과 감지 → 429(RateLimit)로 분류되게 HttpRequestException으로 변환.
+    // 检测到超额 → 转成 HttpRequestException，以便归类为 429（RateLimit）。
     private static HttpRequestException MakeFailure(string status, string? detail)
     {
         var code = status == "429" || (detail?.Contains("USED ALL", StringComparison.OrdinalIgnoreCase) ?? false)

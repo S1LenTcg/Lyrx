@@ -3,7 +3,7 @@ using Microsoft.Data.Sqlite;
 namespace Musebase.Core.Translation;
 
 /// <summary>
-/// SQLite 라인 번역 캐시. MT 비용 통제의 핵심 — 같은 (원문, 언어)는 재번역하지 않는다.
+/// SQLite 行级翻译缓存。控制机器翻译成本的关键——相同（原文, 语言）不会重复翻译。
 /// </summary>
 public sealed class SqliteTranslationCache : ITranslationCache, IDisposable
 {
@@ -57,6 +57,6 @@ public sealed class SqliteTranslationCache : ITranslationCache, IDisposable
 
     public void Dispose() => _connection.Dispose();
 
-    /// <summary>커넥션 풀 해제 — 테스트에서 DB 파일 삭제 전 호출</summary>
+    /// <summary>释放连接池——测试中删除 DB 文件前调用</summary>
     public static void ClearPools() => SqliteConnection.ClearAllPools();
 }

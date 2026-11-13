@@ -39,7 +39,7 @@ internal sealed class ClassicSettingsWindow : Window
         ("ZH-HANT", "繁體中文 (ZH-HANT)"),
         ("EN", "English (EN)"),
         ("JA", "日本語 (JA)"),
-        ("KO", "한국어 (KO)"),
+        ("KO", "韩语 (KO)"),
     ];
 
     private static readonly (string Id, string Label)[] TranslationEngines =
@@ -289,6 +289,18 @@ internal sealed class ClassicSettingsWindow : Window
             "窗口始终置顶",
             "将歌词窗口固定在其他窗口最前方，适合小窗模式",
             topmostToggle));
+
+        // 行距：英文与韩文的字形比汉字更需要行间留白，给一个档位而不是写死一套参数
+        var spacingIds = new[] { "compact", "normal", "loose" };
+        var spacingLabels = new List<string> { "紧凑", "标准", "宽松" };
+        var spacingIdx = Math.Max(0, Array.FindIndex(spacingIds,
+            id => string.Equals(id, settings.LyricsLineSpacing, StringComparison.OrdinalIgnoreCase)));
+        var (spacingDropdown, _) = CreateDarkDropdown(spacingLabels, spacingIdx, idx =>
+        {
+            settings.LyricsLineSpacing = spacingIds[Math.Clamp(idx, 0, spacingIds.Length - 1)];
+            SaveAndNotify();
+        }, compact: true);
+        windowCard.Children.Add(CreateSettingRow("歌词行距", null, spacingDropdown));
 
         windowCard.Children.Add(CreateDivider());
         windowCard.Children.Add(FieldLabel("背景配色模式："));
@@ -578,7 +590,7 @@ internal sealed class ClassicSettingsWindow : Window
         statusCard.Children.Add(trackStatusText);
 
         var offsetCard = AddSectionCard(pageTools, "歌词时间轴同步微调");
-        offsetCard.Children.Add(HintLabel("当歌词比人声偏快或偏慢时，可按 0.5 秒步进微调同步点："));
+        offsetCard.Children.Add(HintLabel("当歌词比人声偏快或偏慢时，可微调同步点（支持 0.2 秒精细调节）："));
 
         var offsetValueLabel = new TextBlock
         {
@@ -589,19 +601,25 @@ internal sealed class ClassicSettingsWindow : Window
             Margin = new Thickness(0, 0, 14, 0),
         };
         void RefreshOffsetText() =>
-            offsetValueLabel.Text = $"当前偏移：{getOffset():+0.0;-0.0;0.0} 秒";
+            offsetValueLabel.Text = $"当前手动偏移：{getOffset():+0.0;-0.0;0.0} 秒";
 
         var offsetRow = new WrapPanel { VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 4, 0, 2) };
         offsetRow.Children.Add(offsetValueLabel);
-        var minusBtn = SmallToolButton("延后 0.5s (−)");
-        minusBtn.Click += (_, _) => { adjustOffset(-0.5); RefreshOffsetText(); };
-        var resetBtn = SmallToolButton("重置 (0.0s)");
+        var minusFastBtn = SmallToolButton("延后 0.5s");
+        minusFastBtn.Click += (_, _) => { adjustOffset(-0.5); RefreshOffsetText(); };
+        var minusBtn = SmallToolButton("延后 0.2s");
+        minusBtn.Click += (_, _) => { adjustOffset(-0.2); RefreshOffsetText(); };
+        var resetBtn = SmallToolButton("重置");
         resetBtn.Click += (_, _) => { adjustOffset(null); RefreshOffsetText(); };
-        var plusBtn = SmallToolButton("提前 0.5s (+)");
-        plusBtn.Click += (_, _) => { adjustOffset(0.5); RefreshOffsetText(); };
+        var plusBtn = SmallToolButton("提前 0.2s");
+        plusBtn.Click += (_, _) => { adjustOffset(0.2); RefreshOffsetText(); };
+        var plusFastBtn = SmallToolButton("提前 0.5s");
+        plusFastBtn.Click += (_, _) => { adjustOffset(0.5); RefreshOffsetText(); };
+        offsetRow.Children.Add(minusFastBtn);
         offsetRow.Children.Add(minusBtn);
         offsetRow.Children.Add(resetBtn);
         offsetRow.Children.Add(plusBtn);
+        offsetRow.Children.Add(plusFastBtn);
         offsetCard.Children.Add(offsetRow);
 
         var actionsCard = AddSectionCard(pageTools, "歌词管理操作");
@@ -834,7 +852,8 @@ internal sealed class ClassicSettingsWindow : Window
     private static (FrameworkElement Control, Action<int> SetSelectedIndex) CreateDarkDropdown(
         IReadOnlyList<string> items,
         int selectedIndex,
-        Action<int> onSelected)
+        Action<int> onSelected,
+        bool compact = false)
     {
         var currentIndex = Math.Clamp(selectedIndex, 0, Math.Max(0, items.Count - 1));
 
@@ -842,7 +861,7 @@ internal sealed class ClassicSettingsWindow : Window
         {
             Text = items.Count > 0 ? items[currentIndex] : "",
             Foreground = TextPrimary,
-            FontSize = 12.5,
+            FontSize = compact ? 12 : 12.5,
             VerticalAlignment = VerticalAlignment.Center,
             TextTrimming = TextTrimming.CharacterEllipsis,
         };
@@ -853,7 +872,7 @@ internal sealed class ClassicSettingsWindow : Window
             Stroke = TextMuted,
             StrokeThickness = 1.6,
             VerticalAlignment = VerticalAlignment.Center,
-            Margin = new Thickness(8, 0, 0, 0),
+            Margin = new Thickness(compact ? 6 : 8, 0, 0, 0),
         };
 
         var boxContent = new DockPanel();
@@ -867,7 +886,7 @@ internal sealed class ClassicSettingsWindow : Window
             BorderBrush = BorderSubtle,
             BorderThickness = new Thickness(1),
             CornerRadius = new CornerRadius(6),
-            Padding = new Thickness(11, 7, 11, 7),
+            Padding = compact ? new Thickness(9, 4, 9, 4) : new Thickness(11, 7, 11, 7),
             Cursor = Cursors.Hand,
             Child = boxContent,
         };
@@ -969,15 +988,28 @@ internal sealed class ClassicSettingsWindow : Window
         {
             if (!popup.IsOpen) boxBorder.Background = BgInput;
         };
-        boxBorder.MouseLeftButtonDown += (_, e) =>
+
+        // 打开时机是关键：原来在 MouseLeftButtonDown 里置 IsOpen=true，
+        // 而 Popup 的 StaysOpen=false 会把握住鼠标、把随后的"松开"判成窗外点击，
+        // 于是展开后立刻又收回（就是"点开就闪回去"那个 bug）。
+        // 改成松开时才打开；同时记下关闭时刻，避免"点外面关闭"和"再点一次打开"互相打架。
+        var lastClosedTick = 0L;
+        boxBorder.MouseLeftButtonUp += (_, e) =>
         {
             e.Handled = true;
-            popupBorder.Width = Math.Max(180, boxBorder.ActualWidth);
-            popup.IsOpen = !popup.IsOpen;
+            if (popup.IsOpen)
+            {
+                popup.IsOpen = false;
+                return;
+            }
+            if (Environment.TickCount64 - lastClosedTick < 250) return; // 刚被"点外面"关掉，别马上重开
+            popupBorder.Width = Math.Max(compact ? 140 : 180, boxBorder.ActualWidth);
+            popup.IsOpen = true;
         };
         popup.Opened += (_, _) => boxBorder.BorderBrush = AccentGreen;
         popup.Closed += (_, _) =>
         {
+            lastClosedTick = Environment.TickCount64;
             boxBorder.BorderBrush = BorderSubtle;
             boxBorder.Background = boxBorder.IsMouseOver ? BgInputHover : BgInput;
         };

@@ -9,9 +9,9 @@ using Musebase.Engine;
 namespace Musebase.Windows;
 
 /// <summary>
-/// 수동 가사 검색 창. 자동 매칭이 틀렸을 때 직접 검색해 교체한다.
-/// 열면 현재 곡을 바로 검색하고, 목록에서 항목을 고르면 우측에 가사를 미리 보여준다.
-/// 적용 시 coordinator.UseLyricsAsync로 오버레이·캐시에 반영.
+/// 手动歌词搜索窗口。自动匹配出错时手动搜索并替换。
+/// 打开即搜索当前歌曲，在列表中选中条目时右侧预览歌词。
+/// 应用时通过 coordinator.UseLyricsAsync 写入覆盖层与缓存。
 /// </summary>
 public sealed class SearchWindow : Window
 {
@@ -86,7 +86,7 @@ public sealed class SearchWindow : Window
         };
         _applyButton.Click += async (_, _) => await ApplySelectedAsync();
 
-        // 결과 목록 | 미리보기 (2:1.2, 가운데 스플리터)
+        // 结果列表 | 预览（2:1.2，中间分隔条）
         var centerGrid = new Grid { Margin = new Thickness(12, 0, 12, 0) };
         centerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(2, GridUnitType.Star) });
         centerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
@@ -110,7 +110,7 @@ public sealed class SearchWindow : Window
         Content = root;
 
         Closed += (_, _) => _cts?.Cancel();
-        // 열면 현재 곡을 바로 검색
+        // 打开即搜索当前歌曲
         Loaded += async (_, _) =>
         {
             if (_titleBox.Text.Trim().Length > 0) await RunSearchAsync();
@@ -152,11 +152,11 @@ public sealed class SearchWindow : Window
                 : Loc.T("search.status.count", ("count", results.Count));
 
             if (_resultList.Items.Count > 0)
-                _resultList.SelectedIndex = 0; // 최상위(최고 품질) 자동 선택 → 미리보기 표시
+                _resultList.SelectedIndex = 0; // 自动选中首项（质量最高）→ 显示预览
         }
         catch (OperationCanceledException)
         {
-            // 창 닫힘/재검색
+            // 窗口关闭/重新搜索
         }
         catch (Exception e)
         {

@@ -1,14 +1,14 @@
 namespace Musebase.Engine;
 
-/// <summary>글자 단위 카라오케 앵커(라인 시작 기준 오프셋 초, 적용 문자 인덱스). 직렬화용.</summary>
+/// <summary>逐字卡拉OK锚点（相对行起始的偏移秒数，适用字符索引）。用于序列化。</summary>
 public sealed record KaraokeMark(int Index, double Time);
 
 /// <summary>
-/// "지금 무엇을 보여줄지"의 직렬화 가능한 표시 상태 계약([[0001-core-language]] 3단계).
-/// 로컬 View(WPF/MAUI)는 이 상태를 바인딩하고, 원격 디스플레이(브라우저)는 같은 계약을
-/// JSON/WebSocket으로 받아 렌더한다. 카라오케 진행은 매 프레임 전송하지 않고
-/// <see cref="LineStartedAt"/> 앵커 + <see cref="Karaoke"/>로 표시측이 로컬 보간한다.
-/// System.Text.Json으로 그대로 직렬화된다.
+/// “当前该显示什么”的可序列化显示状态契约（[[0001-core-language]] 第 3 阶段）。
+/// 本地 View（WPF/MAUI）绑定该状态，远程显示端（浏览器）通过
+/// JSON/WebSocket 接收同一契约并渲染。卡拉OK进度不必逐帧传输，
+/// 由 <see cref="LineStartedAt"/> 锚点 + <see cref="Karaoke"/> 让显示端本地插值。
+/// 可直接由 System.Text.Json 序列化。
 /// </summary>
 public sealed record PlaybackViewState(
     bool IsPlaying,

@@ -8,7 +8,7 @@
   </compatibility>
   <application xmlns="urn:schemas-microsoft-com:asm.v3">
     <windowsSettings>
-      <!-- Per-Monitor V2 DPI: 오버레이 좌표 정확성에 필수 -->
+      <!-- Per-Monitor V2 DPI：浮层坐标精度的必要条件 -->
       <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2</dpiAwareness>
     </windowsSettings>
   </application>

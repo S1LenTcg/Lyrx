@@ -7,21 +7,21 @@ using System.Text.Json.Serialization;
 namespace Musebase.Core.Search;
 
 /// <summary>
-/// <see cref="IRemoteLyricsCache"/>의 HTTP 구현 — 개인 가사 서버(`contracts/lyrics-api.md` v1).
+/// <see cref="IRemoteLyricsCache"/> 的 HTTP 实现 —— 个人歌词服务器（`contracts/lyrics-api.md` v1）。
 ///
-/// 설계 원칙 세 가지:
-/// 1. **조용한 강등** — 모든 예외를 삼키고 조회는 null, 저장은 무시. 서버가 죽어도 앱은 그대로 동작한다.
-/// 2. **짧은 타임아웃** — 조회는 기본 2.5초. 실패해도 그 뒤에 제공자 검색이 이어지므로
-///    여기서 오래 끌면 "서버를 켰더니 느려졌다"가 된다.
-/// 3. **서킷 브레이커** — 연속 실패가 쌓이면 일정 시간 아예 시도하지 않는다.
-///    테일넷 밖(Tailscale 꺼짐)에서 곡이 바뀔 때마다 타임아웃을 기다리는 낭비를 막는다.
+/// 三条设计原则：
+/// 1. **静默降级** —— 吞掉所有异常，查询返回 null，保存一律忽略。服务器挂了应用也照常工作。
+/// 2. **短超时** —— 查询默认 2.5 秒。即使失败，之后仍会继续走提供方搜索，所以
+///    在这里拖太久就会变成“开了服务器反而变慢”。
+/// 3. **熔断器** —— 连续失败累积到一定程度后，一段时间内完全不尝试。
+///    避免在 Tailscale 之外（Tailscale 关闭）时每次换歌都要等超时的浪费。
 /// </summary>
 public sealed class HttpRemoteLyricsCache : IRemoteLyricsCache
 {
-    /// <summary>연속 실패가 이 횟수에 이르면 회로를 연다.</summary>
+    /// <summary>连续失败达到该次数时打开熔断。</summary>
     private const int FailureThreshold = 2;
     private static readonly TimeSpan OpenDuration = TimeSpan.FromSeconds(60);
-    /// <summary>업로드는 백그라운드라 조회보다 여유를 준다.</summary>
+    /// <summary>上传在后台进行，因此比查询留出更多余量。</summary>
     private static readonly TimeSpan UploadTimeout = TimeSpan.FromSeconds(5);
 
     private static readonly JsonSerializerOptions Json = new()
@@ -30,7 +30,7 @@ public sealed class HttpRemoteLyricsCache : IRemoteLyricsCache
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
     };
 
-    // 소켓 고갈을 피하기 위해 인스턴스마다 하나씩 유지한다(설정 변경 시 인스턴스가 새로 만들어진다).
+    // 为避免套接字耗尽，每个实例各保留一个（配置变更时会新建实例）。
     private readonly HttpClient _http;
     private readonly Uri _baseUri;
     private readonly TimeSpan _timeout;
@@ -42,7 +42,7 @@ public sealed class HttpRemoteLyricsCache : IRemoteLyricsCache
     public HttpRemoteLyricsCache(string endpoint, string? token, int timeoutMs = 2500, Action<string>? log = null)
         : this(endpoint, token, timeoutMs, log, handler: null) { }
 
-    /// <summary>테스트에서 전송 계층을 갈아끼우기 위한 생성자(스텁 핸들러 주입).</summary>
+    /// <summary>用于在测试中替换传输层的构造函数（注入桩处理器）。</summary>
     internal HttpRemoteLyricsCache(
         string endpoint, string? token, int timeoutMs, Action<string>? log, HttpMessageHandler? handler)
     {
@@ -57,7 +57,7 @@ public sealed class HttpRemoteLyricsCache : IRemoteLyricsCache
             PooledConnectionLifetime = TimeSpan.FromMinutes(5),
         })
         {
-            // 실제 만료는 요청마다 링크된 CTS로 제어한다(조회/업로드 시간이 다르다).
+            // 实际过期时间由每个请求各自链接的 CTS 控制（查询/上传的时长不同）。
             Timeout = Timeout.InfiniteTimeSpan,
         };
         if (!string.IsNullOrWhiteSpace(token))
@@ -77,7 +77,7 @@ public sealed class HttpRemoteLyricsCache : IRemoteLyricsCache
             using var response = await _http.GetAsync(url, cts.Token).ConfigureAwait(false);
             if (response.StatusCode == HttpStatusCode.NotFound)
             {
-                OnSuccess(); // 미스도 정상 응답이다
+                OnSuccess(); // 未命中也是正常响应
                 return await ReadMissAsync(response, cts.Token).ConfigureAwait(false);
             }
             if (!response.IsSuccessStatusCode)
@@ -94,12 +94,12 @@ public sealed class HttpRemoteLyricsCache : IRemoteLyricsCache
             if (lyrics is null) return RemoteLyricsResult.Miss;
             lyrics.Metadata.ServiceName = entry.Service ?? "Server";
             var langs = entry.Langs ?? [];
-            _log?.Invoke($"[server] 히트: {title} — {entry.Service} (match={entry.Match}, langs={string.Join(",", langs)})");
+            _log?.Invoke($"[server] 命中：{title} — {entry.Service} (match={entry.Match}, langs={string.Join(",", langs)})");
             return new RemoteLyricsResult(lyrics, false, 0, langs);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
-            return RemoteLyricsResult.Miss; // 트랙 교체 등 — 실패로 세지 않는다
+            return RemoteLyricsResult.Miss; // 换曲等场景 —— 不计入失败
         }
         catch (Exception e)
         {
@@ -109,8 +109,8 @@ public sealed class HttpRemoteLyricsCache : IRemoteLyricsCache
     }
 
     /// <summary>
-    /// 404 본문의 양보 힌트를 읽는다. 본문이 없거나 깨졌으면 평범한 미스로 취급한다 —
-    /// 구버전 서버(본문 없는 404)와 그대로 호환된다.
+    /// 读取 404 响应体中的让位提示。响应体缺失或损坏时，按普通未命中处理 ——
+    /// 与旧版服务器（无响应体的 404）保持兼容。
     /// </summary>
     private async Task<RemoteLyricsResult> ReadMissAsync(HttpResponseMessage response, CancellationToken ct)
     {
@@ -119,11 +119,11 @@ public sealed class HttpRemoteLyricsCache : IRemoteLyricsCache
             var body = await response.Content.ReadFromJsonAsync<MissBody>(Json, ct).ConfigureAwait(false);
             if (body is { Ad: true })
             {
-                _log?.Invoke("[server] 광고로 표시된 제목 — 가사를 찾지 않습니다");
+                _log?.Invoke("[server] 该标题被标记为广告 —— 不查找歌词");
                 return RemoteLyricsResult.Ad;
             }
             if (body is not { Pending: true }) return RemoteLyricsResult.Miss;
-            _log?.Invoke($"[server] 다른 기기도 이 곡을 찾는 중 — 번역을 양보합니다({body.RetryAfterMs}ms)");
+            _log?.Invoke($"[server] 其他设备也在查找这首歌 —— 让出翻译({body.RetryAfterMs}ms)");
             return new RemoteLyricsResult(null, true, body.RetryAfterMs, []);
         }
         catch (Exception)
@@ -133,11 +133,11 @@ public sealed class HttpRemoteLyricsCache : IRemoteLyricsCache
     }
 
     /// <summary>
-    /// 곡의 의미. 서버에 없으면 404이고 그것은 정상이다 — 대부분의 곡에는 아직 의미가 없다.
+    /// 歌曲含义。服务器上没有就返回 404，这是正常的 —— 大多数歌曲暂时还没有含义。
     ///
-    /// 회로 차단기와 실패 집계를 **가사와 공유한다**: 이건 부가 정보라 여기서 실패했다고
-    /// 가사 조회까지 막으면 손해가 크다. 그래서 실패해도 <see cref="OnFailure"/>를 부르지 않고
-    /// 조용히 null만 돌려준다(회로가 이미 열려 있으면 아예 시도하지 않는다).
+    /// 熔断器与失败计数**与歌词共用**：这属于附加信息，若因这里失败就
+    /// 连歌词查询也一并阻断，损失太大。所以失败时也不调用 <see cref="OnFailure"/>，
+    /// 只静默返回 null（熔断已打开时则完全不尝试）。
     /// </summary>
     public async Task<SongMeaningView?> GetMeaningAsync(
         string title, string artist, CancellationToken ct = default) =>
@@ -158,7 +158,7 @@ public sealed class HttpRemoteLyricsCache : IRemoteLyricsCache
             using var response = await _http.GetAsync(url, cts.Token).ConfigureAwait(false);
             if (!response.IsSuccessStatusCode)
             {
-                // 404 = 아직 의미가 없다(정상). 서버가 만드는 중이면 본문에 pending이 온다.
+                // 404 = 还没有含义（正常）。若服务器正在生成，响应体里会带 pending。
                 if (response.StatusCode != HttpStatusCode.NotFound) return MeaningLookup.None;
                 try
                 {
@@ -169,7 +169,7 @@ public sealed class HttpRemoteLyricsCache : IRemoteLyricsCache
                 }
                 catch (Exception)
                 {
-                    return MeaningLookup.None;   // 구버전 서버 — 본문 없는 404
+                    return MeaningLookup.None;   // 旧版服务器 —— 无响应体的 404
                 }
             }
 
@@ -179,23 +179,23 @@ public sealed class HttpRemoteLyricsCache : IRemoteLyricsCache
         }
         catch (Exception)
         {
-            return MeaningLookup.None; // 부가 기능 — 가사 조회에 영향을 주지 않는다
+            return MeaningLookup.None; // 附加功能 —— 不影响歌词查询
         }
     }
 
     /// <summary>
-    /// 의미를 지금 만들어 달라고 요청한다(사람이 버튼을 눌렀을 때만).
+    /// 请求现在生成含义（仅在人工点击按钮时调用）。
     ///
-    /// 조회와 달리 <b>회로가 열려 있어도 시도한다</b> — 사람이 방금 누른 동작이라 조용히
-    /// 아무 일도 안 일어나면 고장으로 보인다. 대신 결과는 실패로 정직하게 돌려준다.
-    /// 타임아웃도 따로 길게 잡는다: 외부 자료 수집 + LLM이라 수십 초가 걸린다.
+    /// 与查询不同，<b>即使熔断已打开也会尝试</b> —— 这是人刚触发的操作，若静默地
+    /// 什么都不发生，看起来就像故障。作为代价，结果会如实返回失败。
+    /// 超时也单独设得更长：要收集外部资料 + 调用 LLM，会花上数十秒。
     /// </summary>
     public async Task<MeaningRequestResult> RequestMeaningAsync(
         string title, string artist, bool force = false, CancellationToken ct = default)
     {
         try
         {
-            // force가 없으면 서버가 만들어 둔 것을 그대로 준다 — 기존 글을 덮어쓰지 않는다.
+            // 没有 force 时，原样返回服务器已生成的内容 —— 不覆盖已有文本。
             var url = new Uri(_baseUri,
                 $"v1/meaning?title={Uri.EscapeDataString(title)}&artist={Uri.EscapeDataString(artist)}"
                 + (force ? "&force=1" : ""));
@@ -204,7 +204,7 @@ public sealed class HttpRemoteLyricsCache : IRemoteLyricsCache
 
             using var response = await _http.PostAsync(url, null, cts.Token).ConfigureAwait(false);
 
-            // 403(앱 생성 꺼짐) · 503(엔진 미구성) — 둘 다 "이 서버에서는 안 된다"는 같은 말이다.
+            // 403（应用生成已关闭） · 503（引擎未配置） —— 两者都表示“这台服务器上做不了”。
             if (response.StatusCode is System.Net.HttpStatusCode.Forbidden
                                     or System.Net.HttpStatusCode.ServiceUnavailable)
                 return MeaningRequestResult.Of(MeaningRequestStatus.Unavailable);
@@ -218,7 +218,7 @@ public sealed class HttpRemoteLyricsCache : IRemoteLyricsCache
                     "no-source" => MeaningRequestStatus.NoSource,
                     "insufficient" => MeaningRequestStatus.Insufficient,
                     "retry" => MeaningRequestStatus.Retry,
-                    // 서버 엔진의 결제·키·모델 문제 — 앱에서 할 수 있는 일은 없고 서버를 고쳐야 한다.
+                    // 服务器引擎的计费·密钥·模型问题 —— 应用侧无能为力，只能修服务器。
                     "config" => MeaningRequestStatus.Unavailable,
                     _ => MeaningRequestStatus.Failed,
                 });
@@ -239,15 +239,15 @@ public sealed class HttpRemoteLyricsCache : IRemoteLyricsCache
         }
     }
 
-    /// <summary>생성은 외부 자료 수집 + LLM이라 조회 타임아웃(수 초)으로는 늘 끊긴다.</summary>
+    /// <summary>生成要收集外部资料 + 调用 LLM，用查询超时（数秒）必然会被截断。</summary>
     private static readonly TimeSpan GenerateTimeout = TimeSpan.FromSeconds(90);
 
-    // ---- 곡에 딸린 것들(커버·좋아요) ----
+    // ---- 歌曲附属信息（封面·喜欢） ----
 
     /// <summary>
-    /// 서버가 아직 커버를 안 찾아본 곡이면 그쪽에서 외부 API를 한 번 부르므로 가사 조회보다 느리다.
-    /// 그래서 <b>가사와 같은 타임아웃을 쓰지 않고</b> 넉넉히 잡되, 실패는 조용히 null이다.
-    /// 부가 정보라 회로 차단기에 세지 않는다 — 이것 때문에 가사가 막히면 손해가 크다.
+    /// 若服务器还没为这首歌找过封面，它那边会调用一次外部 API，因此比歌词查询更慢。
+    /// 所以<b>不使用与歌词相同的超时</b>，而是留足余量，但失败时静默返回 null。
+    /// 这属于附加信息，不计入熔断器 —— 若因此把歌词卡住，损失太大。
     /// </summary>
     public async Task<SongExtrasResult> GetExtrasAsync(
         string title, string artist, CancellationToken ct = default)
@@ -258,8 +258,8 @@ public sealed class HttpRemoteLyricsCache : IRemoteLyricsCache
             using var response = await SendExtrasAsync(
                 HttpMethod.Get, "v1/song", title, artist, null, ct).ConfigureAwait(false);
 
-            // 404는 "서버가 그 곡을 모른다"일 뿐이다 — 아직 아무도 올리지 않은 새 곡이면 정상이고,
-            // 몇 초 뒤 이 기기가 올린다. 오류로 올리면 새 곡마다 경고가 뜬다.
+            // 404 只表示“服务器不认识这首歌” —— 若是尚无人上传的新歌，这是正常的，
+            // 几秒后本机会上传。若按错误上报，每首新歌都会弹警告。
             if (response.StatusCode == HttpStatusCode.NotFound) return SongExtrasResult.NotFound;
             if (!response.IsSuccessStatusCode) return SongExtrasResult.Failed;
 
@@ -268,7 +268,7 @@ public sealed class HttpRemoteLyricsCache : IRemoteLyricsCache
         }
         catch (Exception)
         {
-            return SongExtrasResult.Failed;   // 주소·네트워크·타임아웃 — 이건 알려야 한다
+            return SongExtrasResult.Failed;   // 地址·网络·超时 —— 这些必须告知
         }
     }
 
@@ -279,7 +279,7 @@ public sealed class HttpRemoteLyricsCache : IRemoteLyricsCache
         string title, string artist, bool loved, CancellationToken ct = default) =>
         ExtrasAsync(HttpMethod.Post, "v1/song/love", title, artist, loved ? "1" : "0", ct);
 
-    /// <summary>요청 한 번. 상태 코드를 호출자가 봐야 하므로 응답을 그대로 돌려준다.</summary>
+    /// <summary>发一次请求。调用方需要查看状态码，因此原样返回响应。</summary>
     private async Task<HttpResponseMessage> SendExtrasAsync(
         HttpMethod method, string path, string title, string artist, string? on, CancellationToken ct)
     {
@@ -307,11 +307,11 @@ public sealed class HttpRemoteLyricsCache : IRemoteLyricsCache
         }
         catch (Exception)
         {
-            return null; // 부가 정보 — 가사 조회에 영향을 주지 않는다
+            return null; // 附加信息 —— 不影响歌词查询
         }
     }
 
-    /// <summary>성공 응답의 본문을 <see cref="SongExtras"/>로. 본문이 비면 null.</summary>
+    /// <summary>把成功响应的响应体转换为 <see cref="SongExtras"/>。响应体为空时返回 null。</summary>
     private static async Task<SongExtras?> ReadExtrasAsync(HttpResponseMessage response, CancellationToken ct)
     {
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -330,7 +330,7 @@ public sealed class HttpRemoteLyricsCache : IRemoteLyricsCache
                 body.SpotifyConnected, body.SpotifyKnown, body.SpotifySaved);
     }
 
-    /// <summary>서버가 커버를 처음 찾는 곡이면 외부 API 한 번이 끼어든다(iTunes 2.5초 + 여유).</summary>
+    /// <summary>若服务器是第一次为这首歌查封面，会插入一次外部 API 调用（iTunes 2.5 秒 + 余量）。</summary>
     private static readonly TimeSpan ExtrasTimeout = TimeSpan.FromSeconds(12);
 
     private sealed record RemoteSongExtras
@@ -342,10 +342,10 @@ public sealed class HttpRemoteLyricsCache : IRemoteLyricsCache
         public bool LoveKnown { get; init; }
         public bool Loved { get; init; }
 
-        /// <summary>구버전 서버는 이 필드를 안 보낸다 — 그러면 null이고 관리 화면 버튼만 사라진다.</summary>
+        /// <summary>旧版服务器不发送该字段 —— 此时为 null，只有管理界面的按钮会消失。</summary>
         public string? Key { get; init; }
 
-        // 구버전 서버는 안 보낸다 — 전부 false가 되어 Spotify 표시가 그냥 없는 것과 같아진다.
+        // 旧版服务器不发送 —— 这些会全为 false，效果等同于完全没有 Spotify 显示。
         public bool SpotifyConnected { get; init; }
         public bool SpotifyKnown { get; init; }
         public bool SpotifySaved { get; init; }
@@ -364,7 +364,7 @@ public sealed class HttpRemoteLyricsCache : IRemoteLyricsCache
                 Artist = artist,
                 Lrc = lyrics.ToString(),
                 Service = service,
-                // 사용자 편집본은 서버에서 자동 검색 결과에 덮이지 않도록 보호된다.
+                // 用户编辑版在服务器上受保护，不会被自动搜索结果覆盖。
                 Origin = service == EditedServiceName ? "user" : "provider",
             };
 
@@ -378,7 +378,7 @@ public sealed class HttpRemoteLyricsCache : IRemoteLyricsCache
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
-            // 무시
+            // 忽略
         }
         catch (Exception e)
         {
@@ -386,10 +386,10 @@ public sealed class HttpRemoteLyricsCache : IRemoteLyricsCache
         }
     }
 
-    /// <summary>사용자 편집본 표식 — <c>LyricsCoordinator.SaveEditedLyrics</c>가 넣는 값과 같아야 한다.</summary>
+    /// <summary>用户编辑版标记 —— 必须与 <c>LyricsCoordinator.SaveEditedLyrics</c> 写入的值一致。</summary>
     public const string EditedServiceName = "사용자 편집";
 
-    // ---- 서킷 브레이커 ----
+    // ---- 熔断器 ----
 
     private bool IsCircuitOpen()
     {
@@ -409,15 +409,15 @@ public sealed class HttpRemoteLyricsCache : IRemoteLyricsCache
         if (_consecutiveFailures >= FailureThreshold)
         {
             _openUntil = DateTimeOffset.UtcNow + OpenDuration;
-            _log?.Invoke($"[server] 연속 실패 {_consecutiveFailures}회 — {(int)OpenDuration.TotalSeconds}초간 조회를 건너뜁니다 ({reason})");
+            _log?.Invoke($"[server] 连续失败 {_consecutiveFailures} 次 —— {(int)OpenDuration.TotalSeconds} 秒内跳过查询 ({reason})");
         }
         else
         {
-            _log?.Invoke($"[server] 실패: {reason}");
+            _log?.Invoke($"[server] 失败：{reason}");
         }
     }
 
-    /// <summary>서버 응답/요청 본문(계약 v1, camelCase).</summary>
+    /// <summary>服务器响应/请求体（契约 v1，camelCase）。</summary>
     private sealed record RemoteLyricsEntry
     {
         public string? Key { get; init; }
@@ -434,10 +434,10 @@ public sealed class HttpRemoteLyricsCache : IRemoteLyricsCache
         public string? Match { get; init; }
     }
 
-    /// <summary>`GET /v1/meaning` 응답(필요한 필드만).</summary>
+    /// <summary>`GET /v1/meaning` 的响应（仅需要的字段）。</summary>
     /// <summary>
-    /// 응답 → 화면에 띄울 형태. 조회와 생성이 <b>같은 모양</b>의 본문을 주므로 한 군데서 옮긴다.
-    /// 출처 표기는 의무라 본문과 함께 실어 보낸다(빈 이름은 버린다).
+    /// 响应 → 界面上展示的形态。查询与生成都会返回<b>同样结构</b>的响应体，因此集中在一处转换。
+    /// 标注来源是必须的，因此与响应体一并返回（空名称会被丢弃）。
     /// </summary>
     private static SongMeaningView? ToView(RemoteMeaningEntry? entry)
     {
@@ -457,7 +457,7 @@ public sealed class HttpRemoteLyricsCache : IRemoteLyricsCache
         public RemoteAttribution[]? Attribution { get; init; }
     }
 
-    /// <summary>생성이 202로 끝났을 때의 본문 — 만들지 못한 이유가 들어 있다.</summary>
+    /// <summary>生成以 202 结束时的响应体 —— 其中包含未能生成的原因。</summary>
     private sealed record RemoteMeaningNotMade
     {
         public string? Status { get; init; }
@@ -469,10 +469,10 @@ public sealed class HttpRemoteLyricsCache : IRemoteLyricsCache
         public string? Url { get; init; }
     }
 
-    /// <summary>404 본문(계약 v1의 "번역 양보"·"광고 차단"). 구버전 서버는 본문이 없다.</summary>
+    /// <summary>404 响应体（契约 v1 的“让出翻译”·“广告拦截”）。旧版服务器没有响应体。</summary>
     private sealed record MissBody
     {
-        /// <summary>이 제목은 광고로 표시돼 있다 — 제공자 검색도 업로드도 하지 않는다.</summary>
+        /// <summary>该标题被标记为广告 —— 既不进行提供方搜索也不上传。</summary>
         public bool Ad { get; init; }
 
         public string? Error { get; init; }

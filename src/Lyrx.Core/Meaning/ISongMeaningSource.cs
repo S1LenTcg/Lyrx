@@ -1,24 +1,24 @@
 namespace Musebase.Core.Meaning;
 
 /// <summary>
-/// 한 소스에서 가져온 곡 배경 원문. <paramref name="Text"/>는 영어 산문인 경우가 대부분이라
-/// 그대로 보여 주지 않고 <see cref="IMeaningWriter"/>가 한국어로 요약한다.
+/// 从单个来源取得的歌曲背景原文。<paramref name="Text"/> 多为英文散文，
+/// 因此不原样展示，而由 <see cref="IMeaningWriter"/> 概括成中文。
 /// </summary>
-/// <param name="Name">표시용 소스 이름(출처 표기 의무가 있다 — 화면에 그대로 렌더한다).</param>
-/// <param name="Url">사람이 원문을 확인할 주소. 없으면 null.</param>
-/// <param name="Text">수집한 본문.</param>
+/// <param name="Name">用于显示的来源名称（有标注出处的义务 —— 会原样渲染到界面上）。</param>
+/// <param name="Url">供人核对原文的地址。没有则为 null。</param>
+/// <param name="Text">抓取到的正文。</param>
 public sealed record MeaningSource(string Name, string? Url, string Text);
 
 /// <summary>
-/// 곡 배경 원문을 한 곳에서 가져오는 계약.
+/// 从单一位置获取歌曲背景原文的契约。
 ///
-/// **실패는 예외가 아니라 null이다** — 키 미설정·타임아웃·검색 실패·차단이 모두 같은 결과다
-/// (<see cref="Search.HttpRemoteLyricsCache"/>의 조용한 강등과 같은 원칙). 소스 하나가 죽어도
-/// 나머지가 채우고, 전부 비면 호출자가 LLM을 아예 부르지 않는다.
+/// **失败不抛异常，而是返回 null** —— 未配置密钥、超时、搜索失败、被拦截，结果全都一样
+/// （与 <see cref="Search.HttpRemoteLyricsCache"/> 的静默降级是同一原则）。即使一个来源失效，
+/// 其余来源也会补上；若全部为空，调用方根本不会去调用 LLM。
 /// </summary>
 public interface ISongMeaningSource
 {
-    /// <summary>표시·기록용 소스 id(예: "genius").</summary>
+    /// <summary>用于显示与记录的来源 id（例如 "genius"）。</summary>
     string Name { get; }
 
     Task<MeaningSource?> FetchAsync(string title, string artist, CancellationToken ct = default);

@@ -1,8 +1,8 @@
 namespace Musebase.Core.Search;
 
 /// <summary>
-/// Kugou KRC 복호화. LyricsKit의 KugouKrcDecrypter.swift 포팅.
-/// "krc1" 매직 확인 → 앞 4바이트(플래그) 제거 → 16바이트 순환키 XOR → zlib 해제.
+/// Kugou KRC 解密。LyricsKit 的 KugouKrcDecrypter.swift 移植。
+/// 校验 "krc1" 魔数 → 去掉前 4 字节（标志位）→ 16 字节循环密钥 XOR → zlib 解压。
 /// </summary>
 internal static class KugouKrcDecrypter
 {

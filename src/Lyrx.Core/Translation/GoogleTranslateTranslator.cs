@@ -6,19 +6,19 @@ using Musebase.Core.Search;
 namespace Musebase.Core.Translation;
 
 /// <summary>
-/// Google Cloud Translation API v2 번역기(API 키 인증).
-/// 원문 언어는 지정하지 않아 서버가 자동 감지한다(v2는 source 생략 시 자동 감지).
-/// 대상 언어는 DeepL식 코드(KO/EN-US/ZH-HANT)를 Google 코드(ko/en/zh-TW)로 변환해 전달한다.
-/// 응답의 translatedText는 format=text에서도 HTML 엔티티(&amp;#39; 등)로 escape되어 오므로 디코드한다.
+/// Google Cloud Translation API v2 翻译器（API 密钥认证）。
+/// 不指定原文语言，由服务器自动检测（v2 省略 source 时自动检测）。
+/// 目标语言把 DeepL 风格的代码（KO/EN-US/ZH-HANT）换成 Google 代码（ko/en/zh-TW）后传入。
+/// 响应中的 translatedText 即使在 format=text 下也会以 HTML 实体（&amp;#39; 等）转义返回，因此需要解码。
 /// </summary>
 public sealed class GoogleTranslateTranslator : ITranslator
 {
     private const string Endpoint = "https://translation.googleapis.com/language/translate/v2";
 
-    /// <summary>요청당 최대 텍스트 수(API 상한 128, 여유를 둔다).</summary>
+    /// <summary>每次请求的最大文本条数（API 上限 128，这里留些余量）。</summary>
     private const int MaxTextsPerRequest = 64;
 
-    /// <summary>요청당 최대 누적 문자 수(요청 크기 상한 여유). 초과 전에 끊어 보낸다.</summary>
+    /// <summary>每次请求的最大累计字符数（请求体量上限的余量）。超过之前就断开送出。</summary>
     private const int MaxCharsPerRequest = 8000;
 
     private readonly HttpClient _http;
@@ -64,8 +64,8 @@ public sealed class GoogleTranslateTranslator : ITranslator
     }
 
     /// <summary>
-    /// DeepL식 target_lang → Google 언어 코드. 중국어만 간체/번체를 지역 코드로 구분하고,
-    /// 나머지는 지역 접미사를 떼어 ISO 639-1로 내린다(EN-US → en, PT-BR → pt).
+    /// DeepL 风格的 target_lang → Google 语言代码。只有中文用地区代码区分简/繁，
+    /// 其余去掉地区后缀降到 ISO 639-1（EN-US → en，PT-BR → pt）。
     /// </summary>
     public static string ToGoogleLanguage(string targetLang)
     {
@@ -75,12 +75,12 @@ public sealed class GoogleTranslateTranslator : ITranslator
         {
             "ZH" or "ZH-HANS" or "ZH-CN" => "zh-CN",
             "ZH-HANT" or "ZH-TW" => "zh-TW",
-            "NB" or "NO" => "no",      // Google은 노르웨이어를 "no"로 받는다
+            "NB" or "NO" => "no",      // Google 接受挪威语为 "no"
             _ => upper.Split('-')[0].ToLowerInvariant(),
         };
     }
 
-    /// <summary>이번 요청에 담을 텍스트 수(개수·문자 수 상한). 한 줄이 상한을 넘어도 최소 1개는 보낸다.</summary>
+    /// <summary>本次请求要装的文本条数（条数与字符数上限）。即使单行超过上限也至少发送 1 条。</summary>
     private static int ChunkSize(IReadOnlyList<string> texts, int offset)
     {
         var count = 0;

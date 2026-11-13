@@ -5,8 +5,8 @@ using System.Text.Json.Serialization;
 namespace Musebase.Core.Search;
 
 /// <summary>
-/// Kugou(酷狗音乐) 제공자. LyricsKit의 Kugou.swift 포팅.
-/// 검색(mobilecdn) → 후보(krcs, 접근키) → 다운로드(lyrics, base64 KRC) → XOR·zlib 복호 → KRC 파싱.
+/// Kugou（酷狗音乐）提供者。LyricsKit 的 Kugou.swift 移植。
+/// 搜索(mobilecdn) → 候选(krcs, 访问密钥) → 下载(lyrics, base64 KRC) → XOR·zlib 解密 → KRC 解析。
 /// </summary>
 public sealed class KugouProvider : LyricsProviderBase<KugouProvider.SongInfo>
 {
@@ -26,14 +26,14 @@ public sealed class KugouProvider : LyricsProviderBase<KugouProvider.SongInfo>
 
     protected override async Task<Lyrics?> FetchAsync(SongInfo token, CancellationToken ct)
     {
-        // 1) 암호화 가사 후보(접근키) 조회
+        // 1) 查询加密歌词候选（访问密钥）
         var candUrl = "http://krcs.kugou.com/search?ver=1&man=yes&client=mobi&keyword=&duration=" +
                       $"&hash={Uri.EscapeDataString(token.Hash)}&album_audio_id={token.AlbumAudioId}";
         var candidates = await _http.GetFromJsonAsync<CandidatesResponse>(candUrl, ct).ConfigureAwait(false);
         var candidate = candidates?.Candidates?.FirstOrDefault();
         if (candidate is null) return null;
 
-        // 2) KRC 다운로드 (content = base64)
+        // 2) 下载 KRC（content = base64）
         var dlUrl = $"http://lyrics.kugou.com/download?id={Uri.EscapeDataString(candidate.Id)}" +
                     $"&accesskey={Uri.EscapeDataString(candidate.Accesskey)}&fmt=krc&charset=utf8&client=pc&ver=1";
         var download = await _http.GetFromJsonAsync<DownloadResponse>(dlUrl, ct).ConfigureAwait(false);
@@ -43,7 +43,7 @@ public sealed class KugouProvider : LyricsProviderBase<KugouProvider.SongInfo>
         try { encrypted = Convert.FromBase64String(base64); }
         catch { return null; }
 
-        // krc 복호 실패 시(예: fmt=lrc 폴백) 평문 LRC로 재시도
+        // krc 解密失败时（例如 fmt=lrc 回退）改用明文 LRC 重试
         var decrypted = KugouKrcDecrypter.Decrypt(encrypted);
         var lyrics = decrypted is not null
             ? KrcParser.Parse(decrypted)
@@ -63,7 +63,7 @@ public sealed class KugouProvider : LyricsProviderBase<KugouProvider.SongInfo>
         return lyrics;
     }
 
-    // ---- 응답 모델 ----
+    // ---- 响应模型 ----
 
     internal sealed record SearchResponse([property: JsonPropertyName("data")] SearchData? Data);
 

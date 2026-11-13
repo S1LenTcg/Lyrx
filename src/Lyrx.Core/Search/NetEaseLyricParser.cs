@@ -5,13 +5,13 @@ using System.Text.RegularExpressions;
 namespace Musebase.Core.Search;
 
 /// <summary>
-/// NetEase 글자 단위 가사 파서. LyricsKit의 NetEaseKLyricParser.swift 포팅.
-/// yrc(신형 단어 단위)와 klyric(구형 카라오케) 모두 [startMs,durationMs]본문 라인과
-/// 글자 단위 인라인 태그를 해석해 InlineTimeTags(`tt`)를 만든다.
+/// NetEase 逐字歌词解析器。LyricsKit 的 NetEaseKLyricParser.swift 移植。
+/// yrc（新版逐词）与 klyric（旧版卡拉OK）都解析 [startMs,durationMs]正文行以及
+/// 逐字内联标签，产出 InlineTimeTags(`tt`)。
 /// </summary>
 internal static class NetEaseLyricParser
 {
-    /// <summary>yrc: 인라인 태그 (absStartMs,durMs,0)fragment</summary>
+    /// <summary>yrc: 内联标签 (absStartMs,durMs,0)fragment</summary>
     public static Lyrics? ParseYrc(string content)
     {
         content = content.Replace("\r\n", "\n").Replace('\r', '\n');
@@ -41,7 +41,7 @@ internal static class NetEaseLyricParser
         return Finalize(lyrics, content);
     }
 
-    /// <summary>klyric: 인라인 태그 (0,durMs)fragment. 시간은 지속시간 누적(라인 시작 기준 오프셋).</summary>
+    /// <summary>klyric: 内联标签 (0,durMs)fragment。时间按持续时间累加（相对行起始的偏移）。</summary>
     public static Lyrics? ParseKLyric(string content)
     {
         content = content.Replace("\r\n", "\n").Replace('\r', '\n');

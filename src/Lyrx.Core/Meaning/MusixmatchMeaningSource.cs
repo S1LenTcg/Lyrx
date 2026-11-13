@@ -4,22 +4,22 @@ using System.Text.RegularExpressions;
 namespace Musebase.Core.Meaning;
 
 /// <summary>
-/// Musixmatch 곡 페이지의 "Meaning"을 가져온다. <b>기본으로 켜지지 않는다</b> —
-/// <c>MUSEBASE_MEANING_SOURCES</c>에 <c>musixmatch</c>를 명시해야 쓰인다.
+/// 抓取 Musixmatch 歌曲页面的 "Meaning"。<b>默认不开启</b> —
+/// 必须在 <c>MUSEBASE_MEANING_SOURCES</c> 里写明 <c>musixmatch</c> 才会使用。
 ///
-/// <b>이 텍스트는 사람이 쓴 해설이 아니다.</b> 페이지 HTML의 <c>__NEXT_DATA__</c> 안 <c>lens</c>
-/// 블록에 들어 있고, 같은 블록에 <c>moods</c>·<c>themes</c>·콘텐츠 등급이 함께 있다 —
-/// 가사를 기계로 분석한 묶음이다. 즉 이걸 자료로 쓰면 <b>LLM이 쓴 글을 다시 LLM에 넣어 요약</b>하는
-/// 셈이라, 무엇에 근거했는지 추적할 수 없고 다른 소스와 같은 무게로 다루면 안 된다.
-/// 그래서 이름에 "(AI 분석)"을 박아 출처 표기에 그대로 드러나게 하고, 프롬프트에서도
-/// 다른 자료와 충돌하면 다른 자료를 따르도록 한다. 배경과 결정은 ADR-0007.
+/// <b>这段文本不是人写的解说。</b>它位于页面 HTML 的 <c>__NEXT_DATA__</c> 中的 <c>lens</c>
+/// 块里，同一块中还一并放着 <c>moods</c>·<c>themes</c>·内容分级 —
+/// 那是机器分析歌词后得到的一组成果。也就是说把它当资料用，等于<b>把 LLM 写的文章再喂回 LLM 去概括</b>，
+/// 因而无法追溯它依据了什么，不能与其他来源同等对待。
+/// 所以把 "(AI 分析)" 写进名字，让它直接显现在出处标注里，并在提示词中也规定
+/// 与其他资料冲突时以其他资料为准。背景与决策见 ADR-0007。
 ///
-/// 주소는 <see cref="MusixmatchApi"/>가 준 <c>track_share_url</c>만 쓴다 — 규칙으로 만든 주소는
-/// 조용히 다른 곡으로 넘어간다(그쪽 설명 참고).
+/// 地址只使用 <see cref="MusixmatchApi"/> 给出的 <c>track_share_url</c> — 按规则拼出的地址
+/// 会悄悄跳到别的歌曲（参见那边的说明）。
 /// </summary>
 public sealed partial class MusixmatchMeaningSource : ISongMeaningSource
 {
-    /// <summary>이보다 짧으면 근거로 삼지 않는다(Genius와 같은 기준).</summary>
+    /// <summary>短于此长度就不作为依据（与 Genius 相同的标准）。</summary>
     private const int MinLength = 40;
 
     private readonly MusixmatchApi _api;
@@ -33,8 +33,8 @@ public sealed partial class MusixmatchMeaningSource : ISongMeaningSource
         _timeout = TimeSpan.FromMilliseconds(Math.Clamp(timeoutMs, 500, 30_000));
     }
 
-    /// <summary>출처 표기에 그대로 나간다 — 사람이 쓴 해설처럼 보이면 안 된다.</summary>
-    public string Name => "Musixmatch (AI 분석)";
+    /// <summary>会原样写进出处标注 — 不能看起来像人写的解说。</summary>
+    public string Name => "Musixmatch (AI 分析)";
 
     public async Task<MeaningSource?> FetchAsync(string title, string artist, CancellationToken ct = default)
     {
@@ -43,7 +43,7 @@ public sealed partial class MusixmatchMeaningSource : ISongMeaningSource
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             cts.CancelAfter(_timeout);
 
-            // 주소를 모르면 여기서 끝난다. 추측해서 받아 오지 않는다.
+            // 不知道地址就在这里结束。不做猜测去抓取。
             var track = await _api.FindAsync(title, artist, cts.Token).ConfigureAwait(false);
             if (track?.ShareUrl is not { Length: > 0 } url) return null;
 
@@ -55,15 +55,15 @@ public sealed partial class MusixmatchMeaningSource : ISongMeaningSource
         }
         catch (Exception)
         {
-            return null; // 조용한 강등
+            return null; // 静默降级
         }
     }
 
     /// <summary>
-    /// 페이지에서 의미 문단을 꺼낸다(순수 함수 — 테스트 대상).
+    /// 从页面中取出含义段落（纯函数 — 测试对象）。
     ///
-    /// <c>lens</c>까지의 경로를 고정하지 않고 <b>재귀로 찾는다</b> — Next.js 페이지의 데이터 구조는
-    /// 우리 사정과 무관하게 바뀌고, 경로를 박아 두면 바뀌는 순간 예외도 없이 조용히 비기 때문이다.
+    /// 不把通往 <c>lens</c> 的路径固定下来，而是<b>递归查找</b> — Next.js 页面的数据结构会
+    /// 与我们无关地变动，一旦把路径写死，变动的那一刻就会连异常都不抛地静默为空。
     /// </summary>
     internal static string? Explanation(string html)
     {
