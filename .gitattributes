@@ -1,0 +1,8 @@
+# 리눅스 서버로 그대로 복사돼 실행되는 파일은 반드시 LF로 체크아웃한다.
+# Windows 기본 자동 변환(CRLF)으로 받으면 `set -o pipefail` 같은 줄에서
+# "invalid option name"으로 죽는다(실제로 가사 서버 배포 중 발생).
+*.sh            text eol=lf
+*.service       text eol=lf
+*.timer         text eol=lf
+Dockerfile      text eol=lf
+docker-compose.yml text eol=lf
