@@ -388,6 +388,8 @@ public sealed class AppSettings
                 var settings = JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(SettingsPath), JsonOptions) ?? new AppSettings();
                 settings._secretStore = store;
                 settings.ResolveSecrets();
+                if (string.IsNullOrWhiteSpace(settings.ClassicBackgroundMode))
+                    settings.ClassicBackgroundMode = "dynamic";
                 return settings;
             }
         }
@@ -497,9 +499,10 @@ public sealed class AppSettings
             Directory.CreateDirectory(Path.GetDirectoryName(SettingsPath)!);
             File.WriteAllText(SettingsPath, JsonSerializer.Serialize(this, JsonOptions));
         }
-        catch
+        catch (Exception error)
         {
-            // 保存失败并不致命
+            // 保存失败并不致命，但记录原因以免只读目录/权限受限时静默丢配置
+            Log.Write($"[settings] 保存失败 ({SettingsPath}): {error.Message}");
         }
     }
 }

@@ -17,6 +17,7 @@ internal static class CoverFetcher
     };
 
     private static readonly ConcurrentDictionary<string, byte[]> Cache = new(StringComparer.OrdinalIgnoreCase);
+    private const int MaxCacheEntries = 128;
 
     private readonly record struct CoverSearchHit(string Url, int Score, bool ArtistMatched);
 
@@ -43,7 +44,7 @@ internal static class CoverFetcher
         {
             if (qqArtistMatched)
             {
-                Cache[cacheKey] = qqBytes;
+                if (cleanArtist.Length > 0) SaveToCache(cacheKey, qqBytes);
                 Log.Write($"[cover] 成功从 QQ音乐获取封面: {cleanTitle} ({qqBytes.Length} 字节)");
                 return qqBytes;
             }
@@ -58,7 +59,7 @@ internal static class CoverFetcher
             if (ct.IsCancellationRequested) return null;
             if (bytes is not null)
             {
-                Cache[cacheKey] = bytes;
+                SaveToCache(cacheKey, bytes);
                 Log.Write($"[cover] 成功从歌词元数据获取封面: {cleanTitle} ({bytes.Length} 字节)");
                 return bytes;
             }
@@ -69,19 +70,26 @@ internal static class CoverFetcher
         if (ct.IsCancellationRequested) return null;
         if (kugouBytes is not null && (kugouArtistMatched || weakFallbackBytes is null))
         {
-            Cache[cacheKey] = kugouBytes;
+            if (cleanArtist.Length > 0 && kugouArtistMatched) SaveToCache(cacheKey, kugouBytes);
             Log.Write($"[cover] 成功从在线音乐库获取封面: {cleanTitle} ({kugouBytes.Length} 字节)");
             return kugouBytes;
         }
 
         if (weakFallbackBytes is not null)
         {
-            Cache[cacheKey] = weakFallbackBytes;
+            // 仅歌名匹配的弱兜底（或歌手为空）不写入会话持久缓存，避免网络抖动时误污染后续同曲切歌。
             Log.Write($"[cover] 成功从{weakFallbackSource}获取封面: {cleanTitle} ({weakFallbackBytes.Length} 字节)");
             return weakFallbackBytes;
         }
 
         return null;
+    }
+
+    private static void SaveToCache(string cacheKey, byte[] bytes)
+    {
+        if (Cache.Count >= MaxCacheEntries)
+            Cache.Clear();
+        Cache[cacheKey] = bytes;
     }
 
     private static async Task<(byte[]? Bytes, bool ArtistMatched)> FetchFromKugouAsync(string cleanTitle, string cleanArtist, CancellationToken ct)

@@ -361,6 +361,7 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
                 _session.TimelinePropertiesChanged -= OnTimelinePropertiesChanged;
             }
             _session = best;
+            CancelThumbVerifyLocked();
             if (_session is not null)
             {
                 _session.MediaPropertiesChanged += OnMediaPropertiesChanged;
@@ -702,13 +703,14 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
     }
 
     private void OnMediaPropertiesChanged(Session sender, MediaPropertiesChangedEventArgs args) =>
-        _ = RefreshTrackAsync();
+        _ = RefreshTrackAsync(sender);
 
     private void OnPlaybackInfoChanged(Session sender, PlaybackInfoChangedEventArgs args) =>
         RefreshPlayback();
 
     private void OnTimelinePropertiesChanged(Session sender, TimelinePropertiesChangedEventArgs args)
     {
+        TrackInfo? updated = null;
         lock (_lock)
         {
             if (ReferenceEquals(sender, _session))
@@ -718,38 +720,89 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
                 try
                 {
                     var timeline = sender.GetTimelineProperties();
-                    if (timeline.EndTime > TimeSpan.Zero && CurrentTrack is { } cur && cur.Duration != timeline.EndTime)
-                    {
-                        CurrentTrack = cur with { Duration = timeline.EndTime };
-                        TrackChanged?.Invoke(CurrentTrack);
-                    }
+                    updated = TryUpdateTrackDurationLocked(timeline.EndTime);
                 }
                 catch { }
             }
         }
+        if (updated is not null)
+            TrackChanged?.Invoke(updated);
     }
+
+    internal readonly record struct ThumbnailSnapshot(byte[]? Bytes, long Version);
 
     private long _thumbnailVersion;
     private long _trackRefreshSeq;
-    private string? _lastThumbnailSignature;
+    private TrackInfo? _thumbSnapshotTrack;
+    private byte[]? _thumbSnapshotBytes;
+    private string? _thumbSnapshotSignature;
     private volatile bool _hasThumbnail;
+    private TaskCompletionSource<bool>? _thumbReadyTcs;
+    private CancellationTokenSource? _thumbVerifyCts;
+    private bool _settleVerifyDoneForCurrentSong;
+    private readonly Dictionary<string, (TrackInfo Owner, long Order)> _knownThumbOwners = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _rejectedStaleSigsForCurrentSong = new(StringComparer.Ordinal);
+    private long _thumbOwnerSeq;
+
+    private static readonly int[] StaleRetryDelaysMs = [120, 320, 700, 1400];
+    private static readonly int[] SettleVerifyDelaysMs = [300, 850];
 
     /// <summary>当前 SMTC 曲目封面变更计数；当同一首歌延后或更换推送 SMTC 封面时会递增。</summary>
     public long ThumbnailVersion => Volatile.Read(ref _thumbnailVersion);
 
-    /// <summary>当前 SMTC 会话最近一次检测到的封面缩略图是否非空。</summary>
+    /// <summary>当前 SMTC 会话最近一次检测到的有效封面缩略图是否非空。</summary>
     public bool HasThumbnail => _hasThumbnail;
 
     /// <summary>
+    /// 获取与当前曲目严格匹配的 SMTC 封面缩略图快照及版本号；
+    /// 若同一首曲目的初次缩略图尚在异步读取与防陈旧校验中，会等待该次读取完成，避免独立重读造成跨歌错配。
+    /// </summary>
+    internal async Task<ThumbnailSnapshot> GetThumbnailForTrackAsync(TrackInfo expectedTrack, CancellationToken ct = default)
+    {
+        for (var attempt = 0; attempt < 10; attempt++)
+        {
+            Task<bool>? waitTask = null;
+            lock (_lock)
+            {
+                if (!SameTrackIdentity(expectedTrack, CurrentTrack))
+                    return new ThumbnailSnapshot(null, Volatile.Read(ref _thumbnailVersion));
+
+                if (_thumbReadyTcs is null || _thumbReadyTcs.Task.IsCompleted)
+                {
+                    var bytes = _thumbSnapshotTrack is not null && SameTrackIdentity(expectedTrack, _thumbSnapshotTrack)
+                        ? _thumbSnapshotBytes
+                        : null;
+                    return new ThumbnailSnapshot(bytes, Volatile.Read(ref _thumbnailVersion));
+                }
+
+                waitTask = _thumbReadyTcs.Task;
+            }
+
+            if (waitTask is not null)
+                await waitTask.WaitAsync(ct).ConfigureAwait(false);
+        }
+
+        lock (_lock)
+        {
+            if (!SameTrackIdentity(expectedTrack, CurrentTrack))
+                return new ThumbnailSnapshot(null, Volatile.Read(ref _thumbnailVersion));
+
+            var bytes = _thumbSnapshotTrack is not null && SameTrackIdentity(expectedTrack, _thumbSnapshotTrack)
+                ? _thumbSnapshotBytes
+                : null;
+            return new ThumbnailSnapshot(bytes, Volatile.Read(ref _thumbnailVersion));
+        }
+    }
+
+    /// <summary>
     /// 取来正在播放曲目的专辑封面，且<b>完全按照播放应用提供的原样</b>。
-    ///
-    /// Spotify、Apple Music 等会把封面一并放进 SMTC 发送。相比外部检索(iTunes·Deezer)
-    /// 这样做的好处很明确 — 既不需要网络也不需要密钥，而且<b>不会因检索而拿到别的专辑</b>
-    /// (可区分重制版·单曲版，连韩国独立音乐这类 iTunes 上完全没有的曲目也能对上)。
-    /// 也有不提供封面的应用，取不到时为 null，此时回退到服务端封面。
     /// </summary>
     public async Task<byte[]?> GetThumbnailAsync()
     {
+        var track = CurrentTrack;
+        if (track is not null)
+            return (await GetThumbnailForTrackAsync(track).ConfigureAwait(false)).Bytes;
+
         Session? session;
         lock (_lock) session = _session;
         if (session is null) return null;
@@ -791,20 +844,260 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
             ? $"{bytes.Length}:{Convert.ToHexString(SHA256.HashData(bytes))}"
             : "";
 
-    private static bool SameTrackIdentity(TrackInfo? a, TrackInfo? b)
+    /// <summary>判断两次曲目快照是否仍代表同一首歌（允许 Album 由空补全与 Duration 变化）。</summary>
+    internal static bool SameTrackIdentity(TrackInfo? a, TrackInfo? b)
     {
         if (ReferenceEquals(a, b)) return true;
         if (a is null || b is null) return false;
         return string.Equals(a.Title, b.Title, StringComparison.Ordinal)
             && string.Equals(a.Artist, b.Artist, StringComparison.Ordinal)
-            && string.Equals(a.SourceAppId, b.SourceAppId, StringComparison.Ordinal);
+            && string.Equals(a.SourceAppId, b.SourceAppId, StringComparison.Ordinal)
+            && (string.IsNullOrEmpty(a.Album) || string.IsNullOrEmpty(b.Album)
+                || string.Equals(a.Album, b.Album, StringComparison.Ordinal));
     }
 
-    private async Task RefreshTrackAsync()
+    private static bool IsDifferentArtworkExpected(TrackInfo a, TrackInfo b)
     {
-        var seq = Interlocked.Increment(ref _trackRefreshSeq);
+        if (SameTrackIdentity(a, b)) return false;
+        if (!string.Equals(a.SourceAppId, b.SourceAppId, StringComparison.OrdinalIgnoreCase)) return true;
+        if (!string.IsNullOrWhiteSpace(a.Album) && !string.IsNullOrWhiteSpace(b.Album))
+            return !string.Equals(a.Album, b.Album, StringComparison.OrdinalIgnoreCase);
+        return !string.IsNullOrWhiteSpace(a.Artist) && !string.IsNullOrWhiteSpace(b.Artist)
+            && !string.Equals(a.Artist, b.Artist, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static TrackInfo? TryBuildTrack(
+        Session session,
+        global::Windows.Media.Control.GlobalSystemMediaTransportControlsSessionMediaProperties props,
+        out global::Windows.Storage.Streams.IRandomAccessStreamReference? thumbRef)
+    {
+        thumbRef = null;
+        var artist = props.Artist ?? "";
+        var album = props.AlbumTitle ?? "";
+        // 广告时段不是曲目 — 不创建曲目，因此歌词检索与服务端查询完全不会发生。
+        if (string.IsNullOrEmpty(props.Title) || AdSignals.LooksLikeAd(artist, album))
+            return null;
+
+        TimeSpan? duration = null;
+        try
+        {
+            var timeline = session.GetTimelineProperties();
+            if (timeline.EndTime > TimeSpan.Zero) duration = timeline.EndTime;
+        }
+        catch { }
+
+        string finalTitle;
+        string finalArtist;
+        if (IsBrowserOrVideoSource(session.SourceAppUserModelId))
+        {
+            Musebase.Core.Search.SearchTermCleaner.ExtractVideoSongInfo(
+                props.Title, artist, out finalTitle, out finalArtist);
+        }
+        else
+        {
+            finalTitle = SanitizeTitle(props.Title, session.SourceAppUserModelId);
+            finalArtist = SanitizeArtist(artist);
+        }
+
+        thumbRef = props.Thumbnail;
+        return new TrackInfo(finalTitle, finalArtist, album, duration, session.SourceAppUserModelId);
+    }
+
+    private TrackInfo? TryUpdateTrackDurationLocked(TimeSpan endTime)
+    {
+        if (endTime <= TimeSpan.Zero || CurrentTrack is not { } cur || cur.Duration == endTime)
+            return null;
+        var updated = cur with { Duration = endTime };
+        CurrentTrack = updated;
+        if (_thumbSnapshotTrack is not null && SameTrackIdentity(_thumbSnapshotTrack, updated))
+            _thumbSnapshotTrack = updated;
+        return updated;
+    }
+
+    private void ResetPlaybackTrackStateLocked()
+    {
+        _lastReportedValue = TimeSpan.MinValue;
+        _lastAdvanceAt = DateTimeOffset.MinValue;
+        _smoothedPosition = TimeSpan.MinValue;
+        _smoothedTrackKey = null;
+        _lastSampleAt = DateTimeOffset.MinValue;
+        _positionWindowStart = DateTimeOffset.MinValue;
+        _positionWindowPosition = TimeSpan.Zero;
+        _positionReliable = true;
+        _wallAnchorAt = DateTimeOffset.MinValue;
+        _wallAnchorPosition = TimeSpan.Zero;
+        _timingTrackKey = null;
+        _trackPlayStartedAt = DateTimeOffset.MinValue;
+        _seekAnchorActive = false;
+        _seekBaselineReported = TimeSpan.MinValue;
+    }
+
+    private void CancelThumbVerifyLocked()
+    {
+        if (_thumbVerifyCts is null) return;
+        _thumbVerifyCts.Cancel();
+        _thumbVerifyCts.Dispose();
+        _thumbVerifyCts = null;
+    }
+
+    private void RecordKnownThumbOwnerLocked(string sig, TrackInfo owner)
+    {
+        _knownThumbOwners[sig] = (owner, ++_thumbOwnerSeq);
+        if (_knownThumbOwners.Count <= 16) return;
+
+        string? oldestKey = null;
+        var oldestOrder = long.MaxValue;
+        foreach (var (key, entry) in _knownThumbOwners)
+        {
+            if (entry.Order < oldestOrder)
+            {
+                oldestOrder = entry.Order;
+                oldestKey = key;
+            }
+        }
+        if (oldestKey is not null) _knownThumbOwners.Remove(oldestKey);
+    }
+
+    private bool IsThumbnailStaleLocked(TrackInfo track, string sig)
+    {
+        if (sig.Length == 0) return false;
+        if (_rejectedStaleSigsForCurrentSong.Contains(sig)) return true;
+        return _knownThumbOwners.TryGetValue(sig, out var known)
+            && IsDifferentArtworkExpected(known.Owner, track);
+    }
+
+    private int[]? CommitThumbnailLocked(long seq, Session session, TrackInfo track, byte[]? thumbBytes, string sig, bool fromVerify)
+    {
+        if (seq != Volatile.Read(ref _trackRefreshSeq)
+            || !SameSession(session, _session)
+            || !SameTrackIdentity(track, CurrentTrack))
+            return null;
+
+        var suspectedStale = IsThumbnailStaleLocked(track, sig);
+        if (suspectedStale)
+        {
+            _rejectedStaleSigsForCurrentSong.Add(sig);
+            _thumbSnapshotTrack = track;
+            _hasThumbnail = false;
+            if (_thumbSnapshotBytes is not null || !string.Equals(_thumbSnapshotSignature, "", StringComparison.Ordinal))
+            {
+                _thumbSnapshotBytes = null;
+                _thumbSnapshotSignature = "";
+                Interlocked.Increment(ref _thumbnailVersion);
+            }
+            return fromVerify ? null : StaleRetryDelaysMs;
+        }
+
+        if (thumbBytes is { Length: > 0 })
+        {
+            // 若同首歌后续拿到新的正式封面，把原先短暂误绑到当前曲目的旧图迁出已知表并加入排除列表，以免回切误伤
+            if (_thumbSnapshotTrack is not null
+                && SameTrackIdentity(_thumbSnapshotTrack, track)
+                && !string.IsNullOrEmpty(_thumbSnapshotSignature)
+                && !string.Equals(_thumbSnapshotSignature, sig, StringComparison.Ordinal))
+            {
+                if (_knownThumbOwners.TryGetValue(_thumbSnapshotSignature, out var prevOwner)
+                    && SameTrackIdentity(prevOwner.Owner, track))
+                {
+                    _knownThumbOwners.Remove(_thumbSnapshotSignature);
+                }
+                _rejectedStaleSigsForCurrentSong.Add(_thumbSnapshotSignature);
+            }
+
+            RecordKnownThumbOwnerLocked(sig, track);
+            _thumbSnapshotTrack = track;
+            _thumbSnapshotBytes = thumbBytes;
+            _hasThumbnail = true;
+            if (!string.Equals(sig, _thumbSnapshotSignature, StringComparison.Ordinal))
+            {
+                _thumbSnapshotSignature = sig;
+                Interlocked.Increment(ref _thumbnailVersion);
+            }
+
+            if (!fromVerify && !_settleVerifyDoneForCurrentSong)
+            {
+                _settleVerifyDoneForCurrentSong = true;
+                return SettleVerifyDelaysMs;
+            }
+            return null;
+        }
+
+        _thumbSnapshotTrack = track;
+        _hasThumbnail = false;
+        if (_thumbSnapshotBytes is not null)
+        {
+            _thumbSnapshotBytes = null;
+            _thumbSnapshotSignature = "";
+            Interlocked.Increment(ref _thumbnailVersion);
+        }
+        else if (_thumbSnapshotSignature is null)
+        {
+            _thumbSnapshotSignature = "";
+        }
+
+        return fromVerify ? null : StaleRetryDelaysMs;
+    }
+
+    private CancellationToken ResetThumbVerifyTokenLocked()
+    {
+        CancelThumbVerifyLocked();
+        _thumbVerifyCts = new CancellationTokenSource();
+        return _thumbVerifyCts.Token;
+    }
+
+    private async Task VerifyThumbnailDelayedAsync(long seq, Session session, TrackInfo expectedTrack, int[] delaysMs, CancellationToken ct)
+    {
+        try
+        {
+            var prevDelay = 0;
+            foreach (var targetMs in delaysMs)
+            {
+                var stepDelay = Math.Max(10, targetMs - prevDelay);
+                prevDelay = targetMs;
+                await Task.Delay(stepDelay, ct).ConfigureAwait(false);
+                if (ct.IsCancellationRequested || seq != Volatile.Read(ref _trackRefreshSeq)) return;
+
+                var props = await session.TryGetMediaPropertiesAsync();
+                if (ct.IsCancellationRequested || seq != Volatile.Read(ref _trackRefreshSeq)) return;
+
+                var currentTrack = TryBuildTrack(session, props, out var thumbRef);
+                if (currentTrack is null || !SameTrackIdentity(currentTrack, expectedTrack)) return;
+
+                var thumbBytes = await ReadThumbnailBytesAsync(thumbRef).ConfigureAwait(false);
+                if (ct.IsCancellationRequested || seq != Volatile.Read(ref _trackRefreshSeq)) return;
+
+                var sig = ComputeThumbnailSignature(thumbBytes);
+                bool obtainedValid;
+                lock (_lock)
+                {
+                    if (ct.IsCancellationRequested) return;
+                    CommitThumbnailLocked(seq, session, currentTrack, thumbBytes, sig, fromVerify: true);
+                    obtainedValid = _hasThumbnail;
+                }
+                if (obtainedValid) return;
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+        }
+        catch
+        {
+            // 会话关闭/属性 读取竞态 — 静默结束延迟校验
+        }
+    }
+
+    private async Task RefreshTrackAsync(Session? expectedSender = null)
+    {
+        long seq;
         Session? session;
-        lock (_lock) session = _session;
+        lock (_lock)
+        {
+            if (expectedSender is not null && !SameSession(expectedSender, _session))
+                return;
+            seq = Interlocked.Increment(ref _trackRefreshSeq);
+            CancelThumbVerifyLocked();
+            session = _session;
+        }
 
         TrackInfo? track = null;
         global::Windows.Storage.Streams.IRandomAccessStreamReference? thumbRef = null;
@@ -813,36 +1106,8 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
             try
             {
                 var props = await session.TryGetMediaPropertiesAsync();
-                var timeline = session.GetTimelineProperties();
-                var duration = timeline.EndTime > TimeSpan.Zero ? timeline.EndTime : (TimeSpan?)null;
-                var artist = props.Artist ?? "";
-                var album = props.AlbumTitle ?? "";
-
-                // 广告时段不是曲目 — 不创建曲目，因此歌词检索与服务端查询完全不会发生。
-                // SMTC 没有广告标志与 mediaId，因此只看经实测验证的信号 ③(艺人=Spotify +
-                // 专辑为空)。判定规则与 Android 使用同一套代码(Engine 的 AdSignals)。
-                // 注意：广告判定要用**原始艺人名**，清洗要在判定之后做。
-                if (!string.IsNullOrEmpty(props.Title) && !AdSignals.LooksLikeAd(artist, album))
-                {
-                    string finalTitle;
-                    string finalArtist;
-                    if (IsBrowserOrVideoSource(session.SourceAppUserModelId))
-                    {
-                        Musebase.Core.Search.SearchTermCleaner.ExtractVideoSongInfo(
-                            props.Title, artist, out finalTitle, out finalArtist);
-                    }
-                    else
-                    {
-                        finalTitle = SanitizeTitle(props.Title, session.SourceAppUserModelId);
-                        finalArtist = SanitizeArtist(artist);
-                    }
-
-                    track = new TrackInfo(
-                        finalTitle,
-                        finalArtist,
-                        album, duration, session.SourceAppUserModelId);
-                    thumbRef = props.Thumbnail;
-                }
+                if (seq != Volatile.Read(ref _trackRefreshSeq)) return;
+                track = TryBuildTrack(session, props, out thumbRef);
             }
             catch
             {
@@ -850,63 +1115,77 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
             }
         }
 
-        var trackChanged = !Equals(track, CurrentTrack);
-        if (trackChanged)
+        TaskCompletionSource<bool>? readyTcs = null;
+        bool trackChanged;
+        try
         {
-            CurrentTrack = track;
             lock (_lock)
             {
-                // 换曲后"上次位置"与平滑状态都作废
-                _lastReportedValue = TimeSpan.MinValue;
-                _lastAdvanceAt = DateTimeOffset.MinValue;
-                _smoothedPosition = TimeSpan.MinValue;
-                _smoothedTrackKey = null;
-                _lastSampleAt = DateTimeOffset.MinValue;
-                _positionWindowStart = DateTimeOffset.MinValue;
-                _positionWindowPosition = TimeSpan.Zero;
-                _positionReliable = true;
-                _wallAnchorAt = DateTimeOffset.MinValue;
-                _wallAnchorPosition = TimeSpan.Zero;
-                _timingTrackKey = null;
-                _trackPlayStartedAt = DateTimeOffset.MinValue;
-                _seekAnchorActive = false;
-                _seekBaselineReported = TimeSpan.MinValue;
-                _lastThumbnailSignature = null;
-                _hasThumbnail = thumbRef is not null;
-            }
-            TrackChanged?.Invoke(track);
-        }
+                if (seq != Volatile.Read(ref _trackRefreshSeq) || !SameSession(session, _session))
+                    return;
 
-        if (track is null)
-        {
-            if (seq == Volatile.Read(ref _trackRefreshSeq))
-            {
-                lock (_lock)
+                var prevTrack = CurrentTrack;
+                trackChanged = !Equals(track, prevTrack);
+                var songChanged = !SameTrackIdentity(track, prevTrack);
+
+                if (trackChanged)
+                    CurrentTrack = track;
+
+                if (songChanged)
                 {
-                    _lastThumbnailSignature = null;
+                    ResetPlaybackTrackStateLocked();
+                    _thumbSnapshotTrack = track;
+                    _thumbSnapshotBytes = null;
+                    _thumbSnapshotSignature = null;
                     _hasThumbnail = false;
+                    _rejectedStaleSigsForCurrentSong.Clear();
+                    _settleVerifyDoneForCurrentSong = false;
+                    if (prevTrack is not null || track is not null)
+                        Interlocked.Increment(ref _thumbnailVersion);
+                }
+                else if (trackChanged && _thumbSnapshotTrack is not null && SameTrackIdentity(track, _thumbSnapshotTrack))
+                {
+                    _thumbSnapshotTrack = track;
+                }
+
+                if (track is null || session is null)
+                {
+                    var done = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                    done.TrySetResult(true);
+                    _thumbReadyTcs = done;
+                }
+                else
+                {
+                    readyTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                    _thumbReadyTcs = readyTcs;
                 }
             }
-            return;
-        }
 
-        var thumbBytes = await ReadThumbnailBytesAsync(thumbRef).ConfigureAwait(false);
-        if (seq != Volatile.Read(ref _trackRefreshSeq)) return;
-
-        var sig = ComputeThumbnailSignature(thumbBytes);
-        lock (_lock)
-        {
-            if (!SameTrackIdentity(track, CurrentTrack)) return;
-            _hasThumbnail = thumbBytes is { Length: > 0 };
             if (trackChanged)
+                TrackChanged?.Invoke(track);
+
+            if (track is null || session is null)
+                return;
+
+            var thumbBytes = await ReadThumbnailBytesAsync(thumbRef).ConfigureAwait(false);
+            if (seq != Volatile.Read(ref _trackRefreshSeq)) return;
+
+            var sig = ComputeThumbnailSignature(thumbBytes);
+            int[]? verifyDelays;
+            CancellationToken verifyCt = default;
+            lock (_lock)
             {
-                _lastThumbnailSignature = sig;
+                verifyDelays = CommitThumbnailLocked(seq, session, track, thumbBytes, sig, fromVerify: false);
+                if (verifyDelays is { Length: > 0 })
+                    verifyCt = ResetThumbVerifyTokenLocked();
             }
-            else if (_lastThumbnailSignature is null || !string.Equals(sig, _lastThumbnailSignature, StringComparison.Ordinal))
-            {
-                _lastThumbnailSignature = sig;
-                Interlocked.Increment(ref _thumbnailVersion);
-            }
+
+            if (verifyDelays is { Length: > 0 })
+                _ = VerifyThumbnailDelayedAsync(seq, session, track, verifyDelays, verifyCt);
+        }
+        finally
+        {
+            readyTcs?.TrySetResult(true);
         }
     }
 
@@ -962,13 +1241,17 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
         TimeSpan reported;
         DateTimeOffset lastUpdated;
         bool playingNow;
+        TrackInfo? durationUpdatedTrack = null;
         try
         {
             var timeline = session.GetTimelineProperties();
-            if (timeline.EndTime > TimeSpan.Zero && CurrentTrack is { } cur && cur.Duration != timeline.EndTime)
+            if (timeline.EndTime > TimeSpan.Zero)
             {
-                CurrentTrack = cur with { Duration = timeline.EndTime };
-                TrackChanged?.Invoke(CurrentTrack);
+                lock (_lock)
+                {
+                    if (SameSession(session, _session))
+                        durationUpdatedTrack = TryUpdateTrackDurationLocked(timeline.EndTime);
+                }
             }
 
             reported = timeline.Position;
@@ -982,6 +1265,9 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
         {
             return null;
         }
+
+        if (durationUpdatedTrack is not null)
+            TrackChanged?.Invoke(durationUpdatedTrack);
 
         var now = DateTimeOffset.Now;
         var trackKey = CurrentTrack is { } t ? $"{t.Title}|{t.Artist}" : null;
@@ -1283,6 +1569,8 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
         _pollTimer = null;
         lock (_lock)
         {
+            CancelThumbVerifyLocked();
+            _thumbReadyTcs?.TrySetResult(false);
             if (_session is not null)
             {
                 _session.MediaPropertiesChanged -= OnMediaPropertiesChanged;

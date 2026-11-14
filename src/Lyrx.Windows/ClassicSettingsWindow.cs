@@ -282,6 +282,18 @@ internal sealed class ClassicSettingsWindow : Window
             "将歌词窗口固定在其他窗口最前方，适合小窗模式",
             topmostToggle));
 
+        var karaokeToggle = CreateToggleSwitch(settings.CharacterKaraoke, val =>
+        {
+            settings.CharacterKaraoke = val;
+            SaveAndNotify();
+        });
+        var karaokeRow = CreateSettingRow(
+            "逐字高亮（卡拉OK）",
+            "歌词包含逐字时间轴时，按演唱进度逐词点亮当前行",
+            karaokeToggle);
+        karaokeRow.Margin = new Thickness(0, 6, 0, 2);
+        windowCard.Children.Add(karaokeRow);
+
         // 行距：英文与韩文的字形比汉字更需要行间留白，给一个档位而不是写死一套参数
         var spacingIds = new[] { "compact", "normal", "loose" };
         var spacingLabels = new List<string> { "紧凑", "标准", "宽松" };
@@ -314,9 +326,10 @@ internal sealed class ClassicSettingsWindow : Window
 
         var presets = ClassicLyricsPalette.ThemePresets;
         var presetLabels = presets.Select(p => p.Label).ToList();
-        var currentThemeIdx = Math.Max(0, presets
+        int FindThemeIndex(string? mode) => Math.Max(0, presets
             .Select((p, idx) => (p, idx))
-            .FirstOrDefault(x => string.Equals(x.p.Id, settings.ClassicBackgroundMode, StringComparison.OrdinalIgnoreCase)).idx);
+            .FirstOrDefault(x => string.Equals(x.p.Id, mode, StringComparison.OrdinalIgnoreCase)).idx);
+        var currentThemeIdx = FindThemeIndex(settings.ClassicBackgroundMode);
 
         var swatchBorders = new List<(string Id, Border Frame)>();
         Action<int>? setThemeDropdownIndex = null;
@@ -680,6 +693,8 @@ internal sealed class ClassicSettingsWindow : Window
             timingDiagnosticsToggle.IsChecked = settings.TimingDiagnosticsEnabled;
             showTransToggle.IsChecked = settings.ClassicShowTranslation;
             topmostToggle.IsChecked = settings.ClassicTopmost;
+            karaokeToggle.IsChecked = settings.CharacterKaraoke;
+            SelectThemeByIndex(FindThemeIndex(settings.ClassicBackgroundMode), notify: false);
             trackStatusText.Text = getTrackSummary();
             RefreshOffsetText();
             suppressingEvents = false;

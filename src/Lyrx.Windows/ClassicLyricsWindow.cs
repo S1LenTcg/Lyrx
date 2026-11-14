@@ -64,6 +64,7 @@ internal sealed class ClassicLyricsWindow : Window
     private readonly Button _resume;
     private readonly Button _translate;
     private readonly Button _fullscreen;
+    private readonly Border _captionBar;
     private readonly Action _onToggleTranslation;
     private readonly WindowChrome _chrome;
     private readonly Dictionary<int, LyricRow> _rows = new();
@@ -74,6 +75,7 @@ internal sealed class ClassicLyricsWindow : Window
     private long _coverGeneration;
     private bool _coverInFlight;
     private bool _coverFromSmtc;
+    private bool _coverWaitingOnlineFallback;
     private bool _coverTriedArtworkUrl;
     private long _coverThumbnailVersion = -1;
     private int _activeIndex = -1;
@@ -172,6 +174,10 @@ internal sealed class ClassicLyricsWindow : Window
         var transport = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
         footer.Children.Add(transport);
 
+        _adjustOffset = adjustOffset;
+        if (_coordinator.TrackOffsetSeconds == 0 && _coordinator.CurrentTrack is { } initialTrack)
+            _coordinator.TrackOffsetSeconds = _settings.GetTrackOffset(TrackOffsetKey(initialTrack));
+
         var windowControls = new StackPanel
         {
             Orientation = Orientation.Horizontal,
@@ -179,19 +185,37 @@ internal sealed class ClassicLyricsWindow : Window
             VerticalAlignment = VerticalAlignment.Center,
             Margin = new Thickness(8, 0, 0, 0),
         };
+        _offsetBtn = CreateOffsetTriggerButton();
+        _offsetPopup = CreateOffsetPopup();
+        UpdateOffsetButton();
         _translate = ChromeButton(ClassicTransportIcon.Translate, "切换双语歌词", ToggleTranslation);
         UpdateTranslateButton();
         var settingsBtn = ChromeButton(ClassicTransportIcon.Settings, "设置", openSettings);
-        var minimize = ChromeButton(ClassicTransportIcon.Minimize, "最小化", () => WindowState = WindowState.Minimized);
-        _fullscreen = ChromeButton(ClassicTransportIcon.Fullscreen, "全屏 (F11)", ToggleFullscreen);
-        var close = ChromeButton(ClassicTransportIcon.Close, "关闭", Close);
+        windowControls.Children.Add(_offsetBtn);
         windowControls.Children.Add(_translate);
         windowControls.Children.Add(settingsBtn);
-        windowControls.Children.Add(minimize);
-        windowControls.Children.Add(_fullscreen);
-        windowControls.Children.Add(close);
         Grid.SetColumn(windowControls, 2);
         footer.Children.Add(windowControls);
+
+        var minimize = ChromeButton(ClassicTransportIcon.Minimize, "最小化", () => WindowState = WindowState.Minimized, height: 32);
+        minimize.Margin = new Thickness(0);
+        _fullscreen = ChromeButton(ClassicTransportIcon.Fullscreen, "全屏 (F11)", ToggleFullscreen, height: 32);
+        _fullscreen.Margin = new Thickness(16, 0, 16, 0);
+        var close = ChromeButton(ClassicTransportIcon.Close, "关闭", Close, height: 32);
+        close.Margin = new Thickness(0);
+        var captionButtons = new StackPanel { Orientation = Orientation.Horizontal };
+        captionButtons.Children.Add(minimize);
+        captionButtons.Children.Add(_fullscreen);
+        captionButtons.Children.Add(close);
+        _captionBar = new Border
+        {
+            Child = captionButtons,
+            Background = Brushes.Transparent,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            VerticalAlignment = VerticalAlignment.Top,
+            Margin = new Thickness(0, 10, 12, 0),
+        };
+        Panel.SetZIndex(_captionBar, 20);
 
         void LayoutFooter(double width)
         {
@@ -207,6 +231,7 @@ internal sealed class ClassicLyricsWindow : Window
             footer.ColumnDefinitions[1].Width = compact
                 ? new GridLength(0)
                 : new GridLength(Math.Clamp(width * 0.44, 280, 722));
+            footer.ColumnDefinitions[2].MinWidth = compact ? 0 : 156;
             footer.ColumnDefinitions[2].Width = compact
                 ? GridLength.Auto
                 : new GridLength(1, GridUnitType.Star);
@@ -284,6 +309,7 @@ internal sealed class ClassicLyricsWindow : Window
         var globalGroup = new MenuItem { Header = "所有歌曲" };
         foreach (var (label, offset) in new (string, double?)[]
         {
+            ("歌词提前 0.1 秒", 0.1), ("歌词延后 0.1 秒", -0.1),
             ("歌词提前 0.2 秒", 0.2), ("歌词延后 0.2 秒", -0.2),
             ("歌词提前 0.5 秒", 0.5), ("歌词延后 0.5 秒", -0.5),
             ("重置歌词时间偏移", null),
@@ -312,6 +338,7 @@ internal sealed class ClassicLyricsWindow : Window
         syncMenu.Items.Add(trackGroup);
         _resume.ContextMenu = syncMenu;
         lyricsView.Children.Add(_resume);
+        lyricsView.Children.Add(_captionBar);
         _resume.Click += (_, _) =>
         {
             _coordinator.RefreshCurrentLine();
@@ -321,16 +348,24 @@ internal sealed class ClassicLyricsWindow : Window
 
         void AdjustTrackOffset(double? offset)
         {
-            if (offset is null) _coordinator.TrackOffsetSeconds = 0;
-            else _coordinator.TrackOffsetSeconds += offset.Value;
+            var next = offset is null
+                ? 0
+                : Math.Clamp(Math.Round(_coordinator.TrackOffsetSeconds + offset.Value, 2), -60d, 60d);
+            if (Math.Abs(next) < 0.005) next = 0;
+            _coordinator.TrackOffsetSeconds = next;
+            _settings.SetTrackOffset(TrackOffsetKey(_track ?? _coordinator.CurrentTrack), next);
+            _settings.Save();
+            UpdateOffsetButton();
+            Refresh();
         }
+        _adjustTrackOffsetAction = AdjustTrackOffset;
 
         _panel = new Border
         {
             Child = lyricsView,
             Background = new SolidColorBrush(DefaultBackground),
-            Margin = new Thickness(10, 16, 10, 6),
-            CornerRadius = new CornerRadius(8),
+            Margin = new Thickness(0),
+            CornerRadius = new CornerRadius(0),
             ClipToBounds = true,
         };
         layout.Children.Add(_panel);
@@ -358,12 +393,14 @@ internal sealed class ClassicLyricsWindow : Window
         Closed += (_, _) => { _timer.Stop(); _progress.CancelPendingSeek(); CancelCoverLoad(); SavePlacement(); };
         PreviewKeyDown += (_, e) =>
         {
-            if (e.Key == Key.F11)
+            if (HandleOffsetKeyDown(e)) return;
+            var key = e.Key == Key.System ? e.SystemKey : e.Key;
+            if (key == Key.F11)
             {
                 ToggleFullscreen();
                 e.Handled = true;
             }
-            else if (e.Key == Key.Escape && _isFullscreen)
+            else if (key == Key.Escape && _isFullscreen)
             {
                 SetFullscreen(false);
                 e.Handled = true;
@@ -472,9 +509,12 @@ internal sealed class ClassicLyricsWindow : Window
         var songChanged = !SameTrackIdentity(track, _track);
         var trackChanged = !Equals(track, _track);
 
+        UpdateOffsetButton();
         if (songChanged)
         {
             _track = track;
+            _coordinator.TrackOffsetSeconds = _settings.GetTrackOffset(TrackOffsetKey(track));
+            UpdateOffsetButton();
             _activeIndex = -1;
             _seekGeneration++;
             _seekInFlight = false;
@@ -485,6 +525,7 @@ internal sealed class ClassicLyricsWindow : Window
             CancelCoverLoad();
             _coverInFlight = false;
             _coverFromSmtc = false;
+            _coverWaitingOnlineFallback = false;
             _coverTriedArtworkUrl = false;
             _coverThumbnailVersion = _player.ThumbnailVersion;
             _title.Text = track?.Title ?? "等待播放";
@@ -527,12 +568,16 @@ internal sealed class ClassicLyricsWindow : Window
             }
         }
 
-        if (!songChanged && track is not null && !_coverInFlight)
+        if (!songChanged && track is not null)
         {
             var preferOnlineCover = Services.NowPlayingService.IsBrowserOrVideoSource(track.SourceAppId);
-            var delayedArtworkArrived = _cover.Source is null && !_coverTriedArtworkUrl && lyrics?.Metadata.ArtworkUrl is not null;
-            var smtcThumbnailChanged = _player.ThumbnailVersion != _coverThumbnailVersion
-                && (_cover.Source is null || _coverFromSmtc || (!preferOnlineCover && _player.HasThumbnail));
+            var smtcVersionChanged = _player.ThumbnailVersion != _coverThumbnailVersion;
+            var authoritativeSmtcArrived = !preferOnlineCover && smtcVersionChanged && _player.HasThumbnail;
+            var delayedArtworkArrived = !_coverInFlight && !_coverTriedArtworkUrl && lyrics?.Metadata.ArtworkUrl is not null
+                && (_cover.Source is null || (preferOnlineCover && _coverFromSmtc));
+            var smtcThumbnailChanged = smtcVersionChanged && (
+                (authoritativeSmtcArrived && (!_coverInFlight || _coverWaitingOnlineFallback || _coverFromSmtc || _cover.Source is null))
+                || (!_coverInFlight && (_cover.Source is null || _coverFromSmtc)));
             if (delayedArtworkArrived || smtcThumbnailChanged)
                 StartCoverLoad(track, lyrics?.Metadata.ArtworkUrl);
         }
@@ -618,6 +663,14 @@ internal sealed class ClassicLyricsWindow : Window
         else if (_resumeScrollPending && !_manualScroll && !_isAnimatingTranslation)
         {
             FollowActiveLine(animate: false);
+        }
+
+        if (_activeIndex >= 0
+            && _activeIndex < lyrics.Lines.Count
+            && _rows.TryGetValue(_activeIndex, out var activeRow))
+        {
+            var elapsed = adjusted - lyrics.Lines[_activeIndex].Position;
+            activeRow.UpdateKaraokeProgress(elapsed, KaraokeUnlitColor(), Colors.White, _settings.CharacterKaraoke);
         }
     }
 
@@ -909,8 +962,9 @@ internal sealed class ClassicLyricsWindow : Window
                 var line = lyrics.Lines[i];
                 if (!line.Enabled) continue;
                 var mainText = string.IsNullOrWhiteSpace(line.Content) ? "♪" : line.Content;
+                var timeTags = string.IsNullOrWhiteSpace(line.Content) ? null : line.Attachments.GetInlineTimeTags();
                 var subText = ExtractTranslation(line);
-                var row = NewLine(mainText, subText, progress);
+                var row = NewLine(mainText, subText, progress, timeTags);
                 var linePos = line.Position;
                 row.Cursor = Cursors.Hand;
                 row.MouseLeftButtonUp += (_, e) =>
@@ -947,9 +1001,9 @@ internal sealed class ClassicLyricsWindow : Window
         ResizeLyrics();
     }
 
-    private LyricRow NewLine(string text, string? translation = null, double progress = 0d)
+    private LyricRow NewLine(string text, string? translation = null, double progress = 0d, InlineTimeTags? timeTags = null)
     {
-        var row = new LyricRow(text, translation, _subdued, progress, _latinMetrics)
+        var row = new LyricRow(text, translation, _subdued, progress, _latinMetrics, timeTags)
         {
             LineHeightScale = _lineHeightScale,
             GapScale = _rowGapScale,
@@ -1009,7 +1063,7 @@ internal sealed class ClassicLyricsWindow : Window
         var width = _scroll.ActualWidth;
         if (width <= 0) return;
         var side = width < 600 ? 24 : width < 900 ? 40 : Math.Max(64, (width - 1024) / 2);
-        var top = width < 600 ? 36 : 64;
+        var top = width < 600 ? 48 : 64;
         _lines.Margin = new Thickness(side, top, side, _scroll.ActualHeight / 2);
         var size = CurrentMainFontSize();
         foreach (LyricRow line in _lines.Children)
@@ -1117,20 +1171,13 @@ internal sealed class ClassicLyricsWindow : Window
         _scroll.ScrollToVerticalOffset(offset);
     }
 
-    private static bool SameTrackIdentity(TrackInfo? a, TrackInfo? b)
-    {
-        if (ReferenceEquals(a, b)) return true;
-        if (a is null || b is null) return false;
-        return string.Equals(a.Title, b.Title, StringComparison.Ordinal)
-            && string.Equals(a.Artist, b.Artist, StringComparison.Ordinal)
-            && string.Equals(a.SourceAppId, b.SourceAppId, StringComparison.Ordinal)
-            && (string.IsNullOrEmpty(a.Album) || string.IsNullOrEmpty(b.Album)
-                || string.Equals(a.Album, b.Album, StringComparison.Ordinal));
-    }
+    private static bool SameTrackIdentity(TrackInfo? a, TrackInfo? b) =>
+        Services.NowPlayingService.SameTrackIdentity(a, b);
 
     private void CancelCoverLoad()
     {
         _coverGeneration++;
+        _coverWaitingOnlineFallback = false;
         if (_coverCts is not null)
         {
             _coverCts.Cancel();
@@ -1179,22 +1226,33 @@ internal sealed class ClassicLyricsWindow : Window
 
             if (bytes is null)
             {
-                smtcThumbVersion = _player.ThumbnailVersion;
-                bytes = await _player.GetThumbnailAsync();
+                var snapshot = await _player.GetThumbnailForTrackAsync(track, ct);
                 if (ct.IsCancellationRequested || generation != _coverGeneration || !SameTrackIdentity(_track, track)) return;
+                smtcThumbVersion = snapshot.Version;
+                bytes = snapshot.Bytes;
                 if (bytes is not null) fromSmtc = true;
             }
 
-            // 若本地 SMTC 未提供封面（例如 B 站桌面客户端），自动回退向在线音乐库检索高清专辑封面
+            // 若本地 SMTC 未提供封面（例如 B 站桌面客户端，或 SMTC 异步加载中/命中上首残留图），自动回退向在线音乐库检索高清专辑封面
             if (bytes is null && !preferOnlineCover)
             {
-                bytes = await Services.CoverFetcher.FetchCoverAsync(track.Title, track.Artist, artworkUrl, ct);
+                _coverWaitingOnlineFallback = true;
+                try
+                {
+                    bytes = await Services.CoverFetcher.FetchCoverAsync(track.Title, track.Artist, artworkUrl, ct);
+                }
+                finally
+                {
+                    if (generation == _coverGeneration)
+                        _coverWaitingOnlineFallback = false;
+                }
                 if (ct.IsCancellationRequested || generation != _coverGeneration || !SameTrackIdentity(_track, track)) return;
             }
 
             _coverThumbnailVersion = smtcThumbVersion;
             if (bytes is null)
             {
+                _cover.Source = null;
                 _coverFromSmtc = false;
                 ResetCoverPalette();
                 return;
@@ -1220,13 +1278,17 @@ internal sealed class ClassicLyricsWindow : Window
         }
         catch (Exception error) when (error is ArgumentException or NotSupportedException or InvalidOperationException or IOException)
         {
+            _cover.Source = null;
             _coverFromSmtc = false;
             ResetCoverPalette();
         }
         finally
         {
             if (generation == _coverGeneration)
+            {
                 _coverInFlight = false;
+                _coverWaitingOnlineFallback = false;
+            }
         }
     }
 
@@ -1258,6 +1320,17 @@ internal sealed class ClassicLyricsWindow : Window
         }
     }
 
+    private Color KaraokeUnlitColor() => BlendColor(_background, _subdued, 0.70);
+
+    private static Color BlendColor(Color from, Color to, double amount)
+    {
+        var t = Math.Clamp(amount, 0.0, 1.0);
+        return Color.FromRgb(
+            (byte)Math.Round(from.R + (to.R - from.R) * t),
+            (byte)Math.Round(from.G + (to.G - from.G) * t),
+            (byte)Math.Round(from.B + (to.B - from.B) * t));
+    }
+
     private Color RowColor(int index)
     {
         if (index == _activeIndex) return Colors.White;
@@ -1273,6 +1346,8 @@ internal sealed class ClassicLyricsWindow : Window
         var isPast = index < _activeIndex;
         var color = isHovered ? Colors.White : RowColor(index);
         row.UpdateVisualState(isActive, isPast, color, animate, isHovered);
+        if (isActive && !isHovered)
+            row.RefreshKaraokeColors(KaraokeUnlitColor(), Colors.White, _settings.CharacterKaraoke);
     }
 
     private static void SetRowVisual(LyricRow row, bool isActive, bool isPast, Color color, bool animate, bool isHovered = false)
@@ -1280,14 +1355,558 @@ internal sealed class ClassicLyricsWindow : Window
         row.UpdateVisualState(isActive, isPast, color, animate, isHovered);
     }
 
-    private Button ChromeButton(ClassicTransportIcon glyph, string label, Action onClick)
+    private const double OffsetPillCornerRadius = 15;
+    private const double OffsetScopeChipCornerRadius = 12;
+
+    private static readonly Brush OffsetPopupBg = CreateOffsetBrush(32, 32, 32);
+    private static readonly Brush OffsetPopupBorder = CreateOffsetBrush(64, 64, 64);
+    private static readonly Brush OffsetBtnBg = CreateOffsetBrush(42, 42, 42);
+    private static readonly Brush OffsetBtnHoverBg = CreateOffsetBrush(56, 56, 56);
+    private static readonly Brush OffsetBtnBorder = CreateOffsetBrush(58, 58, 58);
+    private static readonly Brush OffsetSegBg = CreateOffsetBrush(22, 22, 22);
+    private static readonly Brush OffsetSegActiveBg = CreateOffsetBrush(44, 62, 50);
+    private static readonly Brush OffsetSegActiveBorder = CreateOffsetAlphaBrush(80, 30, 215, 96);
+    private static readonly Brush OffsetSegHoverBg = CreateOffsetAlphaBrush(22, 255, 255, 255);
+    private static readonly System.Windows.Media.Animation.IEasingFunction OffsetScopeEase = CreateScopeEase();
+
+    private readonly Action<double?> _adjustOffset = null!;
+    private readonly Action<double?> _adjustTrackOffsetAction = null!;
+    private readonly Button _offsetBtn = null!;
+    private System.Windows.Shapes.Path _offsetClockPath = null!;
+    private TextBlock _offsetBadge = null!;
+    private readonly System.Windows.Controls.Primitives.Popup _offsetPopup = null!;
+    private TextBlock _offsetValueText = null!;
+    private TextBlock _offsetDirText = null!;
+    private Grid _offsetScopeTrack = null!;
+    private Border _offsetScopeIndicator = null!;
+    private TranslateTransform _offsetScopeTransform = null!;
+    private Button _offsetScopeTrackBtn = null!;
+    private Button _offsetScopeGlobalBtn = null!;
+    private Button _offsetResetBtn = null!;
+    private bool _adjustScopePerTrack = true;
+    private bool _offsetScopeWasPerTrack = true;
+    private double _shownTrackOffset = double.NaN;
+    private double _shownManualOffset = double.NaN;
+    private string? _shownTrackKey;
+
+    private static SolidColorBrush CreateOffsetBrush(byte r, byte g, byte b)
+    {
+        var brush = new SolidColorBrush(Color.FromRgb(r, g, b));
+        brush.Freeze();
+        return brush;
+    }
+
+    private static SolidColorBrush CreateOffsetAlphaBrush(byte a, byte r, byte g, byte b)
+    {
+        var brush = new SolidColorBrush(Color.FromArgb(a, r, g, b));
+        brush.Freeze();
+        return brush;
+    }
+
+    private static System.Windows.Media.Animation.IEasingFunction CreateScopeEase()
+    {
+        var ease = new System.Windows.Media.Animation.CubicEase
+        {
+            EasingMode = System.Windows.Media.Animation.EasingMode.EaseOut,
+        };
+        ease.Freeze();
+        return ease;
+    }
+
+    private static string? TrackOffsetKey(TrackInfo? track) =>
+        track is null ? null : Musebase.Core.Search.LyricsCacheStore.MakeKey(track.Title, track.Artist);
+
+    private Button CreateOffsetTriggerButton()
+    {
+        _offsetClockPath = new System.Windows.Shapes.Path
+        {
+            Width = 14,
+            Height = 14,
+            Stretch = Stretch.None,
+            Data = Geometry.Parse("M 7,1.75 A 5.25,5.25 0 1 1 6.99,1.75 Z M 7,4.2 L 7,7.2 L 9.4,8.6"),
+            Stroke = Muted,
+            StrokeThickness = 1.45,
+            StrokeStartLineCap = PenLineCap.Round,
+            StrokeEndLineCap = PenLineCap.Round,
+            StrokeLineJoin = PenLineJoin.Round,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        _offsetBadge = new TextBlock
+        {
+            FontSize = 11,
+            FontWeight = FontWeights.SemiBold,
+            Foreground = ClassicPlaybackSlider.Accent,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(4, -0.5, 0, 0),
+            Visibility = Visibility.Collapsed,
+        };
+        var content = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        content.Children.Add(_offsetClockPath);
+        content.Children.Add(_offsetBadge);
+
+        var button = new Button
+        {
+            Content = content,
+            MinWidth = 32,
+            Height = 36,
+            Margin = new Thickness(1, 0, 1, 0),
+            Foreground = Muted,
+            Background = Brushes.Transparent,
+            BorderBrush = Brushes.Transparent,
+            Template = TransportTemplate(cornerRadius: 4),
+            Cursor = Cursors.Hand,
+            FocusVisualStyle = null,
+        };
+        SetButtonLabel(button, "音频同步调整");
+        button.MouseEnter += (_, _) => UpdateOffsetTriggerAppearance();
+        button.MouseLeave += (_, _) => UpdateOffsetTriggerAppearance();
+        button.Click += (_, _) => _offsetPopup.IsOpen = !_offsetPopup.IsOpen;
+        return button;
+    }
+
+    private System.Windows.Controls.Primitives.Popup CreateOffsetPopup()
+    {
+        _offsetScopeTransform = new TranslateTransform();
+        _offsetScopeIndicator = new Border
+        {
+            CornerRadius = new CornerRadius(OffsetScopeChipCornerRadius),
+            Background = OffsetSegActiveBg,
+            BorderBrush = OffsetSegActiveBorder,
+            BorderThickness = new Thickness(1),
+            RenderTransform = _offsetScopeTransform,
+            IsHitTestVisible = false,
+        };
+        Grid.SetColumn(_offsetScopeIndicator, 0);
+
+        _offsetScopeTrackBtn = CreateScopeChip("仅此曲", perTrack: true);
+        _offsetScopeGlobalBtn = CreateScopeChip("全部", perTrack: false);
+        Grid.SetColumn(_offsetScopeTrackBtn, 0);
+        Grid.SetColumn(_offsetScopeGlobalBtn, 1);
+
+        _offsetScopeTrack = new Grid
+        {
+            MinWidth = 108,
+            Height = 24,
+        };
+        _offsetScopeTrack.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        _offsetScopeTrack.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        _offsetScopeTrack.Children.Add(_offsetScopeIndicator);
+        _offsetScopeTrack.Children.Add(_offsetScopeTrackBtn);
+        _offsetScopeTrack.Children.Add(_offsetScopeGlobalBtn);
+        _offsetScopeTrack.SizeChanged += (_, _) => UpdateScopeIndicatorPosition(animate: false);
+
+        var scopeHost = new Border
+        {
+            Height = 30,
+            Background = OffsetSegBg,
+            BorderBrush = OffsetBtnBorder,
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(OffsetPillCornerRadius),
+            Padding = new Thickness(2),
+            SnapsToDevicePixels = true,
+            Child = _offsetScopeTrack,
+        };
+
+        var header = new DockPanel { LastChildFill = false };
+        var title = new TextBlock
+        {
+            Text = "音频同步调整",
+            FontSize = 12.5,
+            FontWeight = FontWeights.SemiBold,
+            Foreground = Brushes.White,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0, 0, 14, 0),
+        };
+        DockPanel.SetDock(scopeHost, Dock.Right);
+        header.Children.Add(scopeHost);
+        header.Children.Add(title);
+
+        _offsetValueText = new TextBlock
+        {
+            FontSize = 15,
+            FontWeight = FontWeights.Bold,
+            Foreground = Brushes.White,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        _offsetDirText = new TextBlock
+        {
+            FontSize = 11.5,
+            Foreground = Muted,
+            Margin = new Thickness(6, 0, 0, 0),
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        var readoutStack = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        readoutStack.Children.Add(_offsetValueText);
+        readoutStack.Children.Add(_offsetDirText);
+
+        _offsetResetBtn = new Button
+        {
+            Content = "归零",
+            Height = 30,
+            MinWidth = 56,
+            Padding = new Thickness(13, 0, 13, 0),
+            Background = OffsetBtnBg,
+            Foreground = Brushes.White,
+            FontSize = 12,
+            FontWeight = FontWeights.SemiBold,
+            Cursor = Cursors.Hand,
+            FocusVisualStyle = null,
+            ToolTip = "重置当前模式时间偏移 (Alt+0)",
+            Template = OffsetPopupButtonTemplate(cornerRadius: OffsetPillCornerRadius, hoverBg: OffsetBtnHoverBg),
+        };
+        System.Windows.Automation.AutomationProperties.SetName(_offsetResetBtn, "重置音频同步偏移");
+        _offsetResetBtn.Click += (_, _) => AdjustSelectedOffset(null);
+
+        var statusRow = new DockPanel { Margin = new Thickness(0, 11, 0, 11) };
+        DockPanel.SetDock(_offsetResetBtn, Dock.Right);
+        statusRow.Children.Add(_offsetResetBtn);
+        statusRow.Children.Add(readoutStack);
+
+        var stepRow = new System.Windows.Controls.Primitives.UniformGrid
+        {
+            Columns = 4,
+            Margin = new Thickness(-3, 0, -3, 0),
+        };
+        stepRow.Children.Add(CreatePopupStepButton("-0.5s", -0.5, "音频同步延后 0.5 秒"));
+        stepRow.Children.Add(CreatePopupStepButton("-0.1s", -0.1, "音频同步延后 0.1 秒 (Alt+←)"));
+        stepRow.Children.Add(CreatePopupStepButton("+0.1s", 0.1, "音频同步提前 0.1 秒 (Alt+→)"));
+        stepRow.Children.Add(CreatePopupStepButton("+0.5s", 0.5, "音频同步提前 0.5 秒"));
+
+        var body = new StackPanel { MinWidth = 248 };
+        body.Children.Add(header);
+        body.Children.Add(statusRow);
+        body.Children.Add(stepRow);
+
+        var card = new Border
+        {
+            Background = OffsetPopupBg,
+            BorderBrush = OffsetPopupBorder,
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(16),
+            Padding = new Thickness(14, 12, 14, 13),
+            Margin = new Thickness(8, 8, 8, 10),
+            Child = body,
+            Effect = new System.Windows.Media.Effects.DropShadowEffect
+            {
+                Color = Colors.Black,
+                BlurRadius = 16,
+                ShadowDepth = 3,
+                Opacity = 0.5,
+            },
+        };
+        card.PreviewKeyDown += (_, e) => HandleOffsetKeyDown(e);
+
+        var popup = new System.Windows.Controls.Primitives.Popup
+        {
+            PlacementTarget = _offsetBtn,
+            Placement = System.Windows.Controls.Primitives.PlacementMode.Custom,
+            CustomPopupPlacementCallback = PositionOffsetPopup,
+            StaysOpen = false,
+            AllowsTransparency = true,
+            PopupAnimation = System.Windows.Controls.Primitives.PopupAnimation.Fade,
+            Child = card,
+        };
+        popup.Opened += (_, _) =>
+        {
+            _offsetBtn.IsHitTestVisible = false;
+            UpdateOffsetPopupState(animate: false);
+        };
+        popup.Closed += (_, _) =>
+            Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Background, () => _offsetBtn.IsHitTestVisible = true);
+        return popup;
+    }
+
+    private static System.Windows.Controls.Primitives.CustomPopupPlacement[] PositionOffsetPopup(
+        Size popupSize, Size targetSize, Point offset) =>
+    [
+        new System.Windows.Controls.Primitives.CustomPopupPlacement(
+            new Point(targetSize.Width - popupSize.Width + 8, -popupSize.Height + 2),
+            System.Windows.Controls.Primitives.PopupPrimaryAxis.Horizontal),
+        new System.Windows.Controls.Primitives.CustomPopupPlacement(
+            new Point(targetSize.Width - popupSize.Width + 8, targetSize.Height - 2),
+            System.Windows.Controls.Primitives.PopupPrimaryAxis.Horizontal),
+    ];
+
+    private Button CreateScopeChip(string label, bool perTrack)
+    {
+        var fgColor = (Muted as SolidColorBrush)?.Color ?? Color.FromRgb(179, 179, 179);
+        var btn = new Button
+        {
+            Content = label,
+            Height = 24,
+            Padding = new Thickness(10, 0, 10, 0),
+            Background = Brushes.Transparent,
+            Foreground = new SolidColorBrush(fgColor),
+            FontSize = 11.5,
+            Cursor = Cursors.Hand,
+            FocusVisualStyle = null,
+            Template = OffsetPopupButtonTemplate(cornerRadius: OffsetScopeChipCornerRadius, hoverBg: OffsetSegHoverBg, showBorder: false),
+        };
+        System.Windows.Automation.AutomationProperties.SetName(btn, perTrack ? "仅此曲音频同步" : "全部歌曲音频同步");
+        btn.Click += (_, _) =>
+        {
+            _adjustScopePerTrack = perTrack;
+            UpdateOffsetPopupState(animate: true);
+        };
+        return btn;
+    }
+
+    private Button CreatePopupStepButton(string label, double delta, string description)
+    {
+        var btn = new Button
+        {
+            Content = label,
+            Height = 30,
+            Margin = new Thickness(3, 0, 3, 0),
+            Padding = new Thickness(6, 0, 6, 0),
+            Background = OffsetBtnBg,
+            Foreground = Brushes.White,
+            FontSize = 12,
+            FontWeight = FontWeights.SemiBold,
+            Cursor = Cursors.Hand,
+            FocusVisualStyle = null,
+            ToolTip = description,
+            Template = OffsetPopupButtonTemplate(cornerRadius: OffsetPillCornerRadius, hoverBg: OffsetBtnHoverBg),
+        };
+        System.Windows.Automation.AutomationProperties.SetName(btn, description);
+        btn.Click += (_, _) => AdjustSelectedOffset(delta);
+        return btn;
+    }
+
+    private static ControlTemplate OffsetPopupButtonTemplate(double cornerRadius, Brush hoverBg, bool showBorder = true)
+    {
+        var border = new FrameworkElementFactory(typeof(Border), "Border");
+        border.SetValue(Border.BackgroundProperty, new TemplateBindingExtension(BackgroundProperty));
+        border.SetValue(Border.CornerRadiusProperty, new CornerRadius(cornerRadius));
+        border.SetValue(Border.PaddingProperty, new TemplateBindingExtension(PaddingProperty));
+        if (showBorder)
+        {
+            border.SetValue(Border.BorderBrushProperty, OffsetBtnBorder);
+            border.SetValue(Border.BorderThicknessProperty, new Thickness(1));
+        }
+
+        var content = new FrameworkElementFactory(typeof(ContentPresenter));
+        content.SetValue(HorizontalAlignmentProperty, HorizontalAlignment.Center);
+        content.SetValue(VerticalAlignmentProperty, VerticalAlignment.Center);
+        border.AppendChild(content);
+
+        var template = new ControlTemplate(typeof(Button)) { VisualTree = border };
+        var hover = new Trigger { Property = IsMouseOverProperty, Value = true };
+        hover.Setters.Add(new Setter(Border.BackgroundProperty, hoverBg, "Border"));
+        template.Triggers.Add(hover);
+
+        var disabled = new Trigger { Property = IsEnabledProperty, Value = false };
+        disabled.Setters.Add(new Setter(OpacityProperty, 0.42));
+        template.Triggers.Add(disabled);
+        return template;
+    }
+
+    private bool HandleOffsetKeyDown(KeyEventArgs e)
+    {
+        var key = e.Key == Key.System ? e.SystemKey : e.Key;
+        if (key == Key.Escape && _offsetPopup.IsOpen)
+        {
+            _offsetPopup.IsOpen = false;
+            _offsetBtn.Focus();
+            e.Handled = true;
+            return true;
+        }
+        if (Keyboard.Modifiers == ModifierKeys.Alt && key is Key.Left or Key.Right or Key.D0 or Key.NumPad0)
+        {
+            double? delta = key switch
+            {
+                Key.Left => -0.1,
+                Key.Right => 0.1,
+                _ => null,
+            };
+            AdjustSelectedOffset(delta);
+            e.Handled = true;
+            return true;
+        }
+        return false;
+    }
+
+    private void AdjustSelectedOffset(double? delta)
+    {
+        var usePerTrack = _adjustScopePerTrack && (_track ?? _coordinator.CurrentTrack) is not null;
+        if (usePerTrack) _adjustTrackOffsetAction(delta);
+        else AdjustGlobalOffset(delta);
+    }
+
+    private void AdjustGlobalOffset(double? delta)
+    {
+        _adjustOffset(delta);
+        var normalized = NormalizeOffset(_coordinator.ManualOffsetSeconds);
+        if (Math.Abs(normalized - _coordinator.ManualOffsetSeconds) > 1e-6)
+        {
+            _coordinator.ManualOffsetSeconds = normalized;
+            _settings.ManualOffsetSeconds = normalized;
+            _settings.Save();
+        }
+        UpdateOffsetButton();
+        Refresh();
+    }
+
+    private void UpdateOffsetButton()
+    {
+        var trackOff = NormalizeOffset(_coordinator.TrackOffsetSeconds);
+        var manualOff = NormalizeOffset(_coordinator.ManualOffsetSeconds);
+        var currentTrackKey = TrackOffsetKey(_track ?? _coordinator.CurrentTrack);
+
+        if (trackOff == _shownTrackOffset
+            && manualOff == _shownManualOffset
+            && string.Equals(currentTrackKey, _shownTrackKey, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        _shownTrackOffset = trackOff;
+        _shownManualOffset = manualOff;
+        _shownTrackKey = currentTrackKey;
+
+        UpdateOffsetTriggerAppearance();
+        if (_offsetPopup.IsOpen) UpdateOffsetPopupState(animate: false);
+    }
+
+    private void UpdateOffsetTriggerAppearance()
+    {
+        var trackOff = NormalizeOffset(_coordinator.TrackOffsetSeconds);
+        var manualOff = NormalizeOffset(_coordinator.ManualOffsetSeconds);
+        var total = NormalizeOffset(trackOff + manualOff);
+        var hasAny = total != 0 || trackOff != 0 || manualOff != 0;
+
+        if (hasAny)
+        {
+            _offsetBtn.Padding = new Thickness(7, 0, 7, 0);
+            _offsetClockPath.Stroke = ClassicPlaybackSlider.Accent;
+            _offsetBadge.Text = FormatCompactOffset(total);
+            _offsetBadge.Visibility = Visibility.Visible;
+        }
+        else
+        {
+            _offsetBtn.Padding = new Thickness(0);
+            _offsetClockPath.Stroke = _offsetBtn.IsMouseOver ? Brushes.White : Muted;
+            _offsetBadge.Visibility = Visibility.Collapsed;
+        }
+
+        var tooltip = hasAny
+            ? $"音频同步调整 {FormatCompactOffset(total)}（此曲 {FormatCompactOffset(trackOff)} / 全局 {FormatCompactOffset(manualOff)} · Alt+←/→）"
+            : "音频同步调整（当前 0.0s · Alt+←/→）";
+        SetButtonLabel(_offsetBtn, tooltip);
+    }
+
+    private void UpdateOffsetPopupState(bool animate = false)
+    {
+        var track = _track ?? _coordinator.CurrentTrack;
+        var hasTrack = track is not null;
+        var usePerTrack = _adjustScopePerTrack && hasTrack;
+        var scopeChanged = usePerTrack != _offsetScopeWasPerTrack;
+        _offsetScopeWasPerTrack = usePerTrack;
+
+        _offsetScopeTrackBtn.IsEnabled = hasTrack;
+        _offsetScopeTrackBtn.FontWeight = usePerTrack ? FontWeights.SemiBold : FontWeights.Normal;
+        _offsetScopeGlobalBtn.FontWeight = !usePerTrack ? FontWeights.SemiBold : FontWeights.Normal;
+
+        var accentColor = (ClassicPlaybackSlider.Accent as SolidColorBrush)?.Color ?? Color.FromRgb(30, 215, 96);
+        var mutedColor = (Muted as SolidColorBrush)?.Color ?? Color.FromRgb(179, 179, 179);
+        var shouldAnimate = animate && scopeChanged && SystemParameters.ClientAreaAnimation;
+        UpdateScopeChipForeground(_offsetScopeTrackBtn, usePerTrack ? accentColor : mutedColor, shouldAnimate);
+        UpdateScopeChipForeground(_offsetScopeGlobalBtn, !usePerTrack ? accentColor : mutedColor, shouldAnimate);
+        UpdateScopeIndicatorPosition(shouldAnimate, usePerTrack);
+
+        var trackOff = NormalizeOffset(_coordinator.TrackOffsetSeconds);
+        var manualOff = NormalizeOffset(_coordinator.ManualOffsetSeconds);
+        var activeVal = usePerTrack ? trackOff : manualOff;
+
+        _offsetValueText.Text = FormatCompactOffset(activeVal);
+        _offsetValueText.Foreground = activeVal != 0 ? ClassicPlaybackSlider.Accent : Brushes.White;
+        _offsetDirText.Text = activeVal switch
+        {
+            > 0 => "歌词提前",
+            < 0 => "歌词延后",
+            _ => "默认同步",
+        };
+        _offsetResetBtn.IsEnabled = activeVal != 0;
+    }
+
+    private void UpdateScopeIndicatorPosition(bool animate, bool? forceUsePerTrack = null)
+    {
+        var usePerTrack = forceUsePerTrack ?? (_adjustScopePerTrack && (_track ?? _coordinator.CurrentTrack) is not null);
+        var trackWidth = _offsetScopeTrack.ActualWidth;
+        if (trackWidth <= 0) return;
+
+        var targetX = usePerTrack ? 0d : trackWidth / 2d;
+        if (!animate || !SystemParameters.ClientAreaAnimation)
+        {
+            _offsetScopeTransform.BeginAnimation(TranslateTransform.XProperty, null);
+            _offsetScopeTransform.X = targetX;
+            return;
+        }
+
+        var anim = new System.Windows.Media.Animation.DoubleAnimation(targetX, TimeSpan.FromMilliseconds(200))
+        {
+            EasingFunction = OffsetScopeEase,
+        };
+        _offsetScopeTransform.BeginAnimation(TranslateTransform.XProperty, anim);
+    }
+
+    private static void UpdateScopeChipForeground(Button button, Color targetColor, bool animate)
+    {
+        if (button.Foreground is not SolidColorBrush brush || brush.IsFrozen)
+        {
+            brush = new SolidColorBrush(targetColor);
+            button.Foreground = brush;
+        }
+
+        if (!animate)
+        {
+            brush.BeginAnimation(SolidColorBrush.ColorProperty, null);
+            brush.Color = targetColor;
+            return;
+        }
+
+        var anim = new System.Windows.Media.Animation.ColorAnimation(targetColor, TimeSpan.FromMilliseconds(180))
+        {
+            EasingFunction = OffsetScopeEase,
+        };
+        brush.BeginAnimation(SolidColorBrush.ColorProperty, anim);
+    }
+
+    private static double NormalizeOffset(double value)
+    {
+        var rounded = Math.Round(value, 2);
+        return Math.Abs(rounded) < 0.005 ? 0 : rounded;
+    }
+
+    private static string FormatCompactOffset(double value)
+    {
+        var v = NormalizeOffset(value);
+        if (v == 0) return "0.0s";
+        var prefix = v > 0 ? "+" : "-";
+        var abs = Math.Abs(v);
+        var formatted = Math.Abs(abs * 10 - Math.Round(abs * 10)) < 0.005
+            ? abs.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture)
+            : abs.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+        return $"{prefix}{formatted}s";
+    }
+
+    private Button ChromeButton(ClassicTransportIcon glyph, string label, Action onClick, double height = 36)
     {
         var icon = new ClassicTransportGlyph(glyph);
         var button = new Button
         {
             Content = icon,
             Width = 32,
-            Height = 36,
+            Height = height,
             Margin = new Thickness(1, 0, 1, 0),
             Foreground = Muted,
             Background = Brushes.Transparent,
@@ -1303,14 +1922,12 @@ internal sealed class ClassicLyricsWindow : Window
         return button;
     }
 
-    /// <summary>歌词面板上、左、右三条黑边的宽度；三者共用同一个值，保证看起来完全一致。</summary>
-    private const double PanelChromeGap = 6;
+    /// <summary>歌词面板上、左、右三条边缘留白宽度（0 表示完全贴边占满）。</summary>
+    private const double PanelChromeGap = 0;
 
     /// <summary>
-    /// 歌词面板与窗口边缘之间的留白。
-    /// 只保留上/左/右三条边（底边贴住播放控制条，不再留缝），三条边共用
-    /// <see cref="PanelChromeGap"/>，所以宽度一致且很窄；圆角保持 0，
-    /// 否则四个角会额外露出三角形底色，看着就像边变粗了。
+    /// 歌词面板与窗口边缘之间的留白（上、左、右贴边占满，底边紧贴播放控制条；
+    /// 圆角保持 0，避免与窗口圆角叠加露出额外暗角）。
     /// </summary>
     private void UpdatePanelFrame()
     {
@@ -1451,6 +2068,7 @@ internal sealed class ClassicLyricsWindow : Window
         while (source is not null)
         {
             if (source is ButtonBase or RangeBase) return true;
+            if (ReferenceEquals(source, _captionBar)) return true;
             if (source is LyricRow row && _rows.ContainsValue(row)) return true;
             source = source is Visual or System.Windows.Media.Media3D.Visual3D
                 ? VisualTreeHelper.GetParent(source)
@@ -1461,18 +2079,109 @@ internal sealed class ClassicLyricsWindow : Window
 
     private static string FormatTime(TimeSpan time) => $"{Math.Max(0, (int)time.TotalMinutes)}:{Math.Max(0, time.Seconds):00}";
 
-    private sealed class LyricRow : StackPanel
+    internal readonly record struct KaraokeSegment(int Start, int End, double StartTime, double EndTime, bool IsWhitespace);
+
+    internal static IReadOnlyList<KaraokeSegment> BuildKaraokeSegments(string text, InlineTimeTags? timeTags)
+    {
+        if (string.IsNullOrEmpty(text) || timeTags is null || timeTags.Tags.Count == 0)
+            return Array.Empty<KaraokeSegment>();
+
+        var segments = new List<KaraokeSegment>(timeTags.Tags.Count + 4);
+        var cursor = 0;
+        var prevTime = 0.0;
+
+        void AddRange(int start, int end, double startTime, double endTime)
+        {
+            if (end <= start) return;
+
+            var visibleStart = start;
+            while (visibleStart < end && char.IsWhiteSpace(text[visibleStart]))
+                visibleStart++;
+
+            if (visibleStart == end)
+            {
+                segments.Add(new KaraokeSegment(start, end, startTime, startTime, IsWhitespace: true));
+                return;
+            }
+
+            if (visibleStart > start)
+                segments.Add(new KaraokeSegment(start, visibleStart, startTime, startTime, IsWhitespace: true));
+
+            var visibleEnd = end;
+            while (visibleEnd > visibleStart && char.IsWhiteSpace(text[visibleEnd - 1]))
+                visibleEnd--;
+
+            segments.Add(new KaraokeSegment(visibleStart, visibleEnd, startTime, endTime, IsWhitespace: false));
+
+            if (visibleEnd < end)
+                segments.Add(new KaraokeSegment(visibleEnd, end, endTime, endTime, IsWhitespace: true));
+        }
+
+        foreach (var tag in timeTags.Tags)
+        {
+            var end = Math.Clamp(tag.Index, 0, text.Length);
+            var time = Math.Max(prevTime, double.IsFinite(tag.Time) ? tag.Time : prevTime);
+            if (end > cursor)
+            {
+                if (end < text.Length && char.IsHighSurrogate(text[end - 1]) && char.IsLowSurrogate(text[end]))
+                    end++;
+                AddRange(cursor, end, prevTime, time);
+                cursor = end;
+            }
+            prevTime = time;
+        }
+
+        if (cursor < text.Length)
+        {
+            var tailEnd = timeTags.Duration is { } dur && double.IsFinite(dur)
+                ? Math.Max(prevTime, dur)
+                : prevTime;
+            AddRange(cursor, text.Length, prevTime, tailEnd);
+        }
+
+        var hasTiming = false;
+        foreach (var seg in segments)
+        {
+            if (!seg.IsWhitespace && (seg.EndTime > seg.StartTime || seg.EndTime > 0))
+            {
+                hasTiming = true;
+                break;
+            }
+        }
+        return hasTiming ? segments : Array.Empty<KaraokeSegment>();
+    }
+
+    internal sealed class LyricRow : StackPanel
     {
         public SolidColorBrush ForegroundBrush { get; }
         public TextBlock Main { get; }
         public string? TranslationText { get; private set; }
         public bool HasTranslation => _slot is not null;
+        public bool HasKaraoke => _karaokeRuns is not null;
 
         private readonly ScaleTransform _scale = new(1.0, 1.0);
         private TranslationSlot? _slot;
         private TextBlock? _sub;
         private TranslateTransform? _subTranslate;
         private double _mainSize = 24;
+
+        private readonly IReadOnlyList<KaraokeSegment> _karaokeSegments;
+        private readonly Run[]? _karaokeRuns;
+        private SolidColorBrush? _unlitBrush;
+        private SolidColorBrush? _litBrush;
+        private SolidColorBrush? _fallbackActiveBrush;
+        private LinearGradientBrush? _sweepBrush;
+        private GradientStop? _sweepLitStop;
+        private GradientStop? _sweepUnlitStop;
+        private int _cachedSweepSegment = -1;
+        private bool _cachedSweepCanSweep;
+        private double _cachedSweepSpanPx;
+        private bool _sweepGeometryDirty;
+        private bool _isKaraokeRendered;
+        private bool _hasLocalKaraokeBrushes;
+        private double _lastKaraokeElapsed;
+        private Color _lastUnlitColor;
+        private Color _lastLitColor;
 
         /// <summary>整首歌词是否以拉丁字母为主（英文等）。决定行高与行间距口径。</summary>
         private readonly bool _latinMetrics;
@@ -1484,7 +2193,13 @@ internal sealed class ClassicLyricsWindow : Window
         private static readonly IEasingFunction VisualEase = new CubicEase { EasingMode = EasingMode.EaseOut };
         private static readonly TimeSpan VisualDuration = TimeSpan.FromMilliseconds(450);
 
-        public LyricRow(string text, string? translation, Color initialColor, double progress, bool latinMetrics)
+        public LyricRow(
+            string text,
+            string? translation,
+            Color initialColor,
+            double progress,
+            bool latinMetrics,
+            InlineTimeTags? timeTags = null)
         {
             _latinMetrics = latinMetrics;
             Background = Brushes.Transparent;
@@ -1494,18 +2209,43 @@ internal sealed class ClassicLyricsWindow : Window
             ForegroundBrush = new SolidColorBrush(initialColor);
             Main = new TextBlock
             {
-                Text = text,
                 Foreground = ForegroundBrush,
                 FontFamily = ClassicLyricsFonts.Title,
                 FontWeight = FontWeights.Bold,
                 TextWrapping = TextWrapping.Wrap,
             };
+
+            _karaokeSegments = BuildKaraokeSegments(text, timeTags);
+            if (_karaokeSegments.Count > 0)
+            {
+                _karaokeRuns = new Run[_karaokeSegments.Count];
+                for (var i = 0; i < _karaokeSegments.Count; i++)
+                {
+                    var seg = _karaokeSegments[i];
+                    var run = new Run(text[seg.Start..seg.End]);
+                    _karaokeRuns[i] = run;
+                    Main.Inlines.Add(run);
+                }
+                Main.SizeChanged += (_, _) =>
+                {
+                    _cachedSweepSegment = -1;
+                    _sweepGeometryDirty = true;
+                };
+            }
+            else
+            {
+                Main.Text = text;
+            }
+
             Children.Add(Main);
             SetTranslation(translation, progress);
         }
 
         public void UpdateVisualState(bool isActive, bool isPast, Color targetColor, bool animate, bool isHovered = false)
         {
+            if (!isActive || isHovered)
+                ClearKaraokeProgress();
+
             var targetScale = isHovered ? (isActive ? 1.05 : 1.02) : (isActive ? 1.04 : 1.0);
             var targetOpacity = isHovered ? 1.0 : (isActive ? 1.0 : (isPast ? 0.45 : 0.72));
 
@@ -1555,6 +2295,159 @@ internal sealed class ClassicLyricsWindow : Window
 
                 ForegroundBrush.BeginAnimation(SolidColorBrush.ColorProperty, null);
                 ForegroundBrush.Color = targetColor;
+            }
+        }
+
+        public void RefreshKaraokeColors(Color unlitColor, Color litColor, bool enabled)
+        {
+            if (!enabled)
+            {
+                ClearKaraokeProgress();
+                return;
+            }
+            if (!_isKaraokeRendered || _karaokeRuns is null) return;
+            UpdateKaraokeProgress(_lastKaraokeElapsed, unlitColor, litColor, enabled: true, forceUpdate: true);
+        }
+
+        public void UpdateKaraokeProgress(double elapsed, Color unlitColor, Color litColor, bool enabled, bool forceUpdate = false)
+        {
+            if (_karaokeRuns is null || !enabled)
+            {
+                ClearKaraokeProgress();
+                return;
+            }
+
+            if (!forceUpdate
+                && _isKaraokeRendered
+                && !_sweepGeometryDirty
+                && Math.Abs(elapsed - _lastKaraokeElapsed) < 1e-6
+                && unlitColor == _lastUnlitColor
+                && litColor == _lastLitColor)
+            {
+                return;
+            }
+
+            _lastKaraokeElapsed = elapsed;
+            _lastUnlitColor = unlitColor;
+            _lastLitColor = litColor;
+            EnsureKaraokeBrushes(unlitColor, litColor);
+
+            var sweepGeometryDirty = false;
+            for (var i = 0; i < _karaokeSegments.Count; i++)
+            {
+                var seg = _karaokeSegments[i];
+                var run = _karaokeRuns[i];
+
+                if (elapsed >= seg.EndTime)
+                {
+                    if (!ReferenceEquals(run.Foreground, _litBrush))
+                        run.Foreground = _litBrush;
+                }
+                else if (elapsed <= seg.StartTime)
+                {
+                    if (!ReferenceEquals(run.Foreground, _unlitBrush))
+                        run.Foreground = _unlitBrush;
+                }
+                else if (seg.IsWhitespace)
+                {
+                    if (!ReferenceEquals(run.Foreground, _litBrush))
+                        run.Foreground = _litBrush;
+                }
+                else
+                {
+                    var dur = seg.EndTime - seg.StartTime;
+                    var progress = dur > 0 ? Math.Clamp((elapsed - seg.StartTime) / dur, 0.0, 1.0) : 1.0;
+
+                    if (!Main.IsArrangeValid || Main.ActualWidth <= 0)
+                    {
+                        _cachedSweepSegment = -1;
+                        _cachedSweepCanSweep = false;
+                        sweepGeometryDirty = true;
+                    }
+                    else if (_cachedSweepSegment != i || _sweepGeometryDirty)
+                    {
+                        var startRect = run.ContentStart.GetCharacterRect(LogicalDirection.Forward);
+                        var endRect = run.ContentEnd.GetCharacterRect(LogicalDirection.Backward);
+                        var sameLine = Math.Abs(startRect.Top - endRect.Top) < Math.Max(4.0, _mainSize * 0.45);
+                        var spanPx = Math.Abs(endRect.Left - startRect.Left);
+                        if (sameLine && spanPx >= 1.0)
+                        {
+                            _sweepBrush!.StartPoint = new Point(startRect.Left, 0);
+                            _sweepBrush.EndPoint = new Point(endRect.Left, 0);
+                            _cachedSweepCanSweep = true;
+                            _cachedSweepSpanPx = spanPx;
+                        }
+                        else
+                        {
+                            _cachedSweepCanSweep = false;
+                        }
+                        _cachedSweepSegment = i;
+                    }
+
+                    if (_cachedSweepCanSweep)
+                    {
+                        var feather = Math.Clamp((_mainSize * 0.35) / _cachedSweepSpanPx, 0.06, 0.28);
+                        var edge0 = Math.Clamp(progress * (1.0 + feather) - feather, 0.0, 1.0);
+                        var edge1 = Math.Clamp(progress * (1.0 + feather), 0.0, 1.0);
+                        _sweepLitStop!.Offset = edge0;
+                        _sweepUnlitStop!.Offset = edge1;
+                        if (!ReferenceEquals(run.Foreground, _sweepBrush))
+                            run.Foreground = _sweepBrush;
+                    }
+                    else
+                    {
+                        _fallbackActiveBrush!.Color = BlendColor(unlitColor, litColor, progress);
+                        if (!ReferenceEquals(run.Foreground, _fallbackActiveBrush))
+                            run.Foreground = _fallbackActiveBrush;
+                    }
+                }
+            }
+
+            _sweepGeometryDirty = sweepGeometryDirty;
+            _isKaraokeRendered = true;
+            _hasLocalKaraokeBrushes = true;
+        }
+
+        private void ClearKaraokeProgress()
+        {
+            _isKaraokeRendered = false;
+            _cachedSweepSegment = -1;
+            _sweepGeometryDirty = false;
+            if (_karaokeRuns is null || !_hasLocalKaraokeBrushes) return;
+            foreach (var run in _karaokeRuns)
+                run.ClearValue(TextElement.ForegroundProperty);
+            _hasLocalKaraokeBrushes = false;
+        }
+
+        private void EnsureKaraokeBrushes(Color unlitColor, Color litColor)
+        {
+            if (_unlitBrush is null)
+            {
+                _unlitBrush = new SolidColorBrush(unlitColor);
+                _litBrush = new SolidColorBrush(litColor);
+                _fallbackActiveBrush = new SolidColorBrush(unlitColor);
+                _sweepLitStop = new GradientStop(litColor, 0.0);
+                _sweepUnlitStop = new GradientStop(unlitColor, 0.0);
+                _sweepBrush = new LinearGradientBrush
+                {
+                    MappingMode = BrushMappingMode.Absolute,
+                    SpreadMethod = GradientSpreadMethod.Pad,
+                };
+                _sweepBrush.GradientStops.Add(_sweepLitStop);
+                _sweepBrush.GradientStops.Add(_sweepUnlitStop);
+            }
+            else
+            {
+                if (_unlitBrush.Color != unlitColor)
+                {
+                    _unlitBrush.Color = unlitColor;
+                    _sweepUnlitStop!.Color = unlitColor;
+                }
+                if (_litBrush!.Color != litColor)
+                {
+                    _litBrush.Color = litColor;
+                    _sweepLitStop!.Color = litColor;
+                }
             }
         }
 
@@ -1632,6 +2525,8 @@ internal sealed class ClassicLyricsWindow : Window
         public void ApplySizing(double mainSize)
         {
             _mainSize = mainSize;
+            _cachedSweepSegment = -1;
+            _sweepGeometryDirty = true;
             Main.FontSize = mainSize;
             Main.LineHeight = mainSize * (_latinMetrics ? 1.45 : 1.32) * LineHeightScale;
             if (_sub is not null)
