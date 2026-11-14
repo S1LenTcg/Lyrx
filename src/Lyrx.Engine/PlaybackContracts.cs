@@ -46,4 +46,7 @@ public interface INowPlayingSource
 
     /// <summary>上一首。</summary>
     Task<bool> SkipPreviousAsync();
+
+    /// <summary>跳转播放进度。若播放源支持则调整播放进度并返回 true。</summary>
+    Task<bool> SeekAsync(TimeSpan position);
 }

@@ -69,6 +69,13 @@ public sealed class LyricsCoordinator : IDisposable
     /// <summary>手动同步偏移（秒）。为 + 时歌词变快。</summary>
     public double ManualOffsetSeconds { get; set; }
 
+    /// <summary>
+    /// 仅对"当前这首歌"生效的额外偏移（秒）。由界面按曲记忆后写入，
+    /// 用来吸收"同一个音源与歌词时间轴之间的固定错位"（例如 B 站视频比专辑版多几秒片头）。
+    /// 与 <see cref="ManualOffsetSeconds"/> 叠加使用。
+    /// </summary>
+    public double TrackOffsetSeconds { get; set; }
+
     /// <summary>诊断日志接收器（可选）。由消费方注入 Log.Write 等。</summary>
     public Action<string>? Log { get; set; }
 
@@ -321,13 +328,25 @@ public sealed class LyricsCoordinator : IDisposable
             var request = LyricsSearchRequest.ByInfo(
                 track.Title, track.Artist, track.Duration?.TotalSeconds ?? 0, limit: 3);
             var diagnostics = new SearchDiagnostics();
+            var preferredService = PreferredServiceForApp(track.SourceAppId);
+            var bestScore = double.NegativeInfinity;
 
-            // 先显示首个结果，再用更好的候选替换（把延迟感降到最低）
+            // 先显示首个结果，再用更好的候选替换（同播放软件的歌词源享有优先加权）
             await foreach (var lyrics in _search.SearchAsync(request, cts.Token, diagnostics))
             {
                 if (cts.Token.IsCancellationRequested) return;
-                if (CurrentLyrics is null || lyrics.Quality() > CurrentLyrics.Quality())
+
+                // 核心安全校验：候选歌词必须与实际播放的曲目合理匹配，避免张冠李戴（如播放《体面》却匹配了《听说你》）
+                if (!lyrics.IsPlausibleMatch(track.Title, track.Artist))
                 {
+                    Log?.Invoke($"[search] 丢弃不匹配的歌词: [{lyrics.IdTags.GetValueOrDefault(Lyrics.TagTitle)}] 与当前曲目 [{track.Title}] 差异过大");
+                    continue;
+                }
+
+                var score = ScoreCandidate(lyrics, preferredService);
+                if (CurrentLyrics is null || score > bestScore)
+                {
+                    bestScore = score;
                     CurrentLyrics = lyrics;
                     _lastLineIndex = int.MinValue; // 强制重新计算行
                     RaiseStatus(new LyricsStatus(
@@ -483,7 +502,7 @@ public sealed class LyricsCoordinator : IDisposable
     public void SaveEditedLyrics(TrackInfo track, Lyrics lyrics)
     {
         Unsuppress(track); // 编辑并保存过的曲目，解除抑制
-        lyrics.Metadata.ServiceName = "사용자 편집";
+        lyrics.Metadata.ServiceName = "用户编辑";
         try
         {
             Cache?.Set(track.Title, track.Artist, lyrics);
@@ -549,8 +568,21 @@ public sealed class LyricsCoordinator : IDisposable
     /// </summary>
     private async Task TranslateAsync(Lyrics lyrics, CancellationToken ct, bool persistAfter = false)
     {
-        // 目标=中文且已含提供者译文（中文）时不走机器翻译。
-        if (TargetIsChinese && lyrics.Lines.Any(l => !string.IsNullOrWhiteSpace(l.Attachments[LineAttachments.TagTranslationPrefix])))
+        // 目标=简体中文且整首歌词本身就是中文时，不走机器翻译（避免中文翻中文加标点/改写）。
+        var isTargetSimplifiedZh = TargetLanguage.Equals("ZH", StringComparison.OrdinalIgnoreCase)
+            || TargetLanguage.StartsWith("ZH-HANS", StringComparison.OrdinalIgnoreCase)
+            || TargetLanguage.Equals("ZH-CN", StringComparison.OrdinalIgnoreCase);
+        if (isTargetSimplifiedZh && IsMostlyChinese(lyrics))
+        {
+            SetTranslationStatus(TranslationDisplayStatus.Cache);
+            return;
+        }
+        // 目标=中文且所有非空行都已含提供者译文（中文）时不走机器翻译；
+        // 若只有部分行含提供者译文（例如仅部分行匹配成功），则保留已有译文并对其余缺失行补齐翻译。
+        var allLinesHaveProviderTranslation = TargetIsChinese && lyrics.Lines
+            .Where(l => !string.IsNullOrWhiteSpace(l.Content))
+            .All(l => !string.IsNullOrWhiteSpace(l.Attachments[LineAttachments.TagTranslationPrefix]));
+        if (allLinesHaveProviderTranslation)
         {
             CurrentTranslationStatus = TranslationDisplayStatus.Cache;
             TranslationStatusChanged?.Invoke(CurrentTranslationStatus);
@@ -564,7 +596,16 @@ public sealed class LyricsCoordinator : IDisposable
         try
         {
             var stats = new TranslationRunStats();
-            var changed = await service.EnsureTranslatedAsync(lyrics, TargetLanguage, ct, stats);
+            var changed = await service.EnsureTranslatedAsync(
+                lyrics, TargetLanguage, ct, stats,
+                preserveDefaultTranslation: TargetIsChinese,
+                onBatchTranslated: () =>
+                {
+                    if (!ReferenceEquals(CurrentLyrics, lyrics)) return;
+                    _lastLineIndex = int.MinValue;
+                    TranslationStatusChanged?.Invoke(CurrentTranslationStatus);
+                });
+            Log?.Invoke($"[translation] 引擎={service.EngineId} 目标={TargetLanguage} 需要={stats.LinesNeeded} 缓存={stats.CacheHits} 变更={changed}");
             if (changed > 0 && ReferenceEquals(CurrentLyrics, lyrics))
             {
                 _lastLineIndex = int.MinValue; // 为反映译文重新发布当前行
@@ -628,6 +669,49 @@ public sealed class LyricsCoordinator : IDisposable
 
     private bool HasTargetTranslation(Lyrics lyrics) =>
         lyrics.Lines.Any(l => l.Attachments.Translation(TargetLangLower) is not null);
+
+    private static string? PreferredServiceForApp(string? appId)
+    {
+        if (string.IsNullOrWhiteSpace(appId)) return null;
+        if (appId.Contains("cloudmusic", StringComparison.OrdinalIgnoreCase)
+            || appId.Contains("netease", StringComparison.OrdinalIgnoreCase))
+            return "NetEase";
+        if (appId.Contains("qqmusic", StringComparison.OrdinalIgnoreCase))
+            return "QQMusic";
+        if (appId.Contains("kugou", StringComparison.OrdinalIgnoreCase))
+            return "Kugou";
+        return null;
+    }
+
+    private static double ScoreCandidate(Lyrics lyrics, string? preferredService)
+    {
+        var score = lyrics.Quality();
+        if (preferredService is not null
+            && string.Equals(lyrics.Metadata.ServiceName, preferredService, StringComparison.OrdinalIgnoreCase))
+            score += 0.25;
+        return score;
+    }
+
+    private static bool IsMostlyChinese(Lyrics lyrics)
+    {
+        var cjk = 0;
+        var latin = 0;
+        var kanaOrHangul = 0;
+        foreach (var line in lyrics.Lines)
+        {
+            if (!line.Enabled) continue;
+            foreach (var c in line.Content)
+            {
+                if ((c >= '\u3040' && c <= '\u30FF') || (c >= '\uAC00' && c <= '\uD7AF'))
+                    kanaOrHangul++;
+                else if (c >= '\u4E00' && c <= '\u9FFF')
+                    cjk++;
+                else if (char.IsLetter(c))
+                    latin++;
+            }
+        }
+        return cjk > 0 && cjk >= latin && kanaOrHangul * 20 < cjk;
+    }
 
     /// <summary>
     /// 服务器上出现目标语言译本时就取来使用。取到了返回 true（不再自行翻译）。
@@ -736,7 +820,7 @@ public sealed class LyricsCoordinator : IDisposable
         var position = _nowPlaying.GetEstimatedPosition();
         if (position is null) return;
 
-        var adjusted = position.Value.TotalSeconds + lyrics.TimeDelay + ManualOffsetSeconds;
+        var adjusted = position.Value.TotalSeconds + lyrics.TimeDelay + ManualOffsetSeconds + TrackOffsetSeconds;
         var (current, next) = lyrics.LineIndexesAt(adjusted);
         var index = current ?? -1;
 

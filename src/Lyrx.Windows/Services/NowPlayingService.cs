@@ -57,6 +57,70 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
     /// <summary>当前是否处于自动源检测模式。</summary>
     private bool IsAuto => string.Equals(_sourceMode, "auto", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// 视频站点/播放器名。B 站 UWP、AcFun 这类应用会把站点名填进艺人字段，
+    /// 留着会让歌词搜索按一个根本不存在的"艺人"去查，直接查不到。
+    /// （注意不要把 Spotify 列进来 —— 它在广告时段正是靠艺人名做判定。）
+    /// </summary>
+    private static readonly string[] SiteNameArtists =
+    {
+        "哔哩哔哩", "bilibili", "b站", "b 站", "acfun", "a站", "a 站", "youtube",
+    };
+
+    private static string SanitizeArtist(string artist)
+    {
+        if (string.IsNullOrWhiteSpace(artist)) return "";
+        var trimmed = artist.Trim();
+        foreach (var site in SiteNameArtists)
+            if (string.Equals(trimmed, site, StringComparison.OrdinalIgnoreCase)) return "";
+        return trimmed;
+    }
+
+    /// <summary>
+    /// 视频站点（B 站 UWP、AcFun、YouTube 等）。这类应用给的是**视频标题**：
+    /// `【Hi-Res】百万级装备试听`、`1080P`、`《歌名》` 之类的标记必须去掉，
+    /// 否则既污染窗口标题，也污染歌词检索词。
+    /// </summary>
+    private static bool IsVideoSite(string? appId)
+    {
+        if (string.IsNullOrEmpty(appId)) return false;
+        foreach (var token in new[] { "bilibili", "哔哩哔哩", "acfun", "youtube", "atelier39", "31846059f82c1", "bilibilipc" })
+            if (appId.Contains(token, StringComparison.OrdinalIgnoreCase)) return true;
+        return false;
+    }
+
+    /// <summary>为常见播放器生成易读的友好显示名称。</summary>
+    public static string FormatSourceDisplayName(string id)
+    {
+        if (string.IsNullOrWhiteSpace(id)) return "";
+        var lower = id.ToLowerInvariant();
+        if (lower.Contains("bilibilipc"))
+            return "Bilibili PC";
+        if (lower.Contains("bilibili") || lower.Contains("atelier39") || lower.Contains("31846059f82c1"))
+            return "哔哩哔哩 (Bilibili)";
+        if (lower.Contains("applemusic"))
+            return "Apple Music";
+        if (lower.Contains("spotify"))
+            return "Spotify";
+        if (lower.Contains("cloudmusic") || lower.Contains("netease"))
+            return "网易云音乐";
+        if (lower.Contains("qqmusic"))
+            return "QQ音乐";
+        if (lower.Contains("kugou"))
+            return "酷狗音乐";
+        if (lower.Contains("kuwo"))
+            return "酷我音乐";
+        return id;
+    }
+
+    /// <summary>视频站点标题 → 只留"歌手 - 歌名"这类有效信息；清洗后为空则保留原标题。</summary>
+    private static string SanitizeTitle(string title, string? appId)
+    {
+        if (!IsVideoSite(appId) || string.IsNullOrWhiteSpace(title)) return title;
+        var cleaned = Musebase.Core.Search.SearchTermCleaner.CleanTitle(title).Trim();
+        return cleaned.Length > 0 ? cleaned : title;
+    }
+
     private static bool IsBrowserSource(string? appId)
     {
         if (string.IsNullOrEmpty(appId)) return false;
@@ -84,6 +148,24 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
     private TimeSpan _lastReportedValue = TimeSpan.MinValue;
     private DateTimeOffset _lastAdvanceAt = DateTimeOffset.MinValue;
 
+    // ---- "播放器到底有没有在报位置"的观测窗口 ----
+    // B 站 UWP、部分网页版只把位置在 0/1 之间抖一下，或干脆不动；
+    // 这种情况必须改用本机时钟推进，否则进度条与歌词会钉死不动。
+    private DateTimeOffset _positionWindowStart = DateTimeOffset.MinValue;
+    private TimeSpan _positionWindowPosition;
+    private bool _positionReliable = true;
+    private TimeSpan _wallAnchorPosition;
+    private DateTimeOffset _wallAnchorAt = DateTimeOffset.MinValue;
+
+    /// <summary>本机开始计时的那首曲目（配上 <see cref="_trackPlayStartedAt"/> 使用）。</summary>
+    private string? _timingTrackKey;
+
+    /// <summary>本机看到这首歌"开始播放"的时刻。播放器不报位置时，它就是位置基准。</summary>
+    private DateTimeOffset _trackPlayStartedAt = DateTimeOffset.MinValue;
+
+    /// <summary>上一次算出的位置。暂停时沿用它，避免回落到播放器那个 0/1 的假值。</summary>
+    private TimeSpan _lastResult;
+
     // 小幅回跳吸收：播放器两次上报之间位置偶尔会回退一两百毫秒，直接跟会让进度条倒退一格。
     private TimeSpan _smoothedPosition = TimeSpan.MinValue;
     private DateTimeOffset _lastSampleAt = DateTimeOffset.MinValue;
@@ -91,11 +173,30 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
     private static readonly TimeSpan BackwardTolerance = TimeSpan.FromMilliseconds(300);
 
     /// <summary>
-    /// 播放位置的固定补偿。这一项回到了之前验证过的口径（默认 1400ms）：
-    /// 用户实测 100ms 时歌词偏晚、1400ms 只是"略有差异"，所以以实测手感为准。
-    /// 值越大歌词显示得越早；可按个人环境微调。
+    /// Apple Music 播放位置的固定补偿（默认 +1.4s）。
+    /// Windows 版 Apple Music 的 SMTC 上报有约 1.4 秒固有时延；其他播放器不加此补偿。
     /// </summary>
     public TimeSpan LatencyCompensation { get; set; } = TimeSpan.FromMilliseconds(1400);
+
+    /// <summary>判断是否为 Apple Music 客户端。</summary>
+    public static bool IsAppleMusicSource(string? appId)
+    {
+        if (string.IsNullOrEmpty(appId)) return false;
+        return appId.Contains("AppleMusic", StringComparison.OrdinalIgnoreCase)
+            || appId.Contains("AppleInc", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// 当前播放源生效的时延补偿：仅对 Apple Music 自动生效 +1.4s，其他播放器（B站、Spotify、网易云等）自动使用 0ms。
+    /// </summary>
+    public TimeSpan EffectiveLatencyCompensation
+    {
+        get
+        {
+            var appId = CurrentTrack?.SourceAppId ?? _session?.SourceAppUserModelId;
+            return IsAppleMusicSource(appId) ? LatencyCompensation : TimeSpan.Zero;
+        }
+    }
 
     // ---- 时同步诊断（方案 0）----
 
@@ -395,6 +496,42 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
         catch { return false; }
     }
 
+    /// <summary>跳转播放进度。若物理播放器支持则改变播放进度；不支持时自动校准本地推算时钟。</summary>
+    public async Task<bool> SeekAsync(TimeSpan position)
+    {
+        var ticks = Math.Max(0, position.Ticks);
+        var targetTime = TimeSpan.FromTicks(ticks);
+        var now = DateTimeOffset.Now;
+
+        // 无论物理播放器是否支持跳转，都立即对齐本地推算基准时钟（针对 B 站等不报位置、不支持跳转的应用）
+        _lastReportedValue = targetTime;
+        _lastAdvanceAt = now;
+        _trackPlayStartedAt = now - targetTime;
+        _wallAnchorPosition = targetTime;
+        _wallAnchorAt = now;
+        _lastResult = targetTime;
+        _smoothedPosition = targetTime;
+        _lastSampleAt = now;
+
+        Session? session;
+        lock (_lock) session = _session;
+        if (session is null) return false;
+
+        try
+        {
+            var success = await session.TryChangePlaybackPositionAsync(ticks);
+            Musebase.Windows.Log.Write(success
+                ? $"[smtc] 物理播放器已跳转到: {position:mm\\:ss}"
+                : $"[sync] 播放器未响应物理跳转，已自动校准本地时钟至: {position:mm\\:ss}");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Musebase.Windows.Log.Write($"[sync] 物理跳转异常（已校准本地时钟）: {ex.Message}");
+            return true;
+        }
+    }
+
     private static bool IsSessionPlaying(Session session)
     {
         try
@@ -496,8 +633,27 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
                 // 广告时段不是曲目 — 不创建曲目，因此歌词检索与服务端查询完全不会发生。
                 // SMTC 没有广告标志与 mediaId，因此只看经实测验证的信号 ③(艺人=Spotify +
                 // 专辑为空)。判定规则与 Android 使用同一套代码(Engine 的 AdSignals)。
+                // 注意：广告判定要用**原始艺人名**，清洗要在判定之后做。
                 if (!string.IsNullOrEmpty(props.Title) && !AdSignals.LooksLikeAd(artist, album))
-                    track = new TrackInfo(props.Title, artist, album, duration, session.SourceAppUserModelId);
+                {
+                    string finalTitle;
+                    string finalArtist;
+                    if (IsVideoSite(session.SourceAppUserModelId))
+                    {
+                        Musebase.Core.Search.SearchTermCleaner.ExtractVideoSongInfo(
+                            props.Title, artist, out finalTitle, out finalArtist);
+                    }
+                    else
+                    {
+                        finalTitle = SanitizeTitle(props.Title, session.SourceAppUserModelId);
+                        finalArtist = SanitizeArtist(artist);
+                    }
+
+                    track = new TrackInfo(
+                        finalTitle,
+                        finalArtist,
+                        album, duration, session.SourceAppUserModelId);
+                }
             }
             catch
             {
@@ -516,6 +672,13 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
                 _smoothedPosition = TimeSpan.MinValue;
                 _smoothedTrackKey = null;
                 _lastSampleAt = DateTimeOffset.MinValue;
+                _positionWindowStart = DateTimeOffset.MinValue;
+                _positionWindowPosition = TimeSpan.Zero;
+                _positionReliable = true;
+                _wallAnchorAt = DateTimeOffset.MinValue;
+                _wallAnchorPosition = TimeSpan.Zero;
+                _timingTrackKey = null;
+                _trackPlayStartedAt = DateTimeOffset.MinValue;
             }
             TrackChanged?.Invoke(track);
         }
@@ -595,31 +758,75 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
         }
 
         var now = DateTimeOffset.Now;
+        var trackKey = CurrentTrack is { } t ? $"{t.Title}|{t.Artist}" : null;
+
+        // 换曲/首次播放时记下"本机开始计时"的时刻；播放器不报位置时，这是唯一可靠的基准
+        if (playingNow && (!string.Equals(trackKey, _timingTrackKey, StringComparison.Ordinal)
+                           || _trackPlayStartedAt == DateTimeOffset.MinValue))
+        {
+            _timingTrackKey = trackKey;
+            _trackPlayStartedAt = now;
+            _positionWindowStart = DateTimeOffset.MinValue;
+            _positionReliable = true;
+        }
+
+        var compensation = EffectiveLatencyCompensation;
+
         TimeSpan result;
         if (!playingNow)
         {
-            result = reported + LatencyCompensation;
+            // 暂停时不要回头用播放器那个 0/1 的假位置，否则进度条会跳回开头
+            result = _positionReliable ? reported + compensation : _lastResult;
         }
         else
         {
-            // 记录"位置值上一次真正变化"的时刻，用来识别"位置停滞但仍在播放"的播放器
             if (reported != _lastReportedValue)
             {
                 _lastReportedValue = reported;
                 _lastAdvanceAt = now;
             }
 
-            var age = now - lastUpdated;
-            if (age < TimeSpan.Zero) age = TimeSpan.Zero;
+            // ---- 观测窗口：判断这个播放器到底有没有在报位置 ----
+            // B 站 UWP 这类视频应用常常只把位置在 0/1 之间抖一下，或者干脆不更新。
+            if (_positionWindowStart == DateTimeOffset.MinValue)
+            {
+                _positionWindowStart = now;
+                _positionWindowPosition = reported;
+            }
+            else if ((now - _positionWindowStart).TotalSeconds >= 5)
+            {
+                var advanced = reported - _positionWindowPosition;
+                var reliable = advanced >= TimeSpan.FromSeconds(2.5);
+                if (reliable != _positionReliable)
+                {
+                    _positionReliable = reliable;
+                    Musebase.Windows.Log.Write(reliable
+                        ? $"[sync] 播放器位置恢复正常（5 秒内前进 {advanced.TotalSeconds:0.0}s），恢复跟随上报值"
+                        : $"[sync] 播放器 5 秒内只前进 {advanced.TotalSeconds:0.0}s，判定不报位置，改用本机计时推算");
+                }
+                _positionWindowStart = now;
+                _positionWindowPosition = reported;
+            }
 
-            var frozenFor = _lastAdvanceAt == DateTimeOffset.MinValue ? TimeSpan.Zero : now - _lastAdvanceAt;
-            if (frozenFor > TimeSpan.FromSeconds(2) && frozenFor > age) age = frozenFor;
+            if (!_positionReliable)
+            {
+                // 不报位置的播放器：从"本机开始播放"算起的流逝时间就是位置。
+                // 注意不能用 reported 当基准 —— 它对这类应用永远是 0/1。
+                var elapsed = _trackPlayStartedAt == DateTimeOffset.MinValue
+                    ? TimeSpan.Zero
+                    : now - _trackPlayStartedAt;
+                if (CurrentTrack?.Duration is { } dur && elapsed > dur) elapsed = dur;
+                result = elapsed + compensation;
+            }
+            else
+            {
+                var age = now - lastUpdated;
+                if (age < TimeSpan.Zero) age = TimeSpan.Zero;
+                if (age > TimeSpan.FromMinutes(30)) age = TimeSpan.Zero; // 明显异常，不外推
+                result = reported + age + compensation;
+            }
 
-            if (age > TimeSpan.FromMinutes(30)) age = TimeSpan.Zero; // 明显异常，不外推
-            result = reported + age + LatencyCompensation;
-
-            // 上报位置偶尔回退一两百毫秒：同曲播放中依本地时间平滑递增，避免进度条倒退/抖动
-            var trackKey = CurrentTrack is { } t ? $"{t.Title}|{t.Artist}" : null;
+            // 上报位置偶尔回退一两百毫秒：在同曲播放中依本地时间平滑递增，避免进度条倒退
             if (trackKey == _smoothedTrackKey
                 && _smoothedPosition != TimeSpan.MinValue
                 && _lastSampleAt != DateTimeOffset.MinValue
@@ -635,6 +842,8 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
             _smoothedTrackKey = trackKey;
             _lastSampleAt = now;
         }
+
+        _lastResult = result;
 
         if (TimingDiagnostics)
             LogTimingSample(reported, lastUpdated, now, result);
@@ -661,12 +870,13 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
     {
         var trackKey = CurrentTrack is { } track ? $"{track.Title}|{track.Artist}" : "(无曲目)";
         var playerKey = CurrentTrack?.SourceAppId ?? "(未知)";
+        var effectiveComp = EffectiveLatencyCompensation;
         if (!string.Equals(trackKey, _diagTrackKey, StringComparison.Ordinal)
             || !string.Equals(playerKey, _diagPlayerKey, StringComparison.Ordinal))
         {
             FlushTimingSummary();
             Musebase.Windows.Log.Write($"[timing] ---- 曲目切换 → {trackKey}"
-                + $"｜播放器={playerKey}｜补偿={LatencyCompensation.TotalMilliseconds:0}ms ----");
+                + $"｜播放器={playerKey}｜补偿={effectiveComp.TotalMilliseconds:0}ms ----");
             _diagTrackKey = trackKey;
             _diagPlayerKey = playerKey;
             _diagLastUpdate = DateTimeOffset.MinValue;
@@ -684,7 +894,7 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
         var stale = (now - lastUpdated).TotalSeconds;
 
         var line = $"[timing] t={reported.TotalSeconds:0.000}s stale={stale:0.000}s"
-            + $" comp={LatencyCompensation.TotalMilliseconds:0}ms"
+            + $" comp={effectiveComp.TotalMilliseconds:0}ms"
             + $" est={estimate.TotalSeconds:0.000}s d={(estimate - reported).TotalSeconds:+0.000;-0.000;0.000}s";
         if (!double.IsNaN(gap))
             line += $" gap={gap:0.000}s advanced={advanced:0.000}s"

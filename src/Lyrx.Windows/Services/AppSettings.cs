@@ -92,6 +92,25 @@ public sealed class AppSettings
     public double ManualOffsetSeconds { get; set; }
 
     /// <summary>
+    /// 按曲记忆的偏移（秒），键是"标题|艺人"。
+    /// 用来吸收同一音源与歌词时间轴之间的固定错位：例如 B 站视频比专辑版多几秒片头，
+    /// 手动调一次就能记住，下次播同一首/同一视频自动套用。
+    /// </summary>
+    public Dictionary<string, double> TrackOffsetSeconds { get; set; } = new();
+
+    /// <summary>取某首歌的记忆偏移（没有则 0）。</summary>
+    public double GetTrackOffset(string? key) =>
+        !string.IsNullOrEmpty(key) && TrackOffsetSeconds.TryGetValue(key, out var value) ? value : 0;
+
+    /// <summary>写入/清除某首歌的记忆偏移；值为 0 时直接删掉这一项。</summary>
+    public void SetTrackOffset(string? key, double value)
+    {
+        if (string.IsNullOrEmpty(key)) return;
+        if (Math.Abs(value) < 0.001) TrackOffsetSeconds.Remove(key);
+        else TrackOffsetSeconds[key] = Math.Round(value, 2);
+    }
+
+    /// <summary>
     /// 播放位置的固定补偿（毫秒）。按实测手感标定，默认 1400ms：值越大歌词显示得越早。
     /// 想更贴脸可以逐次减小（例如 1200 / 1000），直到自己听着最合适。
     /// </summary>
@@ -111,6 +130,12 @@ public sealed class AppSettings
         "loose" => (1.12, 1.45),
         _ => (1.0, 1.0),
     };
+
+    /// <summary>
+    /// 自动同步间隔（秒）。手动滚动歌词后，超过这个时长没有新的滚动操作就自动回到
+    /// "跟随当前歌词行"，省得每次都要点「同步」。0 = 关闭自动同步。
+    /// </summary>
+    public int AutoSyncSeconds { get; set; } = 5;
 
     /// <summary>
     /// 播放源选择。"auto" = 自动检测，其他值 = 固定为特定播放器的 SourceAppUserModelId。

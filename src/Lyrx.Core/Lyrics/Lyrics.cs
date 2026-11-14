@@ -63,7 +63,9 @@ public sealed class Lyrics
         }
 
         if (lyrics.Lines.Count == 0) return null;
-        lyrics.Lines.Sort((a, b) => a.Position.CompareTo(b.Position));
+        var sorted = lyrics.Lines.OrderBy(l => l.Position).ToList();
+        lyrics.Lines.Clear();
+        lyrics.Lines.AddRange(sorted);
 
         var attachmentTags = new HashSet<string>();
         foreach (Match m in LrcRegex.LineAttachment().Matches(text))
@@ -81,7 +83,61 @@ public sealed class Lyrics
         }
         lyrics.Metadata.AttachmentTags = attachmentTags;
 
+        lyrics.FoldInterleavedTranslations();
+
         return lyrics;
+    }
+
+    /// <summary>
+    /// 折叠“同时间戳双语交错”LRC（例如部分歌词源把原文和译文写成同时间戳的连续两行）：
+    /// 若整首歌存在多组同时间戳配对，则把第二行并入第一行的默认译文标签，受「文A」开关统一控制。
+    /// </summary>
+    private void FoldInterleavedTranslations()
+    {
+        const double sameTimeThreshold = 0.02;
+
+        static bool IsCreditLine(string s) =>
+            s.Contains('：') || s.Contains(':') || s.StartsWith("作词", StringComparison.Ordinal) || s.StartsWith("作曲", StringComparison.Ordinal);
+
+        bool CanPair(int i)
+        {
+            if (i + 1 >= Lines.Count) return false;
+            var a = Lines[i];
+            var b = Lines[i + 1];
+            if (Math.Abs(b.Position - a.Position) >= sameTimeThreshold) return false;
+            if (string.IsNullOrWhiteSpace(a.Content) || string.IsNullOrWhiteSpace(b.Content)) return false;
+            if (a.Attachments.Translation() is not null || b.Attachments.Translation() is not null) return false;
+            if (string.Equals(a.Content.Trim(), b.Content.Trim(), StringComparison.OrdinalIgnoreCase)) return false;
+            if (a.Position <= 0.5 && IsCreditLine(a.Content) && IsCreditLine(b.Content)) return false;
+            return true;
+        }
+
+        var pairCount = 0;
+        for (var i = 0; i < Lines.Count - 1; i++)
+        {
+            if (CanPair(i))
+            {
+                pairCount++;
+                i++;
+            }
+        }
+        if (pairCount < 3) return;
+
+        var folded = new List<LyricsLine>(Lines.Count - pairCount);
+        for (var i = 0; i < Lines.Count; i++)
+        {
+            var current = Lines[i];
+            if (CanPair(i))
+            {
+                var tr = Lines[i + 1].Content.Trim();
+                if (tr.Length > 0 && tr != "//")
+                    current.Attachments[LineAttachments.TranslationTag()] = tr;
+                i++;
+            }
+            folded.Add(current);
+        }
+        Lines.Clear();
+        Lines.AddRange(folded);
     }
 
     /// <summary>[offset:] 标签（毫秒）</summary>
@@ -134,18 +190,29 @@ public sealed class Lyrics
         return (current, next);
     }
 
-    /// <summary>二分查找：完全一致则返回 (true, index)，否则返回 (false, 插入位置)</summary>
+    /// <summary>二分查找：完全一致则返回 (true, 最后一个匹配下标)，否则返回 (false, 插入位置)</summary>
     internal (bool Found, int Index) FindLineIndex(double position)
     {
         int left = 0, right = Lines.Count - 1;
+        var lastMatch = -1;
         while (left <= right)
         {
             var mid = (left + right) / 2;
-            if (Lines[mid].Position < position) left = mid + 1;
-            else if (position < Lines[mid].Position) right = mid - 1;
-            else return (true, mid);
+            if (Lines[mid].Position < position)
+            {
+                left = mid + 1;
+            }
+            else if (position < Lines[mid].Position)
+            {
+                right = mid - 1;
+            }
+            else
+            {
+                lastMatch = mid;
+                left = mid + 1;
+            }
         }
-        return (false, left);
+        return lastMatch >= 0 ? (true, lastMatch) : (false, left);
     }
 
     /// <summary>把不符合过滤条件的行设为未启用（用于去除广告/制作名单）。</summary>

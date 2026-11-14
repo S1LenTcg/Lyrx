@@ -365,7 +365,7 @@ public sealed class HttpRemoteLyricsCache : IRemoteLyricsCache
                 Lrc = lyrics.ToString(),
                 Service = service,
                 // 用户编辑版在服务器上受保护，不会被自动搜索结果覆盖。
-                Origin = service == EditedServiceName ? "user" : "provider",
+                Origin = (service == EditedServiceName || service == LegacyEditedServiceName) ? "user" : "provider",
             };
 
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -387,7 +387,8 @@ public sealed class HttpRemoteLyricsCache : IRemoteLyricsCache
     }
 
     /// <summary>用户编辑版标记 —— 必须与 <c>LyricsCoordinator.SaveEditedLyrics</c> 写入的值一致。</summary>
-    public const string EditedServiceName = "사용자 편집";
+    public const string EditedServiceName = "用户编辑";
+    private const string LegacyEditedServiceName = "\uC0AC\uC6A9\uC790 \uD3B8\uC9D1";
 
     // ---- 熔断器 ----
 

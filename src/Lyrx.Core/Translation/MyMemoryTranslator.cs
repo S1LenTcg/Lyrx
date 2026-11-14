@@ -46,31 +46,65 @@ public sealed class MyMemoryTranslator : ITranslator
     {
         var target = targetLang.Split('-')[0].ToLowerInvariant(); // EN-US → en, ZH-HANT → zh
         var results = new string?[texts.Count];
+        if (texts.Count == 0) return results;
 
-        // MyMemory 只支持单条 q → 按行顺序请求（为缓解额度压力避免并行）。有缓存时每首歌只调用一次。
+        // 使用有限并发（最多 6 路）加速整首歌翻译；单行失败时不丢弃已成功译文，仅在全部失败时抛异常。
+        using var gate = new SemaphoreSlim(6);
+        Exception? firstFailure = null;
+        var succeeded = 0;
+
+        var tasks = new Task[texts.Count];
         for (var i = 0; i < texts.Count; i++)
         {
-            var q = texts[i];
-            if (string.IsNullOrWhiteSpace(q)) continue;
+            var idx = i;
+            var q = texts[idx];
+            if (string.IsNullOrWhiteSpace(q))
+            {
+                tasks[idx] = Task.CompletedTask;
+                continue;
+            }
 
-            var url = $"{Endpoint}?q={Uri.EscapeDataString(q)}&langpair={Uri.EscapeDataString($"Autodetect|{target}")}";
-            if (_email is not null) url += $"&de={Uri.EscapeDataString(_email)}";
+            tasks[idx] = Task.Run(async () =>
+            {
+                await gate.WaitAsync(ct).ConfigureAwait(false);
+                try
+                {
+                    var url = $"{Endpoint}?q={Uri.EscapeDataString(q)}&langpair={Uri.EscapeDataString($"Autodetect|{target}")}";
+                    if (_email is not null) url += $"&de={Uri.EscapeDataString(_email)}";
 
-            using var response = await _http.GetAsync(url, ct).ConfigureAwait(false);
-            response.EnsureSuccessStatusCode();
-            var body = await response.Content.ReadFromJsonAsync<MyMemoryResponse>(ct).ConfigureAwait(false);
+                    using var response = await _http.GetAsync(url, ct).ConfigureAwait(false);
+                    response.EnsureSuccessStatusCode();
+                    var body = await response.Content.ReadFromJsonAsync<MyMemoryResponse>(ct).ConfigureAwait(false);
 
-            // responseStatus 可能是字符串也可能是数字。不是 200 即为失败。
-            if (body?.ResponseStatus is { } status && status != "200")
-                throw MakeFailure(status, body.ResponseDetails);
+                    if (body?.ResponseStatus is { } status && status != "200")
+                        throw MakeFailure(status, body.ResponseDetails);
 
-            var text = body?.ResponseData?.TranslatedText;
-            // 额度耗尽等情况仍返回 200，但会在译文位置放入大写警告文本。
-            if (text is null || IsWarning(text))
-                throw MakeFailure("429", text);
+                    var text = body?.ResponseData?.TranslatedText;
+                    if (text is null || IsWarning(text))
+                        throw MakeFailure("429", text);
 
-            results[i] = text;
+                    results[idx] = text;
+                    Interlocked.Increment(ref succeeded);
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    Interlocked.CompareExchange(ref firstFailure, ex, null);
+                }
+                finally
+                {
+                    gate.Release();
+                }
+            }, ct);
         }
+
+        await Task.WhenAll(tasks).ConfigureAwait(false);
+
+        if (succeeded == 0 && firstFailure is not null)
+            throw firstFailure;
 
         return results;
     }

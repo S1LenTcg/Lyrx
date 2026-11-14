@@ -12,7 +12,16 @@ public sealed class SqliteTranslationCache : ITranslationCache, IDisposable
 
     public SqliteTranslationCache(string dbPath)
     {
-        _connection = new SqliteConnection($"Data Source={dbPath}");
+        var fullPath = Path.GetFullPath(dbPath);
+        var dir = Path.GetDirectoryName(fullPath);
+        if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+
+        var csb = new SqliteConnectionStringBuilder
+        {
+            DataSource = fullPath,
+            Mode = SqliteOpenMode.ReadWriteCreate,
+        };
+        _connection = new SqliteConnection(csb.ConnectionString);
         _connection.Open();
         using var cmd = _connection.CreateCommand();
         cmd.CommandText = """
@@ -31,11 +40,18 @@ public sealed class SqliteTranslationCache : ITranslationCache, IDisposable
     {
         lock (_lock)
         {
-            using var cmd = _connection.CreateCommand();
-            cmd.CommandText = "SELECT translation FROM translation_cache WHERE text = $t AND target_lang = $l";
-            cmd.Parameters.AddWithValue("$t", text);
-            cmd.Parameters.AddWithValue("$l", targetLang);
-            return cmd.ExecuteScalar() as string;
+            try
+            {
+                using var cmd = _connection.CreateCommand();
+                cmd.CommandText = "SELECT translation FROM translation_cache WHERE text = $t AND target_lang = $l";
+                cmd.Parameters.AddWithValue("$t", text);
+                cmd.Parameters.AddWithValue("$l", targetLang);
+                return cmd.ExecuteScalar() as string;
+            }
+            catch
+            {
+                return null;
+            }
         }
     }
 
@@ -43,15 +59,22 @@ public sealed class SqliteTranslationCache : ITranslationCache, IDisposable
     {
         lock (_lock)
         {
-            using var cmd = _connection.CreateCommand();
-            cmd.CommandText = """
-                INSERT INTO translation_cache (text, target_lang, translation) VALUES ($t, $l, $tr)
-                ON CONFLICT (text, target_lang) DO UPDATE SET translation = $tr
-                """;
-            cmd.Parameters.AddWithValue("$t", text);
-            cmd.Parameters.AddWithValue("$l", targetLang);
-            cmd.Parameters.AddWithValue("$tr", translation);
-            cmd.ExecuteNonQuery();
+            try
+            {
+                using var cmd = _connection.CreateCommand();
+                cmd.CommandText = """
+                    INSERT INTO translation_cache (text, target_lang, translation) VALUES ($t, $l, $tr)
+                    ON CONFLICT (text, target_lang) DO UPDATE SET translation = $tr
+                    """;
+                cmd.Parameters.AddWithValue("$t", text);
+                cmd.Parameters.AddWithValue("$l", targetLang);
+                cmd.Parameters.AddWithValue("$tr", translation);
+                cmd.ExecuteNonQuery();
+            }
+            catch
+            {
+                // 缓存写入失败（例如数据库只读/被占用）不应阻断翻译流程
+            }
         }
     }
 

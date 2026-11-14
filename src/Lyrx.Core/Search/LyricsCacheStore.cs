@@ -14,7 +14,16 @@ public sealed class LyricsCacheStore : IDisposable
 
     public LyricsCacheStore(string dbPath)
     {
-        _connection = new SqliteConnection($"Data Source={dbPath}");
+        var fullPath = Path.GetFullPath(dbPath);
+        var dir = Path.GetDirectoryName(fullPath);
+        if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+
+        var csb = new SqliteConnectionStringBuilder
+        {
+            DataSource = fullPath,
+            Mode = SqliteOpenMode.ReadWriteCreate,
+        };
+        _connection = new SqliteConnection(csb.ConnectionString);
         _connection.Open();
         using var cmd = _connection.CreateCommand();
         cmd.CommandText = """

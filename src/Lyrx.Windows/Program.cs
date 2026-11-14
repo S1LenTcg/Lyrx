@@ -39,7 +39,7 @@ internal static class Program
             Log.Write($"[boot] 日志文件={logPath}");
         else if (Log.Failure is { } logFailure)
             MessageBox.Show("Lyrx 的日志写不进任何位置。\n\n原因：" + logFailure
-                + "\n\n已尝试：\n· %LOCALAPPDATA%\\Lyrx\\app.log\n· exe 同目录 Lyrx.log\n· %TEMP%\\Lyrx.log",
+                + "\n\n已尝试：\n· %LOCALAPPDATA%\\Lyrx\\app.log\n· %TEMP%\\Lyrx.log",
                 "Lyrx 日志不可写", MessageBoxButton.OK, MessageBoxImage.Warning);
 
         // 开发时想同时开旧版本对比，用 Lyrx.exe --new-instance 跳过单实例检查。
@@ -75,8 +75,9 @@ internal static class Program
             }
             nowPlaying.LatencyCompensation = TimeSpan.FromMilliseconds(compensationMs);
 
-            var cacheDb = Path.Combine(AppSettings.DataDirectory, "translations.db");
-            var translationCache = new Musebase.Core.Translation.SqliteTranslationCache(cacheDb);
+            var translationDb = Path.Combine(AppSettings.DataDirectory, "translations.db");
+            var lyricsDb = Path.Combine(AppSettings.DataDirectory, "lyrics.db");
+            var translationCache = new Musebase.Core.Translation.SqliteTranslationCache(translationDb);
 
             EngineConfig CurrentConfig() => new(
                 settings.EnabledLyricsSources,
@@ -91,7 +92,7 @@ internal static class Program
                 settings.EffectiveTargetLanguage,
                 settings.ShowOnlyTargetTranslation,
                 settings.ManualOffsetSeconds,
-                cacheDb,
+                lyricsDb,
                 TranslationFallbackEngineId: null,
                 ApiTranslationEnabled: settings.ClassicShowTranslation && settings.ApiTranslationEnabled,
                 LyricsServerEndpoint: null,
@@ -155,9 +156,11 @@ internal static class Program
                     foreach (var id in sources)
                     {
                         var captured = id;
+                        var displayName = NowPlayingService.FormatSourceDisplayName(id);
                         var item = new MenuItem
                         {
-                            Header = NowPlayingService.IsBrowser(id) ? $"{id}  🌐" : id,
+                            Header = NowPlayingService.IsBrowser(id) ? $"{displayName}  🌐" : displayName,
+                            ToolTip = id,
                             IsCheckable = true,
                             IsChecked = string.Equals(mode, id, StringComparison.OrdinalIgnoreCase),
                         };
@@ -386,7 +389,7 @@ internal static class Program
             + $"类型：{error.GetType().FullName}\n消息：{error.Message}\n\n{error}";
         var path = Path.Combine(Path.GetTempPath(), "Lyrx-crash.log");
         try { File.WriteAllText(path, text); } catch { }
-        try { Log.Write("[boot] 启动失败：" + error.GetType().Name + " " + error.Message); } catch { }
+        try { Log.Write("[boot] 启动失败：\n" + error.ToString()); } catch { }
         try { MessageBox.Show(text + "\n\n已写入：" + path, "Lyrx 启动失败", MessageBoxButton.OK, MessageBoxImage.Error); } catch { }
     }
 
@@ -413,15 +416,14 @@ internal static class Log
     public static string? Failure { get { lock (Sync) return _failure; } }
 
     /// <summary>
-    /// 日志落盘顺序：用户数据目录 → exe 同目录 → 临时目录。
+    /// 日志落盘顺序：用户数据目录 → 临时目录。
     /// 只写第一个成功的，之后都追加到它；全失败时把原因留在 <see cref="Failure"/> 里，
     /// 由启动流程弹窗告知，避免再出现"程序在跑但一个日志都没有"的黑洞。
     /// </summary>
     private static List<string> BuildCandidates()
     {
-        var list = new List<string>(3);
+        var list = new List<string>(2);
         try { list.Add(Path.Combine(AppSettings.DataDirectory, "app.log")); } catch { }
-        try { list.Add(Path.Combine(AppContext.BaseDirectory, "Lyrx.log")); } catch { }
         try { list.Add(Path.Combine(Path.GetTempPath(), "Lyrx.log")); } catch { }
         return list;
     }

@@ -68,6 +68,43 @@ public static class LyricsQuality
             && IsCaseInsensitiveSimilar(artist, term.Artist!);
     }
 
+    /// <summary>
+    /// 校验候选歌词是否与目标曲目合理匹配，避免张冠李戴（例如目标是《体面》，候选歌词却是同歌手的《听说你》）。
+    /// </summary>
+    public static bool IsPlausibleMatch(this Lyrics lyrics, string targetTitle, string? targetArtist = null)
+    {
+        var candTitle = lyrics.IdTags.GetValueOrDefault(Lyrics.TagTitle);
+        if (string.IsNullOrWhiteSpace(candTitle)) return true; // 无法得知候选歌词标题时不拦截
+
+        var trackTitle = (targetTitle ?? "").Trim();
+        if (trackTitle.Length == 0) return true;
+
+        var cleanCand = Search.SearchTermCleaner.CleanTitle(candTitle);
+        var cleanTrack = Search.SearchTermCleaner.CleanTitle(trackTitle);
+
+        // 1. 包含关系（如 "体面" 与 "体面 (电影插曲)"）
+        if (cleanCand.Contains(cleanTrack, StringComparison.OrdinalIgnoreCase) ||
+            cleanTrack.Contains(cleanCand, StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        // 2. 对称编辑距离相似度 >= 0.4
+        var sim = Similarity(cleanCand.ToLowerInvariant(), cleanTrack.ToLowerInvariant());
+        if (sim >= 0.4) return true;
+
+        // 3. 若目标标题含《书名号》，必须与书名号内歌名相似
+        var bookMatch = Search.SearchTermCleaner.BookTitleRegex().Match(trackTitle);
+        if (bookMatch.Success)
+        {
+            var bookSong = bookMatch.Groups[1].Value.Trim();
+            if (cleanCand.Contains(bookSong, StringComparison.OrdinalIgnoreCase) ||
+                bookSong.Contains(cleanCand, StringComparison.OrdinalIgnoreCase) ||
+                Similarity(cleanCand.ToLowerInvariant(), bookSong.ToLowerInvariant()) >= 0.4)
+                return true;
+        }
+
+        return false;
+    }
+
     private static bool IsUnwantedAlternateVersion(Lyrics lyrics)
     {
         var title = lyrics.IdTags.GetValueOrDefault(Lyrics.TagTitle);

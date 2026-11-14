@@ -56,7 +56,8 @@ public sealed class LyricsTranslationService
     /// 传入 <paramref name="stats"/> 时统计需要翻译的行数与缓存命中（遥测用）。
     /// </summary>
     public async Task<int> EnsureTranslatedAsync(
-        Lyrics lyrics, string targetLang, CancellationToken ct = default, TranslationRunStats? stats = null)
+        Lyrics lyrics, string targetLang, CancellationToken ct = default, TranslationRunStats? stats = null,
+        bool preserveDefaultTranslation = false, Action? onBatchTranslated = null)
     {
         if (_translator is null) return 0;
 
@@ -72,6 +73,9 @@ public sealed class LyricsTranslationService
         {
             if (string.IsNullOrWhiteSpace(line.Content)) continue;
             if (line.Attachments[tag] is not null) continue;
+            if (preserveDefaultTranslation
+                && !string.IsNullOrWhiteSpace(line.Attachments[LineAttachments.TagTranslationPrefix]))
+                continue;
 
             if (stats is not null) stats.LinesNeeded++;
 
@@ -98,31 +102,45 @@ public sealed class LyricsTranslationService
         // 仅使用缓存模式在此结束——未命中的行不翻译（网络调用 0）。
         if (pendingTexts.Count == 0 || CacheOnly) return changed;
 
-        // 2) 仅对未命中的行批量翻译
-        IReadOnlyList<string?> translated;
-        try
-        {
-            translated = await _translator.TranslateAsync(pendingTexts, targetLang, ct).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
-        catch
-        {
-            return changed; // 静默降级
-        }
+        // 若已有部分缓存命中，先通知 UI 刷新已命中的行
+        if (changed > 0) onBatchTranslated?.Invoke();
 
-        // 3) 写回结果 + 缓存（含同一原文的重复行）
-        for (var i = 0; i < pending.Count && i < translated.Count; i++)
+        // 2) 分批翻译未命中的行，每批完成后立即写回并通知 UI 增量显示
+        const int batchSize = 15;
+        for (var offset = 0; offset < pendingTexts.Count; offset += batchSize)
         {
-            if (translated[i] is not { Length: > 0 } result) continue;
-            _cache.Set(pendingTexts[i], targetLang, result);
-            foreach (var line in seen[pendingTexts[i]])
+            var count = Math.Min(batchSize, pendingTexts.Count - offset);
+            var batchTexts = pendingTexts.GetRange(offset, count);
+
+            IReadOnlyList<string?> translated;
+            try
             {
-                line.Attachments[tag] = result;
-                changed++;
+                translated = await _translator.TranslateAsync(batchTexts, targetLang, ct).ConfigureAwait(false);
             }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch
+            {
+                return changed; // 静默降级
+            }
+
+            var batchChanged = 0;
+            for (var i = 0; i < count && i < translated.Count; i++)
+            {
+                if (translated[i] is not { Length: > 0 } result) continue;
+                var sourceText = batchTexts[i];
+                foreach (var line in seen[sourceText])
+                {
+                    line.Attachments[tag] = result;
+                    changed++;
+                    batchChanged++;
+                }
+                try { _cache.Set(sourceText, targetLang, result); } catch { }
+            }
+
+            if (batchChanged > 0) onBatchTranslated?.Invoke();
         }
 
         return changed;

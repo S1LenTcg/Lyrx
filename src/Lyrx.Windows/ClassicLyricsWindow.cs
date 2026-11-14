@@ -75,6 +75,7 @@ internal sealed class ClassicLyricsWindow : Window
     private Color _coverSubdued = DefaultSubdued;
     private Color _coverBackground = DefaultBackground;
     private bool _manualScroll;
+    private long _manualScrollAt;
     private bool _resumeScrollPending;
     private bool _transportPending;
     private bool _isFullscreen;
@@ -83,6 +84,7 @@ internal sealed class ClassicLyricsWindow : Window
     private bool _isAnimatingTranslation;
     private bool _waitingForTranslationAnimation;
     private bool _latinMetrics;
+    private bool _chineseLyrics;
     private double _lineHeightScale = 1.0;
     private double _rowGapScale = 1.0;
     private LyricRow? _translationAnchorRow;
@@ -219,7 +221,13 @@ internal sealed class ClassicLyricsWindow : Window
         buttons.Children.Add(_repeat);
         transport.Children.Add(buttons);
 
-        // 时间轴只做展示：进度条不再可拖拽/点击（跳转功能已移除）。
+        // 底部进度条：支持鼠标悬停、拖拽与点击跳转播放（或校准时钟）
+        _progress.SeekRequested += async seconds =>
+        {
+            await _player.SeekAsync(TimeSpan.FromSeconds(seconds));
+            ResumeAutoScroll();
+            Refresh();
+        };
         var timeline = new Grid { Margin = new Thickness(0, 2, 0, 0) };
         timeline.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(46) });
         timeline.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
@@ -267,6 +275,7 @@ internal sealed class ClassicLyricsWindow : Window
         _resume.Content = resumeContent;
         AutomationProperties.SetName(_resume, "同步歌词");
         var syncMenu = new ContextMenu();
+        var globalGroup = new MenuItem { Header = "所有歌曲" };
         foreach (var (label, offset) in new (string, double?)[]
         {
             ("歌词提前 0.2 秒", 0.2), ("歌词延后 0.2 秒", -0.2),
@@ -276,8 +285,25 @@ internal sealed class ClassicLyricsWindow : Window
         {
             var item = new MenuItem { Header = label };
             item.Click += (_, _) => { adjustOffset(offset); ResumeAutoScroll(); Refresh(); };
-            syncMenu.Items.Add(item);
+            globalGroup.Items.Add(item);
         }
+        syncMenu.Items.Add(globalGroup);
+
+        // 仅当前这首歌：吸收"音源与歌词时间轴之间的固定错位"
+        // （例如 B 站视频比专辑版多几秒片头，或影片是现场版/剪辑版），调一次即记住。
+        var trackGroup = new MenuItem { Header = "仅此曲（会记住）" };
+        foreach (var (label, offset) in new (string, double?)[]
+        {
+            ("歌词提前 0.2 秒", 0.2), ("歌词延后 0.2 秒", -0.2),
+            ("歌词提前 0.5 秒", 0.5), ("歌词延后 0.5 秒", -0.5),
+            ("清除此曲偏移", null),
+        })
+        {
+            var item = new MenuItem { Header = label };
+            item.Click += (_, _) => { AdjustTrackOffset(offset); Refresh(); };
+            trackGroup.Items.Add(item);
+        }
+        syncMenu.Items.Add(trackGroup);
         _resume.ContextMenu = syncMenu;
         lyricsView.Children.Add(_resume);
         _resume.Click += (_, _) =>
@@ -286,6 +312,12 @@ internal sealed class ClassicLyricsWindow : Window
             ResumeAutoScroll();
             Refresh();
         };
+
+        void AdjustTrackOffset(double? offset)
+        {
+            if (offset is null) _coordinator.TrackOffsetSeconds = 0;
+            else _coordinator.TrackOffsetSeconds += offset.Value;
+        }
 
         _panel = new Border
         {
@@ -424,6 +456,8 @@ internal sealed class ClassicLyricsWindow : Window
 
     private void Refresh()
     {
+        AutoSyncIfIdle();
+
         var track = _coordinator.CurrentTrack;
         var lyrics = _coordinator.CurrentLyrics;
         var status = _coordinator.CurrentStatus?.Kind;
@@ -454,6 +488,10 @@ internal sealed class ClassicLyricsWindow : Window
                 && HasAnyTranslation(lyrics);
             _lyrics = lyrics;
             _status = status;
+            if (!trackChanged && _cover.Source is null && track is not null)
+            {
+                _ = LoadCoverAsync(track);
+            }
             if (trackChanged)
             {
                 _waitingForTranslationAnimation = false;
@@ -479,15 +517,23 @@ internal sealed class ClassicLyricsWindow : Window
         var state = _player.GetTransportState();
         UpdateTransport(state);
 
-        // 进度条只反映真实播放位置：不拖拽、不点击、不预览。
+        // 进度条：反映真实播放位置，支持拖拽与实时时间预览
         var total = duration is { TotalSeconds: > 0 } known ? known : (TimeSpan?)null;
         _progress.Maximum = total?.TotalSeconds ?? 1;
-        _progress.Value = Math.Clamp(position?.TotalSeconds ?? 0, 0, _progress.Maximum);
-
-        _elapsed.Text = position is { } elapsed ? FormatTime(elapsed) : "–:––";
-        _remaining.Text = total is { } remainingTotal && position is { } current
-            ? $"−{FormatTime(remainingTotal - current)}"
-            : "–:––";
+        if (!_progress.IsDragging)
+        {
+            _progress.Value = Math.Clamp(position?.TotalSeconds ?? 0, 0, _progress.Maximum);
+            _elapsed.Text = position is { } elapsed ? FormatTime(elapsed) : "–:––";
+            _remaining.Text = total is { } remainingTotal && position is { } current
+                ? $"−{FormatTime(remainingTotal - current)}"
+                : "–:––";
+        }
+        else
+        {
+            var cur = TimeSpan.FromSeconds(_progress.Value);
+            _elapsed.Text = FormatTime(cur);
+            _remaining.Text = total is { } remTotal ? $"−{FormatTime(remTotal - cur)}" : "–:––";
+        }
 
         if (lyrics is null || position is null) return;
 
@@ -626,10 +672,29 @@ internal sealed class ClassicLyricsWindow : Window
             : line.Attachments.Translation(preferredLang);
         if (string.IsNullOrWhiteSpace(candidate)) return null;
         var trimmed = candidate.Trim();
-        if (_settings.HideSameTranslation
-            && string.Equals(trimmed, line.Content.Trim(), StringComparison.OrdinalIgnoreCase))
-            return null;
+        if (_settings.HideSameTranslation)
+        {
+            var isTargetSimplifiedZh = preferredLang is null
+                || preferredLang.Equals("zh", StringComparison.OrdinalIgnoreCase)
+                || preferredLang.StartsWith("zh-hans", StringComparison.OrdinalIgnoreCase)
+                || preferredLang.Equals("zh-cn", StringComparison.OrdinalIgnoreCase);
+            if (_chineseLyrics && isTargetSimplifiedZh)
+                return null;
+            if (string.Equals(NormalizeForCompare(trimmed), NormalizeForCompare(line.Content), StringComparison.OrdinalIgnoreCase))
+                return null;
+        }
         return trimmed;
+    }
+
+    private static string NormalizeForCompare(string s)
+    {
+        var sb = new System.Text.StringBuilder(s.Length);
+        foreach (var c in s)
+        {
+            if (!char.IsWhiteSpace(c) && !char.IsPunctuation(c))
+                sb.Append(c);
+        }
+        return sb.ToString();
     }
 
     private bool HasAnyTranslation(Lyrics lyrics)
@@ -671,6 +736,10 @@ internal sealed class ClassicLyricsWindow : Window
             _waitingForTranslationAnimation = false;
             AnimateTranslation(1d);
         }
+
+        // 译文插进来会改变行高，原来的滚动偏移就不再对准当前行了 ——
+        // 标记一次"待重新对齐"，下一帧 Refresh 就会把当前行重新摆回视口中央。
+        if (changed) _resumeScrollPending = true;
     }
 
     private void AnimateTranslation(double target)
@@ -791,6 +860,7 @@ internal sealed class ClassicLyricsWindow : Window
         if (_lyrics is { } lyrics)
         {
             _latinMetrics = IsMostlyLatin(lyrics);
+            _chineseLyrics = IsMostlyChinese(lyrics);
             for (var i = 0; i < lyrics.Lines.Count; i++)
             {
                 var line = lyrics.Lines[i];
@@ -798,6 +868,17 @@ internal sealed class ClassicLyricsWindow : Window
                 var mainText = string.IsNullOrWhiteSpace(line.Content) ? "♪" : line.Content;
                 var subText = ExtractTranslation(line);
                 var row = NewLine(mainText, subText, progress);
+                var linePos = line.Position;
+                row.Cursor = Cursors.Hand;
+                row.MouseLeftButtonUp += async (_, e) =>
+                {
+                    var seekSeconds = linePos - lyrics.TimeDelay - _coordinator.ManualOffsetSeconds;
+                    if (seekSeconds < 0) seekSeconds = 0;
+                    await _player.SeekAsync(TimeSpan.FromSeconds(seekSeconds));
+                    ResumeAutoScroll();
+                    Refresh();
+                    e.Handled = true;
+                };
                 _rows.Add(i, row);
                 _lines.Children.Add(row);
             }
@@ -855,6 +936,27 @@ internal sealed class ClassicLyricsWindow : Window
         return latin > wide;
     }
 
+    private static bool IsMostlyChinese(Lyrics lyrics)
+    {
+        var cjk = 0;
+        var latin = 0;
+        var kanaOrHangul = 0;
+        foreach (var line in lyrics.Lines)
+        {
+            if (!line.Enabled) continue;
+            foreach (var c in line.Content)
+            {
+                if ((c >= '\u3040' && c <= '\u30FF') || (c >= '\uAC00' && c <= '\uD7AF'))
+                    kanaOrHangul++;
+                else if (c >= '\u4E00' && c <= '\u9FFF')
+                    cjk++;
+                else if (char.IsLetter(c))
+                    latin++;
+            }
+        }
+        return cjk > 0 && cjk >= latin && kanaOrHangul * 20 < cjk;
+    }
+
     private double CurrentMainFontSize()
     {
         var width = _scroll.ActualWidth;
@@ -879,7 +981,24 @@ internal sealed class ClassicLyricsWindow : Window
         if (_rows.Count == 0 || _manualScroll) return;
         CancelScrollAnimation();
         _manualScroll = true;
+        _manualScrollAt = Environment.TickCount64;
         _resume.Visibility = Visibility.Visible;
+        _resumeScrollPending = true;
+    }
+
+    /// <summary>
+    /// 自动同步：手动滚动后 <see cref="AppSettings.AutoSyncSeconds"/> 秒内没有新的滚动操作，
+    /// 就自动回到"跟随当前歌词行"，不必再去点「同步」按钮。
+    /// 开着翻译时每行会变高，用户常常要滚动去看译文，这个兜底就是为那种场景准备的。
+    /// </summary>
+    private void AutoSyncIfIdle()
+    {
+        var seconds = _settings.AutoSyncSeconds;
+        if (seconds <= 0 || !_manualScroll || _rows.Count == 0) return;
+        if (Environment.TickCount64 - _manualScrollAt < seconds * 1000L) return;
+
+        _coordinator.RefreshCurrentLine();
+        ResumeAutoScroll();
         _resumeScrollPending = true;
     }
 
@@ -934,6 +1053,14 @@ internal sealed class ClassicLyricsWindow : Window
     {
         var bytes = await _player.GetThumbnailAsync();
         if (!Equals(_track, track) || !Equals(_player.CurrentTrack, track)) return;
+
+        // 若本地 SMTC 未提供封面（例如 B 站桌面客户端），自动回退向在线音乐库检索高清专辑封面
+        if (bytes is null)
+        {
+            bytes = await Services.CoverFetcher.FetchCoverAsync(track.Title, track.Artist, _lyrics?.Metadata.ArtworkUrl);
+            if (!Equals(_track, track) || !Equals(_player.CurrentTrack, track)) return;
+        }
+
         if (bytes is null)
         {
             _coverBackground = DefaultBackground;
@@ -950,6 +1077,7 @@ internal sealed class ClassicLyricsWindow : Window
             cover.DecodePixelWidth = 160;
             cover.CacheOption = BitmapCacheOption.OnLoad;
             cover.EndInit();
+            cover.Freeze();
             _cover.Source = cover;
 
             (_coverBackground, _coverSubdued) = ClassicLyricsPalette.FromCover(cover);
@@ -1341,8 +1469,8 @@ internal sealed class ClassicLyricsWindow : Window
             var clamped = Math.Clamp(progress, 0d, 1d);
             if (clamped <= 0.001)
             {
-                if (_slot.Visibility != Visibility.Collapsed)
-                    _slot.Visibility = Visibility.Collapsed;
+                if (_slot.Visibility != Visibility.Visible)
+                    _slot.Visibility = Visibility.Visible;
                 _slot.Progress = 0d;
                 _sub.Opacity = 0d;
                 _subTranslate.Y = -6d;
@@ -1386,10 +1514,15 @@ internal sealed class ClassicLyricsWindow : Window
             Margin = new Thickness(0);
             Main.Margin = new Thickness(0);
             var gap = Math.Max(4, mainSize * (_latinMetrics ? 1.00 : 0.82) * GapScale);
-            if (_sub is not null)
-                _sub.Margin = new Thickness(0, Math.Max(2, Math.Round(mainSize * 0.08)), 0, gap);
+            if (_sub is not null && _slot is not null)
+            {
+                _sub.Margin = new Thickness(0, Math.Max(2, Math.Round(mainSize * 0.08)), 0, 0);
+                _slot.Margin = new Thickness(0, 0, 0, gap);
+            }
             else if (mainSize > 0)
+            {
                 Main.Margin = new Thickness(0, 0, 0, gap);
+            }
         }
 
         public void SetUnderline(bool underline)

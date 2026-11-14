@@ -31,10 +31,16 @@ Lyrx/
 
 ## 编译与发布
 
-在 PowerShell 中运行根目录脚本即可生成无需安装 .NET 运行时的独立版本：
+本项目已配置通用编译脚本，支持任意装有 .NET 8 SDK 的 Windows 电脑一键构建：
 
-```powershell
-.\build.ps1
-```
+- **方法 1（推荐）**：在文件资源管理器中直接双击 `build.bat`，或在 CMD / 终端中运行：
+  ```cmd
+  .\build.bat
+  ```
+- **方法 2**：在 PowerShell 中执行：
+  ```powershell
+  powershell -ExecutionPolicy Bypass -File .\build.ps1
+  ```
+  *(可选支持参数：`-SingleFile` 输出单文件独立 Exe；`-Configuration Debug` 输出调试版)*
 
 编译产物位于 `dist\Lyrx.exe`。用户配置文件与本地歌词缓存保存在 `%LOCALAPPDATA%\Lyrx\`。

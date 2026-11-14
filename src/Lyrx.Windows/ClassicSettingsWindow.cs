@@ -154,23 +154,13 @@ internal sealed class ClassicSettingsWindow : Window
         DockPanel.SetDock(closeBtn, Dock.Right);
         header.Children.Add(closeBtn);
 
-        var autoSaveHint = new TextBlock
-        {
-            Text = "所有修改实时生效",
-            FontSize = 11.5,
-            Foreground = TextDim,
-            VerticalAlignment = VerticalAlignment.Center,
-            Margin = new Thickness(0, 0, 10, 0),
-        };
-        DockPanel.SetDock(autoSaveHint, Dock.Right);
-        header.Children.Add(autoSaveHint);
-
         var headerTitle = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
         headerTitle.Children.Add(new ClassicTransportGlyph(ClassicTransportIcon.Settings)
         {
             Tint = AccentGreen,
             Width = 20,
             Height = 20,
+            VerticalAlignment = VerticalAlignment.Center,
             Margin = new Thickness(0, 0, 8, 0),
         });
         headerTitle.Children.Add(new TextBlock
@@ -179,6 +169,7 @@ internal sealed class ClassicSettingsWindow : Window
             FontSize = 16,
             FontWeight = FontWeights.Bold,
             VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0, 1.5, 0, 0),
         });
         header.Children.Add(headerTitle);
 
@@ -256,7 +247,8 @@ internal sealed class ClassicSettingsWindow : Window
         {
             playerModes.Add(id);
             var running = availablePlayers.Contains(id, StringComparer.OrdinalIgnoreCase);
-            playerLabels.Add(running ? $"锁定：{id}（正在运行）" : $"锁定：{id}（当前未运行）");
+            var displayName = NowPlayingService.FormatSourceDisplayName(id);
+            playerLabels.Add(running ? $"锁定：{displayName}（正在运行）" : $"锁定：{displayName}（当前未运行）");
         }
 
         var selectedPlayerIdx = Math.Max(0, playerModes.FindIndex(
@@ -300,7 +292,22 @@ internal sealed class ClassicSettingsWindow : Window
             settings.LyricsLineSpacing = spacingIds[Math.Clamp(idx, 0, spacingIds.Length - 1)];
             SaveAndNotify();
         }, compact: true);
-        windowCard.Children.Add(CreateSettingRow("歌词行距", null, spacingDropdown));
+        var spacingRow = CreateSettingRow("歌词行距", null, spacingDropdown);
+        spacingRow.Margin = new Thickness(0, 4, 0, 6);
+        windowCard.Children.Add(spacingRow);
+
+        // 自动同步：手动滚动后隔多久自动回到"跟随当前歌词行"
+        var autoSyncIds = new[] { 0, 3, 5, 10 };
+        var autoSyncLabels = new List<string> { "关闭", "3 秒", "5 秒", "10 秒" };
+        var autoSyncIdx = Math.Max(0, Array.FindIndex(autoSyncIds, v => v == settings.AutoSyncSeconds));
+        var (autoSyncDropdown, _) = CreateDarkDropdown(autoSyncLabels, autoSyncIdx, idx =>
+        {
+            settings.AutoSyncSeconds = autoSyncIds[Math.Clamp(idx, 0, autoSyncIds.Length - 1)];
+            SaveAndNotify();
+        }, compact: true);
+        var autoSyncRow = CreateSettingRow("自动同步", null, autoSyncDropdown);
+        autoSyncRow.Margin = new Thickness(0, 6, 0, 4);
+        windowCard.Children.Add(autoSyncRow);
 
         windowCard.Children.Add(CreateDivider());
         windowCard.Children.Add(FieldLabel("背景配色模式："));
@@ -866,6 +873,7 @@ internal sealed class ClassicSettingsWindow : Window
             TextTrimming = TextTrimming.CharacterEllipsis,
         };
 
+        var chevronRotate = new RotateTransform(0);
         var chevron = new Path
         {
             Data = Geometry.Parse("M 0,0 L 5,5 L 10,0"),
@@ -873,6 +881,8 @@ internal sealed class ClassicSettingsWindow : Window
             StrokeThickness = 1.6,
             VerticalAlignment = VerticalAlignment.Center,
             Margin = new Thickness(compact ? 6 : 8, 0, 0, 0),
+            RenderTransformOrigin = new Point(0.5, 0.5),
+            RenderTransform = chevronRotate,
         };
 
         var boxContent = new DockPanel();
@@ -984,34 +994,63 @@ internal sealed class ClassicSettingsWindow : Window
         {
             if (!popup.IsOpen) boxBorder.Background = BgInputHover;
         };
+        // 展开时将 boxBorder 设为不可命中（IsHitTestVisible = false），
+        // 这样再次点击 boxBorder 时，Popup(StaysOpen=false) 会在 MouseDown 关闭弹窗，
+        // 而 boxBorder 不会收到同一次点击的 MouseDown / MouseUp；
+        // 等到 Background 优先级（本轮输入消息全部处理完）再恢复可命中，即可做到点一下展开、点一下收回。
+        void AnimateChevron(double toAngle)
+        {
+            var anim = new System.Windows.Media.Animation.DoubleAnimation(
+                toAngle, TimeSpan.FromMilliseconds(180))
+            {
+                EasingFunction = new System.Windows.Media.Animation.CubicEase
+                {
+                    EasingMode = System.Windows.Media.Animation.EasingMode.EaseOut
+                },
+            };
+            chevronRotate.BeginAnimation(RotateTransform.AngleProperty, anim);
+        }
+
+        var pressedOnBox = false;
+        boxBorder.MouseLeftButtonDown += (_, e) =>
+        {
+            e.Handled = true;
+            pressedOnBox = !popup.IsOpen;
+        };
         boxBorder.MouseLeave += (_, _) =>
         {
+            pressedOnBox = false;
             if (!popup.IsOpen) boxBorder.Background = BgInput;
         };
-
-        // 打开时机是关键：原来在 MouseLeftButtonDown 里置 IsOpen=true，
-        // 而 Popup 的 StaysOpen=false 会把握住鼠标、把随后的"松开"判成窗外点击，
-        // 于是展开后立刻又收回（就是"点开就闪回去"那个 bug）。
-        // 改成松开时才打开；同时记下关闭时刻，避免"点外面关闭"和"再点一次打开"互相打架。
-        var lastClosedTick = 0L;
         boxBorder.MouseLeftButtonUp += (_, e) =>
         {
             e.Handled = true;
+            var shouldOpen = pressedOnBox;
+            pressedOnBox = false;
             if (popup.IsOpen)
             {
                 popup.IsOpen = false;
                 return;
             }
-            if (Environment.TickCount64 - lastClosedTick < 250) return; // 刚被"点外面"关掉，别马上重开
+            if (!shouldOpen) return;
             popupBorder.Width = Math.Max(compact ? 140 : 180, boxBorder.ActualWidth);
             popup.IsOpen = true;
         };
-        popup.Opened += (_, _) => boxBorder.BorderBrush = AccentGreen;
+        popup.Opened += (_, _) =>
+        {
+            boxBorder.IsHitTestVisible = false;
+            boxBorder.BorderBrush = AccentGreen;
+            AnimateChevron(180);
+        };
         popup.Closed += (_, _) =>
         {
-            lastClosedTick = Environment.TickCount64;
+            pressedOnBox = false;
             boxBorder.BorderBrush = BorderSubtle;
             boxBorder.Background = boxBorder.IsMouseOver ? BgInputHover : BgInput;
+            AnimateChevron(0);
+            boxBorder.Dispatcher.BeginInvoke(
+                System.Windows.Threading.DispatcherPriority.Background,
+                () => boxBorder.IsHitTestVisible = true);
         };
 
         return (boxBorder, UpdateSelectionVisuals);
