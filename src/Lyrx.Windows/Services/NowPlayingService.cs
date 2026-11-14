@@ -1,4 +1,6 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Threading;
 using Windows.Media;
 using Windows.Media.Control;
@@ -33,7 +35,7 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
     /// <summary>SourceAppUserModelId 中出现该词就视为浏览器（小写）。</summary>
     private static readonly string[] BrowserTokens =
     {
-        "firefox", "mozilla", "chrome", "chromium", "msedge", "microsoftedge",
+        "firefox", "mozilla", "308046b0af4a39cb", "chrome", "chromium", "msedge", "microsoftedge",
         "opera", "brave", "vivaldi", "iexplore", "internetexplorer", "waterfox", "librewolf",
     };
 
@@ -89,7 +91,56 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
         return false;
     }
 
-    /// <summary>为常见播放器生成易读的友好显示名称。</summary>
+    private static readonly ConcurrentDictionary<string, string?> ShellDisplayNameCache =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    private static readonly Guid ShellItemIid = new("43826D1E-E718-42EE-BC55-A1E261C37BFE");
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = true)]
+    private static extern int SHCreateItemFromParsingName(
+        string pszPath,
+        IntPtr pbc,
+        [MarshalAs(UnmanagedType.LPStruct)] Guid riid,
+        out IShellItem? ppv);
+
+    [ComImport, Guid("43826D1E-E718-42EE-BC55-A1E261C37BFE"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IShellItem
+    {
+        void BindToHandler(IntPtr pbc, ref Guid bhid, ref Guid riid, out IntPtr ppv);
+        void GetParent(out IShellItem ppsi);
+        void GetDisplayName(uint sigdnName, [MarshalAs(UnmanagedType.LPWStr)] out string ppszName);
+        void GetAttributes(uint sfgaoMask, out uint psfgaoAttribs);
+        void Compare(IShellItem psi, uint hint, out int piOrder);
+    }
+
+    /// <summary>通过 Windows AppsFolder 解析不透明的 AppUserModelId（如 Firefox 的哈希串）对应的真实应用名称。</summary>
+    private static string? ResolveShellAppDisplayName(string appId)
+    {
+        if (string.IsNullOrWhiteSpace(appId)) return null;
+        return ShellDisplayNameCache.GetOrAdd(appId, static id =>
+        {
+            try
+            {
+                if (SHCreateItemFromParsingName($"shell:AppsFolder\\{id}", IntPtr.Zero, ShellItemIid, out var item) == 0
+                    && item is not null)
+                {
+                    try
+                    {
+                        item.GetDisplayName(0, out var name);
+                        return string.IsNullOrWhiteSpace(name) ? null : name.Trim();
+                    }
+                    finally
+                    {
+                        Marshal.ReleaseComObject(item);
+                    }
+                }
+            }
+            catch { }
+            return null;
+        });
+    }
+
+    /// <summary>为常见播放器（含浏览器）生成易读的友好显示名称。</summary>
     public static string FormatSourceDisplayName(string id)
     {
         if (string.IsNullOrWhiteSpace(id)) return "";
@@ -110,7 +161,23 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
             return "酷狗音乐";
         if (lower.Contains("kuwo"))
             return "酷我音乐";
-        return id;
+        if (lower.Contains("308046b0af4a39cb") || lower.Contains("firefox"))
+            return "Firefox";
+        if (lower.Contains("msedge") || lower.Contains("microsoftedge"))
+            return "Microsoft Edge";
+        if (lower.Contains("chrome"))
+            return "Google Chrome";
+        if (lower.Contains("brave"))
+            return "Brave";
+        if (lower.Contains("opera"))
+            return "Opera";
+        if (lower.Contains("vivaldi"))
+            return "Vivaldi";
+        if (lower.Contains("waterfox"))
+            return "Waterfox";
+        if (lower.Contains("librewolf"))
+            return "LibreWolf";
+        return ResolveShellAppDisplayName(id) ?? id;
     }
 
     /// <summary>视频站点标题 → 只留"歌手 - 歌名"这类有效信息；清洗后为空则保留原标题。</summary>
@@ -126,8 +193,17 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
         if (string.IsNullOrEmpty(appId)) return false;
         foreach (var token in BrowserTokens)
             if (appId.Contains(token, StringComparison.OrdinalIgnoreCase)) return true;
+        if (ResolveShellAppDisplayName(appId) is { } resolved)
+        {
+            foreach (var token in BrowserTokens)
+                if (resolved.Contains(token, StringComparison.OrdinalIgnoreCase)) return true;
+        }
         return false;
     }
+
+    /// <summary>是否为浏览器或视频站点（标题通常包含视频修饰词，需按视频规则提取歌名与歌手）。</summary>
+    public static bool IsBrowserOrVideoSource(string? appId) =>
+        IsVideoSite(appId) || IsBrowserSource(appId);
 
     /// <summary>是否为视频·播客应用（YouTube Music 属于音乐，例外）。</summary>
     private static bool IsNonMusicSource(string? appId)
@@ -156,6 +232,7 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
     private bool _positionReliable = true;
     private TimeSpan _wallAnchorPosition;
     private DateTimeOffset _wallAnchorAt = DateTimeOffset.MinValue;
+    private DateTimeOffset _lastSeekAt = DateTimeOffset.MinValue;
 
     /// <summary>本机开始计时的那首曲目（配上 <see cref="_trackPlayStartedAt"/> 使用）。</summary>
     private string? _timingTrackKey;
@@ -178,6 +255,12 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
     /// </summary>
     public TimeSpan LatencyCompensation { get; set; } = TimeSpan.FromMilliseconds(1400);
 
+    /// <summary>
+    /// 浏览器播放位置的固定补偿（默认 -1.5s）。
+    /// 网页视频（如 B 站）音频管线缓冲与视频前奏通常使人声滞后约 1.5 秒，负向补偿可让歌词与人声对齐。
+    /// </summary>
+    public TimeSpan BrowserLatencyCompensation { get; set; } = TimeSpan.FromMilliseconds(-1500);
+
     /// <summary>判断是否为 Apple Music 客户端。</summary>
     public static bool IsAppleMusicSource(string? appId)
     {
@@ -187,14 +270,16 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
     }
 
     /// <summary>
-    /// 当前播放源生效的时延补偿：仅对 Apple Music 自动生效 +1.4s，其他播放器（B站、Spotify、网易云等）自动使用 0ms。
+    /// 当前播放源生效的时延补偿：Apple Music 使用 +1.4s，浏览器使用 -1.5s，其他播放器使用 0ms。
     /// </summary>
     public TimeSpan EffectiveLatencyCompensation
     {
         get
         {
             var appId = CurrentTrack?.SourceAppId ?? _session?.SourceAppUserModelId;
-            return IsAppleMusicSource(appId) ? LatencyCompensation : TimeSpan.Zero;
+            if (IsAppleMusicSource(appId)) return LatencyCompensation;
+            if (IsBrowserSource(appId)) return BrowserLatencyCompensation;
+            return TimeSpan.Zero;
         }
     }
 
@@ -499,18 +584,23 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
     /// <summary>跳转播放进度。若物理播放器支持则改变播放进度；不支持时自动校准本地推算时钟。</summary>
     public async Task<bool> SeekAsync(TimeSpan position)
     {
-        var ticks = Math.Max(0, position.Ticks);
-        var targetTime = TimeSpan.FromTicks(ticks);
+        var compensation = EffectiveLatencyCompensation;
+        var physicalTicks = Math.Max(0, (position - compensation).Ticks);
+        var physicalTarget = TimeSpan.FromTicks(physicalTicks);
+        var displayTarget = position < TimeSpan.Zero ? TimeSpan.Zero : position;
         var now = DateTimeOffset.Now;
 
         // 无论物理播放器是否支持跳转，都立即对齐本地推算基准时钟（针对 B 站等不报位置、不支持跳转的应用）
-        _lastReportedValue = targetTime;
+        _lastReportedValue = physicalTarget;
         _lastAdvanceAt = now;
-        _trackPlayStartedAt = now - targetTime;
-        _wallAnchorPosition = targetTime;
+        _trackPlayStartedAt = now - physicalTarget;
+        _wallAnchorPosition = physicalTarget;
         _wallAnchorAt = now;
-        _lastResult = targetTime;
-        _smoothedPosition = targetTime;
+        _lastSeekAt = now;
+        _positionWindowStart = now;
+        _positionWindowPosition = physicalTarget;
+        _lastResult = displayTarget;
+        _smoothedPosition = displayTarget;
         _lastSampleAt = now;
 
         Session? session;
@@ -519,10 +609,16 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
 
         try
         {
-            var success = await session.TryChangePlaybackPositionAsync(ticks);
+            var success = await session.TryChangePlaybackPositionAsync(physicalTicks);
+            if (success)
+            {
+                var settledAt = DateTimeOffset.Now;
+                _lastSeekAt = settledAt;
+                _wallAnchorAt = settledAt;
+            }
             Musebase.Windows.Log.Write(success
-                ? $"[smtc] 物理播放器已跳转到: {position:mm\\:ss}"
-                : $"[sync] 播放器未响应物理跳转，已自动校准本地时钟至: {position:mm\\:ss}");
+                ? $"[smtc] 物理播放器已跳转到: {physicalTarget:mm\\:ss} (歌词={displayTarget:mm\\:ss})"
+                : $"[sync] 播放器未响应物理跳转，已自动校准本地时钟至: {displayTarget:mm\\:ss}");
             return true;
         }
         catch (Exception ex)
@@ -638,7 +734,7 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
                 {
                     string finalTitle;
                     string finalArtist;
-                    if (IsVideoSite(session.SourceAppUserModelId))
+                    if (IsBrowserOrVideoSource(session.SourceAppUserModelId))
                     {
                         Musebase.Core.Search.SearchTermCleaner.ExtractVideoSongInfo(
                             props.Title, artist, out finalTitle, out finalArtist);
@@ -759,22 +855,47 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
 
         var now = DateTimeOffset.Now;
         var trackKey = CurrentTrack is { } t ? $"{t.Title}|{t.Artist}" : null;
+        var compensation = EffectiveLatencyCompensation;
+        var age = now - lastUpdated;
+        if (age < TimeSpan.Zero || age > TimeSpan.FromMinutes(30)) age = TimeSpan.Zero; // 明显异常，不外推
 
-        // 换曲/首次播放时记下"本机开始计时"的时刻；播放器不报位置时，这是唯一可靠的基准
+        // 换曲/首次播放时初始化本机推算锚点（若播放器已有初始位置则直接从该位置接续，避免退回 0:00）
         if (playingNow && (!string.Equals(trackKey, _timingTrackKey, StringComparison.Ordinal)
                            || _trackPlayStartedAt == DateTimeOffset.MinValue))
         {
+            var initialPos = reported + age;
+            if (initialPos < TimeSpan.Zero) initialPos = TimeSpan.Zero;
             _timingTrackKey = trackKey;
-            _trackPlayStartedAt = now;
+            _trackPlayStartedAt = now - initialPos;
+            _wallAnchorPosition = initialPos;
+            _wallAnchorAt = now;
             _positionWindowStart = DateTimeOffset.MinValue;
             _positionReliable = true;
+            _lastReportedValue = reported;
+            _lastAdvanceAt = now;
         }
-
-        var compensation = EffectiveLatencyCompensation;
 
         TimeSpan result;
         if (!playingNow)
         {
+            if (_wallAnchorAt != DateTimeOffset.MinValue)
+            {
+                // 刚从播放切到暂停：冻结当前锚点位置，避免恢复播放时把暂停时长算进去
+                var frozen = _positionReliable
+                    ? reported
+                    : (_lastResult > compensation ? _lastResult - compensation : _wallAnchorPosition);
+                _wallAnchorPosition = frozen < TimeSpan.Zero ? TimeSpan.Zero : frozen;
+                _wallAnchorAt = DateTimeOffset.MinValue;
+            }
+
+            if (!_positionReliable && IsSignificantJump(reported, _lastReportedValue))
+            {
+                _lastReportedValue = reported;
+                _lastAdvanceAt = now;
+                _wallAnchorPosition = reported < TimeSpan.Zero ? TimeSpan.Zero : reported;
+                _lastResult = _wallAnchorPosition + compensation;
+            }
+
             // 暂停时不要回头用播放器那个 0/1 的假位置，否则进度条会跳回开头
             result = _positionReliable ? reported + compensation : _lastResult;
         }
@@ -782,12 +903,34 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
         {
             if (reported != _lastReportedValue)
             {
+                var postSeekSnap = _lastSeekAt != DateTimeOffset.MinValue
+                    && (now - _lastSeekAt).TotalSeconds <= 3.0
+                    && Math.Abs((reported - _lastReportedValue).TotalSeconds) > 0.3;
+                var jumped = postSeekSnap || IsSignificantJump(reported, _lastReportedValue);
                 _lastReportedValue = reported;
                 _lastAdvanceAt = now;
+
+                // 浏览器等不持续报位置的播放器在用户手动拖动/重播或跳转对齐关键帧时，立即重锚
+                if (!_positionReliable && jumped)
+                {
+                    var reanchored = reported + age;
+                    if (reanchored < TimeSpan.Zero) reanchored = TimeSpan.Zero;
+                    _wallAnchorPosition = reanchored;
+                    _wallAnchorAt = now;
+                    _positionWindowStart = now;
+                    _positionWindowPosition = reported;
+                }
+            }
+            else if (_lastAdvanceAt != DateTimeOffset.MinValue && lastUpdated > _lastAdvanceAt)
+            {
+                // 播放器只更新了 LastUpdatedTime 而位置值不动：用距上次位置真正变化的时间外推，避免进度卡死或倒退
+                var sinceAdvance = now - _lastAdvanceAt;
+                if (sinceAdvance > age && sinceAdvance <= TimeSpan.FromMinutes(30))
+                    age = sinceAdvance;
             }
 
             // ---- 观测窗口：判断这个播放器到底有没有在报位置 ----
-            // B 站 UWP 这类视频应用常常只把位置在 0/1 之间抖一下，或者干脆不更新。
+            // B 站 UWP / 部分网页播放器只把位置在 0/1 之间抖一下，或仅在 seek/play 时更新一次。
             if (_positionWindowStart == DateTimeOffset.MinValue)
             {
                 _positionWindowStart = now;
@@ -800,6 +943,18 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
                 if (reliable != _positionReliable)
                 {
                     _positionReliable = reliable;
+                    if (!reliable)
+                    {
+                        // 无缝接续当前已推进到的位置，不回跳到旧的 _trackPlayStartedAt
+                        var currentPos = _lastResult > compensation ? _lastResult - compensation : reported + age;
+                        _wallAnchorPosition = currentPos < TimeSpan.Zero ? TimeSpan.Zero : currentPos;
+                        _wallAnchorAt = now;
+                    }
+                    else
+                    {
+                        _wallAnchorPosition = reported + age;
+                        _wallAnchorAt = now;
+                    }
                     Musebase.Windows.Log.Write(reliable
                         ? $"[sync] 播放器位置恢复正常（5 秒内前进 {advanced.TotalSeconds:0.0}s），恢复跟随上报值"
                         : $"[sync] 播放器 5 秒内只前进 {advanced.TotalSeconds:0.0}s，判定不报位置，改用本机计时推算");
@@ -810,20 +965,19 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
 
             if (!_positionReliable)
             {
-                // 不报位置的播放器：从"本机开始播放"算起的流逝时间就是位置。
-                // 注意不能用 reported 当基准 —— 它对这类应用永远是 0/1。
-                var elapsed = _trackPlayStartedAt == DateTimeOffset.MinValue
-                    ? TimeSpan.Zero
-                    : now - _trackPlayStartedAt;
+                // 不报/间歇报位置的播放器：从冻结锚点按本机流逝时间平滑推进（暂停恢复不跳变）
+                if (_wallAnchorAt == DateTimeOffset.MinValue)
+                    _wallAnchorAt = now;
+                var elapsed = _wallAnchorPosition + (now - _wallAnchorAt);
+                if (elapsed < TimeSpan.Zero) elapsed = TimeSpan.Zero;
                 if (CurrentTrack?.Duration is { } dur && elapsed > dur) elapsed = dur;
                 result = elapsed + compensation;
             }
             else
             {
-                var age = now - lastUpdated;
-                if (age < TimeSpan.Zero) age = TimeSpan.Zero;
-                if (age > TimeSpan.FromMinutes(30)) age = TimeSpan.Zero; // 明显异常，不外推
                 result = reported + age + compensation;
+                _wallAnchorPosition = reported + age;
+                _wallAnchorAt = now;
             }
 
             // 上报位置偶尔回退一两百毫秒：在同曲播放中依本地时间平滑递增，避免进度条倒退
@@ -843,12 +997,22 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
             _lastSampleAt = now;
         }
 
+        if (result < TimeSpan.Zero) result = TimeSpan.Zero;
         _lastResult = result;
 
         if (TimingDiagnostics)
             LogTimingSample(reported, lastUpdated, now, result);
 
         return result;
+    }
+
+    private static bool IsSignificantJump(TimeSpan current, TimeSpan previous)
+    {
+        if (previous == TimeSpan.MinValue) return false;
+        // 忽略 0s <-> 1s 抖动，仅响应真实拖动/切段/重置
+        if (current <= TimeSpan.FromSeconds(1.5) && previous <= TimeSpan.FromSeconds(1.5))
+            return false;
+        return Math.Abs((current - previous).TotalSeconds) > 1.5;
     }
 
     /// 时同步诊断（方案 0）：只在播放器真的给出**新**位置样本时记一行，不会刷屏。

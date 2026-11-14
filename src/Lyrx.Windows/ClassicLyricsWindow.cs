@@ -1051,11 +1051,24 @@ internal sealed class ClassicLyricsWindow : Window
 
     private async Task LoadCoverAsync(TrackInfo track)
     {
-        var bytes = await _player.GetThumbnailAsync();
-        if (!Equals(_track, track) || !Equals(_player.CurrentTrack, track)) return;
+        var preferOnlineCover = Services.NowPlayingService.IsBrowserOrVideoSource(track.SourceAppId);
+        byte[]? bytes = null;
+
+        if (preferOnlineCover)
+        {
+            // 浏览器与视频站点优先按清洗后的歌名从 QQ 音乐等在线库拉取官方专辑封面
+            bytes = await Services.CoverFetcher.FetchCoverAsync(track.Title, track.Artist, _lyrics?.Metadata.ArtworkUrl);
+            if (!Equals(_track, track) || !Equals(_player.CurrentTrack, track)) return;
+        }
+
+        if (bytes is null)
+        {
+            bytes = await _player.GetThumbnailAsync();
+            if (!Equals(_track, track) || !Equals(_player.CurrentTrack, track)) return;
+        }
 
         // 若本地 SMTC 未提供封面（例如 B 站桌面客户端），自动回退向在线音乐库检索高清专辑封面
-        if (bytes is null)
+        if (bytes is null && !preferOnlineCover)
         {
             bytes = await Services.CoverFetcher.FetchCoverAsync(track.Title, track.Artist, _lyrics?.Metadata.ArtworkUrl);
             if (!Equals(_track, track) || !Equals(_player.CurrentTrack, track)) return;

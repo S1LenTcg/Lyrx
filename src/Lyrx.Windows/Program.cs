@@ -37,10 +37,6 @@ internal static class Program
         // 不让"程序在跑、日志却是空的"再次变成查不下去的沉默故障。
         if (Log.ActivePath is { } logPath)
             Log.Write($"[boot] 日志文件={logPath}");
-        else if (Log.Failure is { } logFailure)
-            MessageBox.Show("Lyrx 的日志写不进任何位置。\n\n原因：" + logFailure
-                + "\n\n已尝试：\n· %LOCALAPPDATA%\\Lyrx\\app.log\n· %TEMP%\\Lyrx.log",
-                "Lyrx 日志不可写", MessageBoxButton.OK, MessageBoxImage.Warning);
 
         // 开发时想同时开旧版本对比，用 Lyrx.exe --new-instance 跳过单实例检查。
         var newInstance = args.Any(a => string.Equals(a, "--new-instance", StringComparison.OrdinalIgnoreCase));
@@ -416,14 +412,18 @@ internal static class Log
     public static string? Failure { get { lock (Sync) return _failure; } }
 
     /// <summary>
-    /// 日志落盘顺序：用户数据目录 → 临时目录。
-    /// 只写第一个成功的，之后都追加到它；全失败时把原因留在 <see cref="Failure"/> 里，
-    /// 由启动流程弹窗告知，避免再出现"程序在跑但一个日志都没有"的黑洞。
+    /// 日志落盘顺序：用户数据目录 →（仅非单文件版本）程序根目录 → 临时目录。
+    /// 只写第一个成功的，之后都追加到它。
     /// </summary>
     private static List<string> BuildCandidates()
     {
-        var list = new List<string>(2);
+        var list = new List<string>(3);
         try { list.Add(Path.Combine(AppSettings.DataDirectory, "app.log")); } catch { }
+        var isSingleFile = string.IsNullOrEmpty(typeof(Program).Assembly.Location);
+        if (!isSingleFile)
+        {
+            try { list.Add(Path.Combine(AppContext.BaseDirectory, "Lyrx.log")); } catch { }
+        }
         try { list.Add(Path.Combine(Path.GetTempPath(), "Lyrx.log")); } catch { }
         return list;
     }
@@ -453,7 +453,9 @@ internal static class Log
         {
             var dir = Path.GetDirectoryName(path);
             if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
-            File.AppendAllText(path, line + Environment.NewLine);
+            using var fs = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
+            using var sw = new StreamWriter(fs, System.Text.Encoding.UTF8);
+            sw.WriteLine(line);
             return true;
         }
         catch (Exception error)

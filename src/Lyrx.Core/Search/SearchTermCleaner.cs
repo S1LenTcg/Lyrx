@@ -255,7 +255,7 @@ public static partial class SearchTermCleaner
     private static partial Regex SiteNameRegex();
 
     // 视频标题括号里的标记：MV / 4K / 字幕 / 双语 / 完整版 / 现场 / 翻唱 …（中英文混排）
-    [GeneratedRegex(@"[\(\[【（《][^\)\]】）》]*(?:mv|pv|official|4k|8k|1080p|720p|60\s*fps|hdr|hd|字幕|双语|中字|中英|完整版|现场|翻唱|伴奏|纯音乐|合集|片段|剪辑|饭制|修复|超清|高清|无损|官方)[^\)\]】）》]*[\)\]】）》]", RegexOptions.IgnoreCase)]
+    [GeneratedRegex(@"[\(\[【（《][^\)\]】）》]*(?:mv|pv|official|4k|8k|1080p|720p|60\s*fps|hdr|hd|hi-?res|字幕|双语|中字|中英|完整版|现场|翻唱|伴奏|纯音乐|合集|片段|剪辑|饭制|修复|超清|高清|无损|官方)[^\)\]】）》]*[\)\]】）》]", RegexOptions.IgnoreCase)]
     private static partial Regex VideoTagRegex();
 
     // 【歌名】/《歌名》——只去掉书名号/方头括号，保留里面的文字
@@ -274,8 +274,8 @@ public static partial class SearchTermCleaner
     [GeneratedRegex(@"《([^》]{1,80})》")]
     public static partial Regex BookTitleRegex();
 
-    // 常见的视频栏目/前缀修饰语
-    [GeneratedRegex(@"^(?:(?:在?[一二三四五六七八九十百千万\d]+[豪装级]*录音棚(?:大声听|大声唱|大声放|试听)?)|沉浸式(?:听歌|体验|现场)?|耳机福利|戴上耳机|超好听|神级现场|封神现场|万人合唱|单曲循环|高清修复|百万级装备试听|录音棚试听|大声听|全网首发|重磅推荐|高能现场|必听神曲|珍藏版?|精选|热歌)\s*", RegexOptions.IgnoreCase)]
+    // 常见的视频栏目/修饰语（允许出现在歌名前或歌名后）
+    [GeneratedRegex(@"(?:(?:在?[一二三四五六七八九十百千万\d]+[豪装级]*录音棚(?:大声听|大声唱|大声放|试听)?)|沉浸式(?:听歌|体验|现场)?|耳机福利|戴上耳机|超好听|神级现场|封神现场|万人合唱|单曲循环|高清修复|百万级装备试听|录音棚试听|大声听|全网首发|重磅推荐|高能现场|必听神曲|珍藏版?|精选|热歌)\s*", RegexOptions.IgnoreCase)]
     private static partial Regex VideoNoisePrefixRegex();
 
     [GeneratedRegex(@"^【([^】]{1,30})】")]
