@@ -4,9 +4,9 @@ using System.Runtime.CompilerServices;
 namespace Musebase.Engine;
 
 /// <summary>
-/// <see cref="LyricsCoordinator"/>의 <see cref="PlaybackViewState"/>를 관찰 가능한 속성으로
-/// 노출하는 바인딩 어댑터(MVVM). XAML 바인딩 UI(MAUI 등)가 이 VM의 <see cref="State"/>를 구독한다.
-/// WPF 오버레이는 성능상 기존 per-frame 이벤트를 직접 쓰므로 이 VM을 요구하지 않는다(선택적 시임).
+/// 把 <see cref="LyricsCoordinator"/> 的 <see cref="PlaybackViewState"/> 暴露为可观察属性的
+/// 绑定适配器（MVVM）。XAML 绑定界面（MAUI 等）订阅该 VM 的 <see cref="State"/>。
+/// WPF 覆盖层出于性能直接使用原有的逐帧事件，不需要该 VM（可选接缝点）。
 /// </summary>
 public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
 {
@@ -20,7 +20,7 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
         _coordinator.StateChanged += OnStateChanged;
     }
 
-    /// <summary>현재 표시 상태(변경 시 PropertyChanged 발생).</summary>
+    /// <summary>当前显示状态（变更时触发 PropertyChanged）。</summary>
     public PlaybackViewState State
     {
         get => _state;

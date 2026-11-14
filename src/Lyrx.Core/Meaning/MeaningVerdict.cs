@@ -3,49 +3,54 @@ using System.Text.RegularExpressions;
 namespace Musebase.Core.Meaning;
 
 /// <summary>
-/// 생성된 문단이 <b>정말 곡의 의미인지</b>, 아니면 "자료가 부족해 말할 수 없다"는 고백인지 가른다.
+/// 判断生成的段落到底是<b>真的在讲这首歌的含义</b>，还是一句"资料不足，无从言说"的自白。
 ///
-/// 프롬프트가 근거 없는 창작을 막으려고 "부족하면 부족하다고 쓰라"고 시키므로, 이 답은 정상 동작의
-/// 일부다. 문제는 <b>글자가 있다는 이유만으로 "의미 있음"으로 세면</b> 통계가 부풀고, 앱에는
-/// "파악하기 어렵다"는 문장이 곡 해설이라며 뜬다는 것이다. 별도 상태로 갈라 둔다.
+/// 提示词为了阻止没有依据的编造，会要求"资料不足就直说不足"，所以这类回答属于正常行为的一种。
+/// 问题在于，<b>只要有字就记成"有意义"</b>，统计就会虚高，应用里也会把
+/// "难以判断"的句子当成歌曲解读呈现出来。因此单独拆出一个状态。
 ///
-/// 판정은 두 겹이다.
-/// ① <b>표식</b> — 프롬프트가 이 경우 첫 줄에 <c>[자료부족]</c>을 쓰게 한다(가장 확실하다).
-/// ② <b>문구</b> — 표식을 안 붙이는 모델도 있어, 자료 자체를 두고 하는 말("자료만으로는",
-///    "파악하기 어렵다")을 함께 본다. 곡 이야기를 하는 문장은 이런 표현을 쓰지 않는다.
+/// 判定分两层。
+/// ① <b>标记</b> —— 提示词要求这种情况在第一行写 <c>[资料不足]</c>（最可靠）。
+/// ② <b>措辞</b> —— 也有不加标记的模型，因此同时看针对资料本身的说法（"仅凭资料"、
+///    "难以判断"）。真正在讲歌的句子不会用这些表达。
 /// </summary>
 public static partial class MeaningVerdict
 {
-    /// <summary>프롬프트가 요구하는 표식. 응답에서는 지우고 저장한다.</summary>
-    public const string Marker = "[자료부족]";
+    /// <summary>提示词要求的标记。从响应里剥除后再存储。</summary>
+    public const string Marker = "[资料不足]";
+    private const string LegacyMarker = "[\uC790\uB8CC\uBD80\uC871]"; // 兼容旧标记
 
-    /// <summary>표식을 떼어 낸 본문(없으면 원문 그대로).</summary>
+    /// <summary>剥掉标记之后的正文（没有标记则保持原文）。</summary>
     public static string Strip(string text)
     {
         var trimmed = (text ?? "").Trim();
-        return trimmed.StartsWith(Marker, StringComparison.Ordinal)
-            ? trimmed[Marker.Length..].Trim()
-            : trimmed;
+        if (trimmed.StartsWith(Marker, StringComparison.Ordinal))
+            return trimmed[Marker.Length..].Trim();
+        if (trimmed.StartsWith(LegacyMarker, StringComparison.Ordinal))
+            return trimmed[LegacyMarker.Length..].Trim();
+        return trimmed;
     }
 
-    /// <summary>이 문단이 "자료가 부족하다"는 고백인가.</summary>
+    /// <summary>这一段是否为"资料不足"的自白。</summary>
     public static bool IsInsufficient(string? text)
     {
         var trimmed = (text ?? "").Trim();
         if (trimmed.Length == 0) return true;
         if (trimmed.StartsWith(Marker, StringComparison.Ordinal)) return true;
+        if (trimmed.StartsWith(LegacyMarker, StringComparison.Ordinal)) return true;
         return ExcuseRegex().IsMatch(trimmed);
     }
 
     /// <summary>
-    /// 자료 자체를 두고 하는 말만 고른다. "이 곡은 상실을 다룬다" 같은 문장은 걸리지 않도록
-    /// <b>자료·정보를 주어로 삼는 표현</b>과 <b>말할 수 없다는 서술</b>이 함께 있을 때만 본다.
+    /// 只挑出针对资料本身的说法。为了不误伤"这首歌讲的是失去"这类句子，
+    /// 只有在<b>以资料·信息为主语的表达</b>和<b>无法言说的叙述</b>同时出现时才判定。
     /// </summary>
     [GeneratedRegex(
-        @"(자료|정보)[^.!?\n]{0,40}(부족|없|담고 있지 않|포함되어 있지 않)" +
-        @"|(자료|정보)만으로는" +
-        @"|(파악|설명|말)하기\s*(가\s*)?(어렵|힘들)" +
-        @"|알\s*수\s*없(다|습니다)",
-        RegexOptions.CultureInvariant)]
+        @"(资料|信息|数据)[^.!?\n]{0,40}(不足|缺乏|没有|未包含|未提及)" +
+        @"|仅凭(资料|信息|数据)" +
+        @"|难以(判断|说明|分析|确定)" +
+        @"|无法(得知|确定|知晓)" +
+        @"|(insufficient|not enough|unknown)[^.!?\n]{0,40}(information|data|source)",
+        RegexOptions.CultureInvariant | RegexOptions.IgnoreCase)]
     private static partial Regex ExcuseRegex();
 }

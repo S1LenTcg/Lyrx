@@ -3,7 +3,7 @@ using Microsoft.Data.Sqlite;
 namespace Musebase.Core.Translation;
 
 /// <summary>
-/// SQLite 라인 번역 캐시. MT 비용 통제의 핵심 — 같은 (원문, 언어)는 재번역하지 않는다.
+/// SQLite 行级翻译缓存。控制机器翻译成本的关键——相同（原文, 语言）不会重复翻译。
 /// </summary>
 public sealed class SqliteTranslationCache : ITranslationCache, IDisposable
 {
@@ -12,7 +12,16 @@ public sealed class SqliteTranslationCache : ITranslationCache, IDisposable
 
     public SqliteTranslationCache(string dbPath)
     {
-        _connection = new SqliteConnection($"Data Source={dbPath}");
+        var fullPath = Path.GetFullPath(dbPath);
+        var dir = Path.GetDirectoryName(fullPath);
+        if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+
+        var csb = new SqliteConnectionStringBuilder
+        {
+            DataSource = fullPath,
+            Mode = SqliteOpenMode.ReadWriteCreate,
+        };
+        _connection = new SqliteConnection(csb.ConnectionString);
         _connection.Open();
         using var cmd = _connection.CreateCommand();
         cmd.CommandText = """
@@ -31,11 +40,18 @@ public sealed class SqliteTranslationCache : ITranslationCache, IDisposable
     {
         lock (_lock)
         {
-            using var cmd = _connection.CreateCommand();
-            cmd.CommandText = "SELECT translation FROM translation_cache WHERE text = $t AND target_lang = $l";
-            cmd.Parameters.AddWithValue("$t", text);
-            cmd.Parameters.AddWithValue("$l", targetLang);
-            return cmd.ExecuteScalar() as string;
+            try
+            {
+                using var cmd = _connection.CreateCommand();
+                cmd.CommandText = "SELECT translation FROM translation_cache WHERE text = $t AND target_lang = $l";
+                cmd.Parameters.AddWithValue("$t", text);
+                cmd.Parameters.AddWithValue("$l", targetLang);
+                return cmd.ExecuteScalar() as string;
+            }
+            catch
+            {
+                return null;
+            }
         }
     }
 
@@ -43,20 +59,27 @@ public sealed class SqliteTranslationCache : ITranslationCache, IDisposable
     {
         lock (_lock)
         {
-            using var cmd = _connection.CreateCommand();
-            cmd.CommandText = """
-                INSERT INTO translation_cache (text, target_lang, translation) VALUES ($t, $l, $tr)
-                ON CONFLICT (text, target_lang) DO UPDATE SET translation = $tr
-                """;
-            cmd.Parameters.AddWithValue("$t", text);
-            cmd.Parameters.AddWithValue("$l", targetLang);
-            cmd.Parameters.AddWithValue("$tr", translation);
-            cmd.ExecuteNonQuery();
+            try
+            {
+                using var cmd = _connection.CreateCommand();
+                cmd.CommandText = """
+                    INSERT INTO translation_cache (text, target_lang, translation) VALUES ($t, $l, $tr)
+                    ON CONFLICT (text, target_lang) DO UPDATE SET translation = $tr
+                    """;
+                cmd.Parameters.AddWithValue("$t", text);
+                cmd.Parameters.AddWithValue("$l", targetLang);
+                cmd.Parameters.AddWithValue("$tr", translation);
+                cmd.ExecuteNonQuery();
+            }
+            catch
+            {
+                // 缓存写入失败（例如数据库只读/被占用）不应阻断翻译流程
+            }
         }
     }
 
     public void Dispose() => _connection.Dispose();
 
-    /// <summary>커넥션 풀 해제 — 테스트에서 DB 파일 삭제 전 호출</summary>
+    /// <summary>释放连接池——测试中删除 DB 文件前调用</summary>
     public static void ClearPools() => SqliteConnection.ClearAllPools();
 }

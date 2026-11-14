@@ -3,9 +3,9 @@ using Microsoft.Data.Sqlite;
 namespace Musebase.Core.Search;
 
 /// <summary>
-/// 곡 단위 가사 캐시. 키 = 정규화된 "제목|아티스트".
-/// 번역 첨부까지 포함한 확장 LRC 텍스트를 통째로 저장하므로
-/// 캐시 히트 시 네트워크 없이(오프라인 포함) 즉시 표시된다.
+/// 按歌曲为单位的歌词缓存。键 = 规范化后的 "标题|艺术家"。
+/// 由于整体保存含翻译附件的扩展 LRC 文本，
+/// 缓存命中时无需网络（含离线）即可立即显示。
 /// </summary>
 public sealed class LyricsCacheStore : IDisposable
 {
@@ -14,7 +14,16 @@ public sealed class LyricsCacheStore : IDisposable
 
     public LyricsCacheStore(string dbPath)
     {
-        _connection = new SqliteConnection($"Data Source={dbPath}");
+        var fullPath = Path.GetFullPath(dbPath);
+        var dir = Path.GetDirectoryName(fullPath);
+        if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+
+        var csb = new SqliteConnectionStringBuilder
+        {
+            DataSource = fullPath,
+            Mode = SqliteOpenMode.ReadWriteCreate,
+        };
+        _connection = new SqliteConnection(csb.ConnectionString);
         _connection.Open();
         using var cmd = _connection.CreateCommand();
         cmd.CommandText = """
@@ -28,7 +37,7 @@ public sealed class LyricsCacheStore : IDisposable
         cmd.ExecuteNonQuery();
     }
 
-    /// <summary>검색 키 정규화: 소문자 + 공백 축약</summary>
+    /// <summary>搜索键规范化：转小写 + 空白压缩</summary>
     public static string MakeKey(string title, string artist) =>
         $"{Normalize(title)}|{Normalize(artist)}";
 

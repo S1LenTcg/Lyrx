@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <string name="app_name">Lyrx</string>
+  <string name="media_listener_label">Lyrx 播放状态监听</string>
+</resources>

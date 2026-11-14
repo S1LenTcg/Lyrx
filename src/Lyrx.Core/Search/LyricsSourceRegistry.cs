@@ -1,6 +1,6 @@
 namespace Musebase.Core.Search;
 
-/// <summary>가사 소스 설명자. 라이선스 성격(공식 API 여부)과 생성 팩토리를 담는다.</summary>
+/// <summary>歌词源描述符。包含授权性质(是否为官方 API)与创建工厂。</summary>
 public sealed record LyricsSourceDescriptor(
     string Id,
     string DisplayName,
@@ -8,9 +8,9 @@ public sealed record LyricsSourceDescriptor(
     Func<ILyricsProvider> Factory);
 
 /// <summary>
-/// 가사 소스 레지스트리. 새 제공자는 <see cref="All"/>에 한 줄 추가로 편입된다.
-/// 설정(활성 id 목록)으로 조합해 <see cref="LyricsSearchService"/>에 주입한다.
-/// IsOfficialApi 메타로 배포 프로파일(공개=공식만 / 개인=전부)을 나눈다.
+/// 歌词源注册表。新提供者只需在 <see cref="All"/> 中加一行即可接入。
+/// 由设置(启用的 id 列表)组合后注入 <see cref="LyricsSearchService"/>。
+/// 用 IsOfficialApi 元数据区分发布配置(公开=仅官方 / 个人=全部)。
 /// </summary>
 public static class LyricsSourceRegistry
 {
@@ -22,17 +22,17 @@ public static class LyricsSourceRegistry
         new("qqmusic", "QQ Music", IsOfficialApi: false, () => new QQMusicProvider()),
     };
 
-    /// <summary>등록된 모든 소스 id(등록 순).</summary>
+    /// <summary>已注册的所有源 id(按注册顺序)。</summary>
     public static IReadOnlyList<string> AllIds { get; } = All.Select(d => d.Id).ToList();
 
-    /// <summary>공식 API 소스 id만(공개 배포 안전 프로파일).</summary>
+    /// <summary>仅官方 API 源 id(公开版安全配置)。</summary>
     public static IReadOnlyList<string> OfficialIds { get; } =
         All.Where(d => d.IsOfficialApi).Select(d => d.Id).ToList();
 
     public static LyricsSourceDescriptor? Find(string id) =>
         All.FirstOrDefault(d => string.Equals(d.Id, id, StringComparison.OrdinalIgnoreCase));
 
-    /// <summary>enabledIds에 해당하는 제공자 인스턴스를 등록 순서대로 생성한다.</summary>
+    /// <summary>按注册顺序为 enabledIds 中对应的提供者创建实例。</summary>
     public static ILyricsProvider[] Build(IEnumerable<string> enabledIds)
     {
         var set = new HashSet<string>(enabledIds, StringComparer.OrdinalIgnoreCase);

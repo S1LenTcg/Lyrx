@@ -1,15 +1,15 @@
 namespace Musebase.Core;
 
 /// <summary>
-/// 번역 가사 병합. LyricsKit의 Lyrics+Merge.swift 포팅.
+/// 翻译歌词合并。LyricsKit 的 Lyrics+Merge.swift 移植。
 /// </summary>
 public static class LyricsMergeExtensions
 {
     private const double MergeTimeTagThreshold = 0.02;
 
     /// <summary>
-    /// 타임태그가 (거의) 일치하는 라인끼리 번역을 병합한다.
-    /// 두 목록 모두 위치 오름차순 정렬 전제.
+    /// 在时间标签（几乎）一致的行之间合并翻译。
+    /// 前提：两个列表均按位置升序排列。
     /// </summary>
     public static void MergeTranslation(this Lyrics lyrics, Lyrics translation)
     {
@@ -34,7 +34,7 @@ public static class LyricsMergeExtensions
         }
     }
 
-    /// <summary>라인 수가 같을 때 타임태그 무시하고 1:1 병합 (KRC 등 정확 매칭 불가 형식용)</summary>
+    /// <summary>行数相同时忽略时间标签按 1:1 合并（用于 KRC 等无法精确匹配的格式）</summary>
     public static void ForceMergeTranslation(this Lyrics lyrics, Lyrics translation)
     {
         if (lyrics.Lines.Count != translation.Lines.Count) return;
@@ -44,7 +44,7 @@ public static class LyricsMergeExtensions
 
     private static void ApplyTranslation(LyricsLine line, string translation)
     {
-        // "//"는 NetEase가 빈 번역 라인에 쓰는 플레이스홀더
+        // "//" 是 NetEase 在空翻译行中使用的占位符
         if (translation.Length > 0 && translation != "//")
             line.Attachments[LineAttachments.TranslationTag()] = translation;
     }

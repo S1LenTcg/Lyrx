@@ -1,3 +1,7 @@
+using System.Collections.Concurrent;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Threading;
 using Windows.Media;
 using Windows.Media.Control;
@@ -12,10 +16,10 @@ internal readonly record struct TransportState(
     PlaybackControls Controls, bool IsPlaying, bool CanSeek, bool? Shuffle, MediaPlaybackAutoRepeatMode? Repeat);
 
 /// <summary>
-/// SMTC(GlobalSystemMediaTransportControls) 래퍼 — <see cref="INowPlayingSource"/>의 Windows 구현.
-/// 트랙/재생상태 변경 이벤트와 보간된 재생 위치를 제공한다.
-/// 이벤트는 임의 스레드에서 발생하므로 구독자가 UI 마샬링을 책임진다.
-/// (TrackInfo/PlaybackControls 계약은 Musebase.Engine에 있다)
+/// SMTC（GlobalSystemMediaTransportControls）包装器 —— <see cref="INowPlayingSource"/> 的 Windows 实现。
+/// 提供曲目/播放状态变更事件，以及插值后的播放位置。
+/// 事件会在任意线程上触发，因此订阅方负责做 UI 线程封送。
+/// （TrackInfo/PlaybackControls 契约位于 Musebase.Engine）
 /// </summary>
 public sealed class NowPlayingService : INowPlayingSource, IDisposable
 {
@@ -24,21 +28,21 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
     private readonly object _lock = new();
     private Timer? _pollTimer;
 
-    // 재생 소스 선택: "auto" = 자동 감지, 그 외 = 특정 SourceAppUserModelId로 고정.
+    // 播放源选择："auto" = 自动检测，其他值 = 固定到指定的 SourceAppUserModelId。
     private string _sourceMode = "auto";
-    // 자동 모드에서 브라우저(Firefox/Chrome 등)를 음악 소스로 포함할지. 기본 제외.
+    // 自动模式下是否把浏览器（Firefox/Chrome 等）也算作音乐源。默认排除。
     private bool _includeBrowsers;
 
-    /// <summary>SourceAppUserModelId에 포함되면 브라우저로 간주할 토큰(소문자).</summary>
+    /// <summary>SourceAppUserModelId 中出现该词就视为浏览器（小写）。</summary>
     private static readonly string[] BrowserTokens =
     {
-        "firefox", "mozilla", "chrome", "chromium", "msedge", "microsoftedge",
+        "firefox", "mozilla", "308046b0af4a39cb", "chrome", "chromium", "msedge", "microsoftedge",
         "opera", "brave", "vivaldi", "iexplore", "internetexplorer", "waterfox", "librewolf",
     };
 
     /// <summary>
-    /// 영상·팟캐스트로 간주해 자동 모드에서 제외할 토큰(소문자). 브라우저와 같은 이유 —
-    /// 영상·팟캐스트에 엉뚱한 곡의 가사가 뜨는 것을 막는다(Android의 VideoAppTokens와 대칭).
+    /// 视为视频·播客而在自动模式下排除的词（小写）。理由与浏览器相同 ——
+    /// 避免视频、播客上冒出无关歌曲的歌词（与 Android 的 VideoAppTokens 对称）。
     /// </summary>
     private static readonly string[] NonMusicTokens =
     {
@@ -48,23 +52,161 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
     };
 
     /// <summary>
-    /// 선호 음악 앱(SourceAppUserModelId). 하나라도 지정되면 자동 모드에서 이 앱들만 후보가 된다.
-    /// 비어 있으면(기본) 종전대로 브라우저·영상 앱 제외 규칙만 적용한다.
+    /// 偏好的音乐应用（SourceAppUserModelId）。只要指定了任意一项，自动模式下就只有这些应用成为候选。
+    /// 为空（默认）时，仍按原有规则只排除浏览器与视频应用。
     /// </summary>
     private string[] _preferredSources = Array.Empty<string>();
 
-    /// <summary>자동 소스 감지 모드 여부.</summary>
+    /// <summary>当前是否处于自动源检测模式。</summary>
     private bool IsAuto => string.Equals(_sourceMode, "auto", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// 视频站点/播放器名。B 站 UWP、AcFun 这类应用会把站点名填进艺人字段，
+    /// 留着会让歌词搜索按一个根本不存在的"艺人"去查，直接查不到。
+    /// （注意不要把 Spotify 列进来 —— 它在广告时段正是靠艺人名做判定。）
+    /// </summary>
+    private static readonly string[] SiteNameArtists =
+    {
+        "哔哩哔哩", "bilibili", "b站", "b 站", "acfun", "a站", "a 站", "youtube",
+    };
+
+    private static string SanitizeArtist(string artist)
+    {
+        if (string.IsNullOrWhiteSpace(artist)) return "";
+        var trimmed = artist.Trim();
+        foreach (var site in SiteNameArtists)
+            if (string.Equals(trimmed, site, StringComparison.OrdinalIgnoreCase)) return "";
+        return trimmed;
+    }
+
+    /// <summary>
+    /// 视频站点（B 站 UWP、AcFun、YouTube 等）。这类应用给的是**视频标题**：
+    /// `【Hi-Res】百万级装备试听`、`1080P`、`《歌名》` 之类的标记必须去掉，
+    /// 否则既污染窗口标题，也污染歌词检索词。
+    /// </summary>
+    private static bool IsVideoSite(string? appId)
+    {
+        if (string.IsNullOrEmpty(appId)) return false;
+        foreach (var token in new[] { "bilibili", "哔哩哔哩", "acfun", "youtube", "atelier39", "31846059f82c1", "bilibilipc" })
+            if (appId.Contains(token, StringComparison.OrdinalIgnoreCase)) return true;
+        return false;
+    }
+
+    private static readonly ConcurrentDictionary<string, string?> ShellDisplayNameCache =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    private static readonly Guid ShellItemIid = new("43826D1E-E718-42EE-BC55-A1E261C37BFE");
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = true)]
+    private static extern int SHCreateItemFromParsingName(
+        string pszPath,
+        IntPtr pbc,
+        [MarshalAs(UnmanagedType.LPStruct)] Guid riid,
+        out IShellItem? ppv);
+
+    [ComImport, Guid("43826D1E-E718-42EE-BC55-A1E261C37BFE"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IShellItem
+    {
+        void BindToHandler(IntPtr pbc, ref Guid bhid, ref Guid riid, out IntPtr ppv);
+        void GetParent(out IShellItem ppsi);
+        void GetDisplayName(uint sigdnName, [MarshalAs(UnmanagedType.LPWStr)] out string ppszName);
+        void GetAttributes(uint sfgaoMask, out uint psfgaoAttribs);
+        void Compare(IShellItem psi, uint hint, out int piOrder);
+    }
+
+    /// <summary>通过 Windows AppsFolder 解析不透明的 AppUserModelId（如 Firefox 的哈希串）对应的真实应用名称。</summary>
+    private static string? ResolveShellAppDisplayName(string appId)
+    {
+        if (string.IsNullOrWhiteSpace(appId)) return null;
+        return ShellDisplayNameCache.GetOrAdd(appId, static id =>
+        {
+            try
+            {
+                if (SHCreateItemFromParsingName($"shell:AppsFolder\\{id}", IntPtr.Zero, ShellItemIid, out var item) == 0
+                    && item is not null)
+                {
+                    try
+                    {
+                        item.GetDisplayName(0, out var name);
+                        return string.IsNullOrWhiteSpace(name) ? null : name.Trim();
+                    }
+                    finally
+                    {
+                        Marshal.ReleaseComObject(item);
+                    }
+                }
+            }
+            catch { }
+            return null;
+        });
+    }
+
+    /// <summary>为常见播放器（含浏览器）生成易读的友好显示名称。</summary>
+    public static string FormatSourceDisplayName(string id)
+    {
+        if (string.IsNullOrWhiteSpace(id)) return "";
+        var lower = id.ToLowerInvariant();
+        if (lower.Contains("bilibilipc"))
+            return "Bilibili PC";
+        if (lower.Contains("bilibili") || lower.Contains("atelier39") || lower.Contains("31846059f82c1"))
+            return "哔哩哔哩 (Bilibili)";
+        if (lower.Contains("applemusic"))
+            return "Apple Music";
+        if (lower.Contains("spotify"))
+            return "Spotify";
+        if (lower.Contains("cloudmusic") || lower.Contains("netease"))
+            return "网易云音乐";
+        if (lower.Contains("qqmusic"))
+            return "QQ音乐";
+        if (lower.Contains("kugou"))
+            return "酷狗音乐";
+        if (lower.Contains("kuwo"))
+            return "酷我音乐";
+        if (lower.Contains("308046b0af4a39cb") || lower.Contains("firefox"))
+            return "Firefox";
+        if (lower.Contains("msedge") || lower.Contains("microsoftedge"))
+            return "Microsoft Edge";
+        if (lower.Contains("chrome"))
+            return "Google Chrome";
+        if (lower.Contains("brave"))
+            return "Brave";
+        if (lower.Contains("opera"))
+            return "Opera";
+        if (lower.Contains("vivaldi"))
+            return "Vivaldi";
+        if (lower.Contains("waterfox"))
+            return "Waterfox";
+        if (lower.Contains("librewolf"))
+            return "LibreWolf";
+        return ResolveShellAppDisplayName(id) ?? id;
+    }
+
+    /// <summary>视频站点标题 → 只留"歌手 - 歌名"这类有效信息；清洗后为空则保留原标题。</summary>
+    private static string SanitizeTitle(string title, string? appId)
+    {
+        if (!IsVideoSite(appId) || string.IsNullOrWhiteSpace(title)) return title;
+        var cleaned = Musebase.Core.Search.SearchTermCleaner.CleanTitle(title).Trim();
+        return cleaned.Length > 0 ? cleaned : title;
+    }
 
     private static bool IsBrowserSource(string? appId)
     {
         if (string.IsNullOrEmpty(appId)) return false;
         foreach (var token in BrowserTokens)
             if (appId.Contains(token, StringComparison.OrdinalIgnoreCase)) return true;
+        if (ResolveShellAppDisplayName(appId) is { } resolved)
+        {
+            foreach (var token in BrowserTokens)
+                if (resolved.Contains(token, StringComparison.OrdinalIgnoreCase)) return true;
+        }
         return false;
     }
 
-    /// <summary>영상·팟캐스트 앱인지(YouTube Music은 음악이므로 예외).</summary>
+    /// <summary>是否为浏览器或视频站点（标题通常包含视频修饰词，需按视频规则提取歌名与歌手）。</summary>
+    public static bool IsBrowserOrVideoSource(string? appId) =>
+        IsVideoSite(appId) || IsBrowserSource(appId);
+
+    /// <summary>是否为视频·播客应用（YouTube Music 属于音乐，例外）。</summary>
     private static bool IsNonMusicSource(string? appId)
     {
         if (string.IsNullOrEmpty(appId)) return false;
@@ -75,10 +217,100 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
         return false;
     }
 
-    // 위치 떨림 완화용 상태 (같은 곡 재생 중 작은 역행 흡수)
+    // ---- 播放位置外推 ----
+    //
+    // 实测：Apple Music 上报的位置更新很及时（滞后约 20ms），但它自己的时钟速率并不等于 1.0
+    // （实测 0.96~0.99），所以**必须以它上报的位置为基准**，只在两次上报之间按真实间隔外推；
+    // 用墙钟"从零推算"会每秒多走 20~40ms，一分钟就偏 1~2 秒。
+    private TimeSpan _lastReportedValue = TimeSpan.MinValue;
+    private DateTimeOffset _lastAdvanceAt = DateTimeOffset.MinValue;
+
+    // ---- "播放器到底有没有在报位置"的观测窗口 ----
+    // B 站 UWP、部分网页版只把位置在 0/1 之间抖一下，或干脆不动；
+    // 这种情况必须改用本机时钟推进，否则进度条与歌词会钉死不动。
+    private DateTimeOffset _positionWindowStart = DateTimeOffset.MinValue;
+    private TimeSpan _positionWindowPosition;
+    private bool _positionReliable = true;
+    private TimeSpan _wallAnchorPosition;
+    private DateTimeOffset _wallAnchorAt = DateTimeOffset.MinValue;
+    private DateTimeOffset _lastSeekAt = DateTimeOffset.MinValue;
+    private bool _seekAnchorActive;
+    private TimeSpan _seekBaselineReported = TimeSpan.MinValue;
+    private long _seekSeq;
+
+    /// <summary>本机开始计时的那首曲目（配上 <see cref="_trackPlayStartedAt"/> 使用）。</summary>
+    private string? _timingTrackKey;
+
+    /// <summary>本机看到这首歌"开始播放"的时刻。播放器不报位置时，它就是位置基准。</summary>
+    private DateTimeOffset _trackPlayStartedAt = DateTimeOffset.MinValue;
+
+    /// <summary>上一次算出的位置。暂停时沿用它，避免回落到播放器那个 0/1 的假值。</summary>
+    private TimeSpan _lastResult;
+
+    // 小幅回跳吸收：播放器两次上报之间位置偶尔会回退一两百毫秒，直接跟会让进度条倒退一格。
     private TimeSpan _smoothedPosition = TimeSpan.MinValue;
+    private DateTimeOffset _lastSampleAt = DateTimeOffset.MinValue;
     private string? _smoothedTrackKey;
-    private static readonly TimeSpan BackwardTolerance = TimeSpan.FromSeconds(1.0);
+    private static readonly TimeSpan BackwardTolerance = TimeSpan.FromMilliseconds(300);
+
+    /// <summary>
+    /// Apple Music 播放位置的固定补偿（默认 +1.4s）。
+    /// Windows 版 Apple Music 的 SMTC 上报有约 1.4 秒固有时延；其他播放器不加此补偿。
+    /// </summary>
+    public TimeSpan LatencyCompensation { get; set; } = TimeSpan.FromMilliseconds(1400);
+
+    /// <summary>判断是否为 Apple Music 客户端。</summary>
+    public static bool IsAppleMusicSource(string? appId)
+    {
+        if (string.IsNullOrEmpty(appId)) return false;
+        return appId.Contains("AppleMusic", StringComparison.OrdinalIgnoreCase)
+            || appId.Contains("AppleInc", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// 当前播放源生效的时延补偿：Apple Music 使用 <see cref="LatencyCompensation"/>，其他情况使用 0ms。
+    /// </summary>
+    public TimeSpan EffectiveLatencyCompensation
+    {
+        get
+        {
+            var appId = CurrentTrack?.SourceAppId ?? _session?.SourceAppUserModelId;
+            return IsAppleMusicSource(appId) ? LatencyCompensation : TimeSpan.Zero;
+        }
+    }
+
+    // ---- 时同步诊断（方案 0）----
+
+    private volatile bool _timingDiagnostics;
+    private readonly object _diagLock = new();
+
+    /// <summary>是否记录播放器位置样本（<c>[timing]</c>），用于判断歌词时间误差属于哪种成因。默认关闭。</summary>
+    public bool TimingDiagnostics
+    {
+        get => _timingDiagnostics;
+        set
+        {
+            lock (_diagLock)
+            {
+                if (_timingDiagnostics == value) return;
+                _timingDiagnostics = value;
+                if (!value) ResetTimingDiagnosticsState();
+            }
+        }
+    }
+
+    private DateTimeOffset _diagLastUpdate = DateTimeOffset.MinValue;
+    private DateTimeOffset _diagLastSeenAt = DateTimeOffset.MinValue;
+    private TimeSpan _diagLastReported = TimeSpan.MinValue;
+    private string? _diagTrackKey;
+    private string? _diagPlayerKey;
+    private int _diagSamples;
+    private double _diagSkewSumMs;
+    private int _diagSkewCount;
+    private double _diagResidualSum;
+    private int _diagResidualCount;
+    private double _diagStaleSum;
+    private int _diagStaleCount;
 
     public TrackInfo? CurrentTrack { get; private set; }
     public bool IsPlaying { get; private set; }
@@ -95,10 +327,10 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
         service.LogSessions();
         service.SelectBestSession();
 
-        // SMTC의 PlaybackInfoChanged 이벤트가 앱(예: Spotify)에 따라 지연되어
-        // 정지 후에도 가사가 남는 문제 방지 — 재생 상태를 주기적으로 폴링해 즉시 반영.
-        // 아울러 매 폴링마다 최적 세션을 재선택한다: Windows 10에서 Spotify가
-        // "현재 세션"으로 잡히지 않아(다른 앱이 current) 인식이 안 되던 문제를 해결.
+        // SMTC 的 PlaybackInfoChanged 事件在部分应用(如 Spotify)中会延迟，
+        // 导致停止后歌词仍然残留 — 因此周期轮询播放状态以立即反映。
+        // 同时每次轮询都会重新选择最佳会话: 解决 Windows 10 上 Spotify 未被
+        // 判定为"当前会话"(current 被其他应用占用)而无法识别的问题。
         service._pollTimer = new Timer(
             _ => { service.SelectBestSession(); service.RefreshPlayback(); }, null,
             TimeSpan.FromMilliseconds(250), TimeSpan.FromMilliseconds(250));
@@ -106,9 +338,9 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
     }
 
     /// <summary>
-    /// 부착할 SMTC 세션을 재선택한다. GetCurrentSession()만 믿지 않고 전체 세션을
-    /// 열거해 '재생 중'인 세션을 우선한다(Win10에서 Spotify가 current로 안 잡히는 문제 대응).
-    /// 선택이 바뀔 때만 재구독한다.
+    /// 重新选择要附加的 SMTC 会话。不单纯依赖 GetCurrentSession()，而是枚举全部会话，
+    /// 优先选择处于"播放中"的会话(应对 Win10 上 Spotify 未被判定为 current 的问题)。
+    /// 仅在选择发生变化时才重新订阅。
     /// </summary>
     private void SelectBestSession()
     {
@@ -126,12 +358,15 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
             {
                 _session.MediaPropertiesChanged -= OnMediaPropertiesChanged;
                 _session.PlaybackInfoChanged -= OnPlaybackInfoChanged;
+                _session.TimelinePropertiesChanged -= OnTimelinePropertiesChanged;
             }
             _session = best;
+            CancelThumbVerifyLocked();
             if (_session is not null)
             {
                 _session.MediaPropertiesChanged += OnMediaPropertiesChanged;
                 _session.PlaybackInfoChanged += OnPlaybackInfoChanged;
+                _session.TimelinePropertiesChanged += OnTimelinePropertiesChanged;
             }
             changed = true;
             pickedId = best?.SourceAppUserModelId;
@@ -139,18 +374,18 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
 
         if (changed)
         {
-            Musebase.Windows.Log.Write($"[smtc] 선택: {pickedId ?? "(없음)"} (모드={_sourceMode}, 브라우저포함={_includeBrowsers})");
+            Musebase.Windows.Log.Write($"[smtc] 选择: {pickedId ?? "(无)"} (模式={_sourceMode}, 含浏览器={_includeBrowsers})");
             _ = RefreshTrackAsync();
             RefreshPlayback();
         }
     }
 
     /// <summary>
-    /// 부착할 세션을 결정한다.
-    /// - 특정 소스로 고정된 경우: 그 SourceAppUserModelId 세션만 사용(없으면 표시 안 함).
-    /// - 자동: current가 재생 중이면 그대로, 아니면 재생 중인 세션, 그래도 없으면 current/첫 세션.
-    ///   단, 브라우저 세션은 (옵션이 꺼져 있으면) 후보에서 제외한다 —
-    ///   Firefox의 YouTube 영상 등을 음악으로 오인식하지 않도록.
+    /// 决定要附加的会话。
+    /// - 固定到特定来源时: 仅使用该 SourceAppUserModelId 的会话(没有则不显示)。
+    /// - 自动: current 正在播放则直接使用，否则取正在播放的会话，仍没有则用 current/第一个会话。
+    ///   但浏览器会话(在选项关闭时)从候选中排除 —
+    ///   以免把 Firefox 的 YouTube 视频等误识别为音乐。
     /// </summary>
     private Session? PickBestSession(SessionManager manager)
     {
@@ -158,16 +393,16 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
         try { sessions = manager.GetSessions(); }
         catch { return null; }
 
-        // 특정 플레이어로 고정
+        // 固定到特定播放器
         if (!IsAuto)
         {
             foreach (var s in sessions)
                 if (string.Equals(s.SourceAppUserModelId, _sourceMode, StringComparison.OrdinalIgnoreCase))
                     return s;
-            return null; // 지정 플레이어가 실행 중이 아니면 표시하지 않음
+            return null; // 指定的播放器未运行时不显示
         }
 
-        // 선호 앱을 지정했으면 그 앱들만, 아니면 브라우저·영상/팟캐스트 앱 제외.
+        // 若指定了偏好应用则仅限这些应用，否则排除浏览器与视频/播客应用。
         bool Eligible(Session s)
         {
             var id = s.SourceAppUserModelId;
@@ -182,7 +417,7 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
         }
 
         Session? current = null;
-        try { current = manager.GetCurrentSession(); } catch { /* 레이스 */ }
+        try { current = manager.GetCurrentSession(); } catch { /* 竞态 */ }
         if (current is not null && Eligible(current) && IsSessionPlaying(current)) return current;
 
         Session? firstEligible = null;
@@ -197,7 +432,7 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
         return firstEligible;
     }
 
-    /// <summary>SMTC 세션 목록을 로그에 남긴다(Win10 Spotify 미인식 등 진단용).</summary>
+    /// <summary>将 SMTC 会话列表记录到日志(用于诊断 Win10 上 Spotify 未被识别等问题)。</summary>
     private void LogSessions()
     {
         var manager = _manager;
@@ -206,11 +441,11 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
         {
             var items = manager.GetSessions()
                 .Select(s => $"{s.SourceAppUserModelId}[{SafeStatus(s)}]");
-            Musebase.Windows.Log.Write($"[smtc] 세션 목록: {string.Join(", ", items)}");
+            Musebase.Windows.Log.Write($"[smtc] 会话列表: {string.Join(", ", items)}");
         }
         catch (Exception e)
         {
-            Musebase.Windows.Log.Write($"[smtc] 세션 목록 조회 실패: {e.Message}");
+            Musebase.Windows.Log.Write($"[smtc] 会话列表查询失败: {e.Message}");
         }
     }
 
@@ -220,15 +455,15 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
         catch { return "?"; }
     }
 
-    // ---- 소스 선택 / 재생 컨트롤 (외부 API) ----
+    // ---- 来源选择 / 播放控制 (外部 API) ----
 
-    /// <summary>현재 소스 모드("auto" 또는 특정 SourceAppUserModelId).</summary>
+    /// <summary>当前来源模式("auto" 或特定的 SourceAppUserModelId).</summary>
     public string SourceMode { get { lock (_lock) return _sourceMode; } }
 
-    /// <summary>자동 모드에서 브라우저를 포함하는지.</summary>
+    /// <summary>自动模式下是否包含浏览器.</summary>
     public bool IncludeBrowsers { get { lock (_lock) return _includeBrowsers; } }
 
-    /// <summary>재생 소스 선택을 변경하고 즉시 세션을 재선택한다.</summary>
+    /// <summary>更改播放来源选择并立即重新选择会话.</summary>
     public void SetSource(string? mode, bool includeBrowsers, IEnumerable<string>? preferredSources = null)
     {
         lock (_lock)
@@ -244,7 +479,7 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
         RefreshPlayback();
     }
 
-    /// <summary>현재 열려 있는 SMTC 세션들의 SourceAppUserModelId 목록(소스 선택 UI용).</summary>
+    /// <summary>当前打开的 SMTC 会话的 SourceAppUserModelId 列表(供来源选择 UI 使用).</summary>
     public IReadOnlyList<string> GetAvailableSources()
     {
         var manager = _manager;
@@ -263,10 +498,10 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
         }
     }
 
-    /// <summary>지정 소스가 브라우저인지(자동 모드 판단용 UI 힌트).</summary>
+    /// <summary>指定来源是否为浏览器(自动模式判断用的 UI 提示).</summary>
     public static bool IsBrowser(string? appId) => IsBrowserSource(appId);
 
-    /// <summary>현재 세션의 컨트롤 가용 여부.</summary>
+    /// <summary>当前会话的控件可用性.</summary>
     public PlaybackControls GetControls() => GetTransportState().Controls;
 
     internal TransportState GetTransportState()
@@ -291,7 +526,7 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
         return new TransportState(PlaybackControls.None, false, false, null, null);
     }
 
-    /// <summary>재생/일시정지 토글.</summary>
+    /// <summary>播放/暂停切换.</summary>
     public async Task<bool> TogglePlayPauseAsync()
     {
         Session? session;
@@ -338,7 +573,7 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
         catch { return false; }
     }
 
-    /// <summary>다음 곡.</summary>
+    /// <summary>下一曲.</summary>
     public async Task<bool> SkipNextAsync()
     {
         Session? session;
@@ -348,7 +583,7 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
         catch { return false; }
     }
 
-    /// <summary>이전 곡.</summary>
+    /// <summary>上一曲.</summary>
     public async Task<bool> SkipPreviousAsync()
     {
         Session? session;
@@ -358,41 +593,93 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
         catch { return false; }
     }
 
-    public bool CanSeek
-    {
-        get
-        {
-            Session? session;
-            lock (_lock) session = _session;
-            try { return session?.GetPlaybackInfo().Controls.IsPlaybackPositionEnabled == true; }
-            catch { return false; }
-        }
-    }
-
-    public async Task<bool> SeekAsync(TrackInfo track, TimeSpan position)
+    /// <summary>跳转播放进度。若物理播放器支持则改变播放进度；不支持或仅校准时钟时对齐本地推算基准。</summary>
+    public async Task<bool> SeekAsync(TimeSpan position)
     {
         Session? session;
+        lock (_lock) session = _session;
+
+        var now = DateTimeOffset.Now;
+        var compensation = EffectiveLatencyCompensation;
+        var physicalTicks = Math.Max(0, (position - compensation).Ticks);
+        var physicalTarget = TimeSpan.FromTicks(physicalTicks);
+        var displayTarget = position < TimeSpan.Zero ? TimeSpan.Zero : position;
+        var playing = session is not null && IsSessionPlaying(session);
+        var appId = CurrentTrack?.SourceAppId ?? session?.SourceAppUserModelId;
+        var allowLocalCalibrationFallback = IsVideoSite(appId);
+        long seekSeq;
+
         lock (_lock)
         {
-            if (!Equals(track, CurrentTrack)) return false;
-            session = _session;
+            seekSeq = Interlocked.Increment(ref _seekSeq);
+            if (!_positionReliable) allowLocalCalibrationFallback = true;
+
+            // 保存跳转前真实观测到的 SMTC 上报值；不要把 _lastReportedValue/_positionWindowPosition 改写成 target，
+            // 否则 B 站 PC 等始终报 0:00 的播放器会在下一帧被 postSeekSnap 误判为"退回 0:00"，瞬间冲掉对准结果。
+            _seekBaselineReported = _lastReportedValue;
+            _seekAnchorActive = true;
+            _trackPlayStartedAt = now - physicalTarget;
+            _wallAnchorPosition = physicalTarget;
+            _wallAnchorAt = playing ? now : DateTimeOffset.MinValue;
+            _lastSeekAt = now;
+            _lastResult = displayTarget;
+            _smoothedPosition = displayTarget;
+            _lastSampleAt = now;
         }
-        if (session is null) return false;
+
+        if (session is null)
+        {
+            lock (_lock)
+            {
+                if (_seekSeq == seekSeq) _seekAnchorActive = false;
+            }
+            return false;
+        }
+
         try
         {
-            if (!string.Equals(session.SourceAppUserModelId, track.SourceAppId, StringComparison.OrdinalIgnoreCase)
-                || !session.GetPlaybackInfo().Controls.IsPlaybackPositionEnabled) return false;
-            var accepted = await session.TryChangePlaybackPositionAsync(position.Ticks);
-            if (accepted)
+            var success = await session.TryChangePlaybackPositionAsync(physicalTicks);
+            var settledAt = DateTimeOffset.Now;
+            var stillPlaying = IsSessionPlaying(session);
+
+            if (!success && !allowLocalCalibrationFallback)
             {
                 lock (_lock)
                 {
-                    if (ReferenceEquals(session, _session)) _smoothedPosition = TimeSpan.MinValue;
+                    // 正常报时长的音频播放器拒绝跳转时撤回超前锚点，避免歌词跑偏而音乐原地不动
+                    if (_seekSeq == seekSeq) _seekAnchorActive = false;
+                }
+                Musebase.Windows.Log.Write("[sync] 播放器拒绝物理跳转，保持真实位置");
+                return false;
+            }
+
+            lock (_lock)
+            {
+                if (_seekSeq == seekSeq)
+                {
+                    _lastSeekAt = settledAt;
+                    if (stillPlaying) _wallAnchorAt = settledAt;
                 }
             }
-            return accepted;
+            Musebase.Windows.Log.Write(success
+                ? $"[smtc] 物理播放器已跳转到: {physicalTarget:mm\\:ss} (歌词={displayTarget:mm\\:ss})"
+                : $"[sync] 播放器未响应物理跳转，已自动校准本地时钟至: {displayTarget:mm\\:ss}");
+            return true;
         }
-        catch { return false; }
+        catch (Exception ex)
+        {
+            if (!allowLocalCalibrationFallback)
+            {
+                lock (_lock)
+                {
+                    if (_seekSeq == seekSeq) _seekAnchorActive = false;
+                }
+                Musebase.Windows.Log.Write($"[sync] 物理跳转异常: {ex.Message}");
+                return false;
+            }
+            Musebase.Windows.Log.Write($"[sync] 物理跳转异常（已校准本地时钟）: {ex.Message}");
+            return true;
+        }
     }
 
     private static bool IsSessionPlaying(Session session)
@@ -416,21 +703,106 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
     }
 
     private void OnMediaPropertiesChanged(Session sender, MediaPropertiesChangedEventArgs args) =>
-        _ = RefreshTrackAsync();
+        _ = RefreshTrackAsync(sender);
 
     private void OnPlaybackInfoChanged(Session sender, PlaybackInfoChangedEventArgs args) =>
         RefreshPlayback();
 
+    private void OnTimelinePropertiesChanged(Session sender, TimelinePropertiesChangedEventArgs args)
+    {
+        TrackInfo? updated = null;
+        lock (_lock)
+        {
+            if (ReferenceEquals(sender, _session))
+            {
+                // 注意：这里**不能**重锚。播放器每秒都会推一次 Timeline，
+                // 每次都重锚就等于又回到"信上报值"的老路，锯齿照样会反映到歌词上。
+                try
+                {
+                    var timeline = sender.GetTimelineProperties();
+                    updated = TryUpdateTrackDurationLocked(timeline.EndTime);
+                }
+                catch { }
+            }
+        }
+        if (updated is not null)
+            TrackChanged?.Invoke(updated);
+    }
+
+    internal readonly record struct ThumbnailSnapshot(byte[]? Bytes, long Version);
+
+    private long _thumbnailVersion;
+    private long _trackRefreshSeq;
+    private TrackInfo? _thumbSnapshotTrack;
+    private byte[]? _thumbSnapshotBytes;
+    private string? _thumbSnapshotSignature;
+    private volatile bool _hasThumbnail;
+    private TaskCompletionSource<bool>? _thumbReadyTcs;
+    private CancellationTokenSource? _thumbVerifyCts;
+    private bool _settleVerifyDoneForCurrentSong;
+    private readonly Dictionary<string, (TrackInfo Owner, long Order)> _knownThumbOwners = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _rejectedStaleSigsForCurrentSong = new(StringComparer.Ordinal);
+    private long _thumbOwnerSeq;
+
+    private static readonly int[] StaleRetryDelaysMs = [120, 320, 700, 1400];
+    private static readonly int[] SettleVerifyDelaysMs = [300, 850];
+
+    /// <summary>当前 SMTC 曲目封面变更计数；当同一首歌延后或更换推送 SMTC 封面时会递增。</summary>
+    public long ThumbnailVersion => Volatile.Read(ref _thumbnailVersion);
+
+    /// <summary>当前 SMTC 会话最近一次检测到的有效封面缩略图是否非空。</summary>
+    public bool HasThumbnail => _hasThumbnail;
+
     /// <summary>
-    /// 지금 재생 중인 곡의 앨범 표지를 <b>재생 앱이 준 그대로</b> 가져온다.
-    ///
-    /// Spotify·Apple Music 등은 SMTC에 표지를 함께 실어 보낸다. 외부 검색(iTunes·Deezer)보다
-    /// 이게 나은 이유는 분명하다 — 네트워크도 키도 필요 없고, <b>검색으로 다른 앨범을 집을 일이
-    /// 없다</b>(리마스터·싱글 버전 구분, 한국 인디처럼 iTunes에 아예 없는 곡까지 맞는다).
-    /// 표지를 안 주는 앱도 있으니 못 받으면 null이고, 그때 서버 쪽 커버로 물러난다.
+    /// 获取与当前曲目严格匹配的 SMTC 封面缩略图快照及版本号；
+    /// 若同一首曲目的初次缩略图尚在异步读取与防陈旧校验中，会等待该次读取完成，避免独立重读造成跨歌错配。
+    /// </summary>
+    internal async Task<ThumbnailSnapshot> GetThumbnailForTrackAsync(TrackInfo expectedTrack, CancellationToken ct = default)
+    {
+        for (var attempt = 0; attempt < 10; attempt++)
+        {
+            Task<bool>? waitTask = null;
+            lock (_lock)
+            {
+                if (!SameTrackIdentity(expectedTrack, CurrentTrack))
+                    return new ThumbnailSnapshot(null, Volatile.Read(ref _thumbnailVersion));
+
+                if (_thumbReadyTcs is null || _thumbReadyTcs.Task.IsCompleted)
+                {
+                    var bytes = _thumbSnapshotTrack is not null && SameTrackIdentity(expectedTrack, _thumbSnapshotTrack)
+                        ? _thumbSnapshotBytes
+                        : null;
+                    return new ThumbnailSnapshot(bytes, Volatile.Read(ref _thumbnailVersion));
+                }
+
+                waitTask = _thumbReadyTcs.Task;
+            }
+
+            if (waitTask is not null)
+                await waitTask.WaitAsync(ct).ConfigureAwait(false);
+        }
+
+        lock (_lock)
+        {
+            if (!SameTrackIdentity(expectedTrack, CurrentTrack))
+                return new ThumbnailSnapshot(null, Volatile.Read(ref _thumbnailVersion));
+
+            var bytes = _thumbSnapshotTrack is not null && SameTrackIdentity(expectedTrack, _thumbSnapshotTrack)
+                ? _thumbSnapshotBytes
+                : null;
+            return new ThumbnailSnapshot(bytes, Volatile.Read(ref _thumbnailVersion));
+        }
+    }
+
+    /// <summary>
+    /// 取来正在播放曲目的专辑封面，且<b>完全按照播放应用提供的原样</b>。
     /// </summary>
     public async Task<byte[]?> GetThumbnailAsync()
     {
+        var track = CurrentTrack;
+        if (track is not null)
+            return (await GetThumbnailForTrackAsync(track).ConfigureAwait(false)).Bytes;
+
         Session? session;
         lock (_lock) session = _session;
         if (session is null) return null;
@@ -438,10 +810,22 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
         try
         {
             var props = await session.TryGetMediaPropertiesAsync();
-            if (props.Thumbnail is not { } reference) return null;
+            return await ReadThumbnailBytesAsync(props.Thumbnail);
+        }
+        catch (Exception)
+        {
+            return null; // 会话消失的竞态等 — 按无封面处理
+        }
+    }
 
+    private static async Task<byte[]?> ReadThumbnailBytesAsync(
+        global::Windows.Storage.Streams.IRandomAccessStreamReference? reference)
+    {
+        if (reference is null) return null;
+        try
+        {
             using var stream = await reference.OpenReadAsync();
-            if (stream.Size is 0 or > 8 * 1024 * 1024) return null; // 비정상 크기는 건너뛴다
+            if (stream.Size is 0 or > 8 * 1024 * 1024) return null; // 跳过异常尺寸
 
             var bytes = new byte[stream.Size];
             using var reader = new global::Windows.Storage.Streams.DataReader(stream);
@@ -451,42 +835,357 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
         }
         catch (Exception)
         {
-            return null; // 세션이 사라지는 레이스 등 — 표지 없음으로 처리
+            return null;
         }
     }
 
-    private async Task RefreshTrackAsync()
+    private static string ComputeThumbnailSignature(byte[]? bytes) =>
+        bytes is { Length: > 0 }
+            ? $"{bytes.Length}:{Convert.ToHexString(SHA256.HashData(bytes))}"
+            : "";
+
+    /// <summary>判断两次曲目快照是否仍代表同一首歌（允许 Album 由空补全与 Duration 变化）。</summary>
+    internal static bool SameTrackIdentity(TrackInfo? a, TrackInfo? b)
     {
+        if (ReferenceEquals(a, b)) return true;
+        if (a is null || b is null) return false;
+        return string.Equals(a.Title, b.Title, StringComparison.Ordinal)
+            && string.Equals(a.Artist, b.Artist, StringComparison.Ordinal)
+            && string.Equals(a.SourceAppId, b.SourceAppId, StringComparison.Ordinal)
+            && (string.IsNullOrEmpty(a.Album) || string.IsNullOrEmpty(b.Album)
+                || string.Equals(a.Album, b.Album, StringComparison.Ordinal));
+    }
+
+    private static bool IsDifferentArtworkExpected(TrackInfo a, TrackInfo b)
+    {
+        if (SameTrackIdentity(a, b)) return false;
+        if (!string.Equals(a.SourceAppId, b.SourceAppId, StringComparison.OrdinalIgnoreCase)) return true;
+        if (!string.IsNullOrWhiteSpace(a.Album) && !string.IsNullOrWhiteSpace(b.Album))
+            return !string.Equals(a.Album, b.Album, StringComparison.OrdinalIgnoreCase);
+        return !string.IsNullOrWhiteSpace(a.Artist) && !string.IsNullOrWhiteSpace(b.Artist)
+            && !string.Equals(a.Artist, b.Artist, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static TrackInfo? TryBuildTrack(
+        Session session,
+        global::Windows.Media.Control.GlobalSystemMediaTransportControlsSessionMediaProperties props,
+        out global::Windows.Storage.Streams.IRandomAccessStreamReference? thumbRef)
+    {
+        thumbRef = null;
+        var artist = props.Artist ?? "";
+        var album = props.AlbumTitle ?? "";
+        // 广告时段不是曲目 — 不创建曲目，因此歌词检索与服务端查询完全不会发生。
+        if (string.IsNullOrEmpty(props.Title) || AdSignals.LooksLikeAd(artist, album))
+            return null;
+
+        TimeSpan? duration = null;
+        try
+        {
+            var timeline = session.GetTimelineProperties();
+            if (timeline.EndTime > TimeSpan.Zero) duration = timeline.EndTime;
+        }
+        catch { }
+
+        string finalTitle;
+        string finalArtist;
+        if (IsBrowserOrVideoSource(session.SourceAppUserModelId))
+        {
+            Musebase.Core.Search.SearchTermCleaner.ExtractVideoSongInfo(
+                props.Title, artist, out finalTitle, out finalArtist);
+        }
+        else
+        {
+            finalTitle = SanitizeTitle(props.Title, session.SourceAppUserModelId);
+            finalArtist = SanitizeArtist(artist);
+        }
+
+        thumbRef = props.Thumbnail;
+        return new TrackInfo(finalTitle, finalArtist, album, duration, session.SourceAppUserModelId);
+    }
+
+    private TrackInfo? TryUpdateTrackDurationLocked(TimeSpan endTime)
+    {
+        if (endTime <= TimeSpan.Zero || CurrentTrack is not { } cur || cur.Duration == endTime)
+            return null;
+        var updated = cur with { Duration = endTime };
+        CurrentTrack = updated;
+        if (_thumbSnapshotTrack is not null && SameTrackIdentity(_thumbSnapshotTrack, updated))
+            _thumbSnapshotTrack = updated;
+        return updated;
+    }
+
+    private void ResetPlaybackTrackStateLocked()
+    {
+        _lastReportedValue = TimeSpan.MinValue;
+        _lastAdvanceAt = DateTimeOffset.MinValue;
+        _smoothedPosition = TimeSpan.MinValue;
+        _smoothedTrackKey = null;
+        _lastSampleAt = DateTimeOffset.MinValue;
+        _positionWindowStart = DateTimeOffset.MinValue;
+        _positionWindowPosition = TimeSpan.Zero;
+        _positionReliable = true;
+        _wallAnchorAt = DateTimeOffset.MinValue;
+        _wallAnchorPosition = TimeSpan.Zero;
+        _timingTrackKey = null;
+        _trackPlayStartedAt = DateTimeOffset.MinValue;
+        _seekAnchorActive = false;
+        _seekBaselineReported = TimeSpan.MinValue;
+    }
+
+    private void CancelThumbVerifyLocked()
+    {
+        if (_thumbVerifyCts is null) return;
+        _thumbVerifyCts.Cancel();
+        _thumbVerifyCts.Dispose();
+        _thumbVerifyCts = null;
+    }
+
+    private void RecordKnownThumbOwnerLocked(string sig, TrackInfo owner)
+    {
+        _knownThumbOwners[sig] = (owner, ++_thumbOwnerSeq);
+        if (_knownThumbOwners.Count <= 16) return;
+
+        string? oldestKey = null;
+        var oldestOrder = long.MaxValue;
+        foreach (var (key, entry) in _knownThumbOwners)
+        {
+            if (entry.Order < oldestOrder)
+            {
+                oldestOrder = entry.Order;
+                oldestKey = key;
+            }
+        }
+        if (oldestKey is not null) _knownThumbOwners.Remove(oldestKey);
+    }
+
+    private bool IsThumbnailStaleLocked(TrackInfo track, string sig)
+    {
+        if (sig.Length == 0) return false;
+        if (_rejectedStaleSigsForCurrentSong.Contains(sig)) return true;
+        return _knownThumbOwners.TryGetValue(sig, out var known)
+            && IsDifferentArtworkExpected(known.Owner, track);
+    }
+
+    private int[]? CommitThumbnailLocked(long seq, Session session, TrackInfo track, byte[]? thumbBytes, string sig, bool fromVerify)
+    {
+        if (seq != Volatile.Read(ref _trackRefreshSeq)
+            || !SameSession(session, _session)
+            || !SameTrackIdentity(track, CurrentTrack))
+            return null;
+
+        var suspectedStale = IsThumbnailStaleLocked(track, sig);
+        if (suspectedStale)
+        {
+            _rejectedStaleSigsForCurrentSong.Add(sig);
+            _thumbSnapshotTrack = track;
+            _hasThumbnail = false;
+            if (_thumbSnapshotBytes is not null || !string.Equals(_thumbSnapshotSignature, "", StringComparison.Ordinal))
+            {
+                _thumbSnapshotBytes = null;
+                _thumbSnapshotSignature = "";
+                Interlocked.Increment(ref _thumbnailVersion);
+            }
+            return fromVerify ? null : StaleRetryDelaysMs;
+        }
+
+        if (thumbBytes is { Length: > 0 })
+        {
+            // 若同首歌后续拿到新的正式封面，把原先短暂误绑到当前曲目的旧图迁出已知表并加入排除列表，以免回切误伤
+            if (_thumbSnapshotTrack is not null
+                && SameTrackIdentity(_thumbSnapshotTrack, track)
+                && !string.IsNullOrEmpty(_thumbSnapshotSignature)
+                && !string.Equals(_thumbSnapshotSignature, sig, StringComparison.Ordinal))
+            {
+                if (_knownThumbOwners.TryGetValue(_thumbSnapshotSignature, out var prevOwner)
+                    && SameTrackIdentity(prevOwner.Owner, track))
+                {
+                    _knownThumbOwners.Remove(_thumbSnapshotSignature);
+                }
+                _rejectedStaleSigsForCurrentSong.Add(_thumbSnapshotSignature);
+            }
+
+            RecordKnownThumbOwnerLocked(sig, track);
+            _thumbSnapshotTrack = track;
+            _thumbSnapshotBytes = thumbBytes;
+            _hasThumbnail = true;
+            if (!string.Equals(sig, _thumbSnapshotSignature, StringComparison.Ordinal))
+            {
+                _thumbSnapshotSignature = sig;
+                Interlocked.Increment(ref _thumbnailVersion);
+            }
+
+            if (!fromVerify && !_settleVerifyDoneForCurrentSong)
+            {
+                _settleVerifyDoneForCurrentSong = true;
+                return SettleVerifyDelaysMs;
+            }
+            return null;
+        }
+
+        _thumbSnapshotTrack = track;
+        _hasThumbnail = false;
+        if (_thumbSnapshotBytes is not null)
+        {
+            _thumbSnapshotBytes = null;
+            _thumbSnapshotSignature = "";
+            Interlocked.Increment(ref _thumbnailVersion);
+        }
+        else if (_thumbSnapshotSignature is null)
+        {
+            _thumbSnapshotSignature = "";
+        }
+
+        return fromVerify ? null : StaleRetryDelaysMs;
+    }
+
+    private CancellationToken ResetThumbVerifyTokenLocked()
+    {
+        CancelThumbVerifyLocked();
+        _thumbVerifyCts = new CancellationTokenSource();
+        return _thumbVerifyCts.Token;
+    }
+
+    private async Task VerifyThumbnailDelayedAsync(long seq, Session session, TrackInfo expectedTrack, int[] delaysMs, CancellationToken ct)
+    {
+        try
+        {
+            var prevDelay = 0;
+            foreach (var targetMs in delaysMs)
+            {
+                var stepDelay = Math.Max(10, targetMs - prevDelay);
+                prevDelay = targetMs;
+                await Task.Delay(stepDelay, ct).ConfigureAwait(false);
+                if (ct.IsCancellationRequested || seq != Volatile.Read(ref _trackRefreshSeq)) return;
+
+                var props = await session.TryGetMediaPropertiesAsync();
+                if (ct.IsCancellationRequested || seq != Volatile.Read(ref _trackRefreshSeq)) return;
+
+                var currentTrack = TryBuildTrack(session, props, out var thumbRef);
+                if (currentTrack is null || !SameTrackIdentity(currentTrack, expectedTrack)) return;
+
+                var thumbBytes = await ReadThumbnailBytesAsync(thumbRef).ConfigureAwait(false);
+                if (ct.IsCancellationRequested || seq != Volatile.Read(ref _trackRefreshSeq)) return;
+
+                var sig = ComputeThumbnailSignature(thumbBytes);
+                bool obtainedValid;
+                lock (_lock)
+                {
+                    if (ct.IsCancellationRequested) return;
+                    CommitThumbnailLocked(seq, session, currentTrack, thumbBytes, sig, fromVerify: true);
+                    obtainedValid = _hasThumbnail;
+                }
+                if (obtainedValid) return;
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+        }
+        catch
+        {
+            // 会话关闭/属性 读取竞态 — 静默结束延迟校验
+        }
+    }
+
+    private async Task RefreshTrackAsync(Session? expectedSender = null)
+    {
+        long seq;
         Session? session;
-        lock (_lock) session = _session;
+        lock (_lock)
+        {
+            if (expectedSender is not null && !SameSession(expectedSender, _session))
+                return;
+            seq = Interlocked.Increment(ref _trackRefreshSeq);
+            CancelThumbVerifyLocked();
+            session = _session;
+        }
 
         TrackInfo? track = null;
+        global::Windows.Storage.Streams.IRandomAccessStreamReference? thumbRef = null;
         if (session is not null)
         {
             try
             {
                 var props = await session.TryGetMediaPropertiesAsync();
-                var timeline = session.GetTimelineProperties();
-                var duration = timeline.EndTime > TimeSpan.Zero ? timeline.EndTime : (TimeSpan?)null;
-                var artist = props.Artist ?? "";
-                var album = props.AlbumTitle ?? "";
-
-                // 광고 구간은 곡이 아니다 — 트랙을 만들지 않아 가사 검색·서버 조회가 아예 돌지 않는다.
-                // SMTC에는 광고 플래그·mediaId가 없으므로 실측 검증된 신호 ③(아티스트=Spotify +
-                // 앨범 비어 있음)만 본다. 판정 규칙은 Android와 같은 코드(Engine의 AdSignals)다.
-                if (!string.IsNullOrEmpty(props.Title) && !AdSignals.LooksLikeAd(artist, album))
-                    track = new TrackInfo(props.Title, artist, album, duration, session.SourceAppUserModelId);
+                if (seq != Volatile.Read(ref _trackRefreshSeq)) return;
+                track = TryBuildTrack(session, props, out thumbRef);
             }
             catch
             {
-                // 세션이 사라지는 타이밍 레이스 — 트랙 없음으로 처리
+                // 会话消失的时序竞态 — 按无曲目处理
             }
         }
 
-        if (!Equals(track, CurrentTrack))
+        TaskCompletionSource<bool>? readyTcs = null;
+        bool trackChanged;
+        try
         {
-            CurrentTrack = track;
-            TrackChanged?.Invoke(track);
+            lock (_lock)
+            {
+                if (seq != Volatile.Read(ref _trackRefreshSeq) || !SameSession(session, _session))
+                    return;
+
+                var prevTrack = CurrentTrack;
+                trackChanged = !Equals(track, prevTrack);
+                var songChanged = !SameTrackIdentity(track, prevTrack);
+
+                if (trackChanged)
+                    CurrentTrack = track;
+
+                if (songChanged)
+                {
+                    ResetPlaybackTrackStateLocked();
+                    _thumbSnapshotTrack = track;
+                    _thumbSnapshotBytes = null;
+                    _thumbSnapshotSignature = null;
+                    _hasThumbnail = false;
+                    _rejectedStaleSigsForCurrentSong.Clear();
+                    _settleVerifyDoneForCurrentSong = false;
+                    if (prevTrack is not null || track is not null)
+                        Interlocked.Increment(ref _thumbnailVersion);
+                }
+                else if (trackChanged && _thumbSnapshotTrack is not null && SameTrackIdentity(track, _thumbSnapshotTrack))
+                {
+                    _thumbSnapshotTrack = track;
+                }
+
+                if (track is null || session is null)
+                {
+                    var done = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                    done.TrySetResult(true);
+                    _thumbReadyTcs = done;
+                }
+                else
+                {
+                    readyTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                    _thumbReadyTcs = readyTcs;
+                }
+            }
+
+            if (trackChanged)
+                TrackChanged?.Invoke(track);
+
+            if (track is null || session is null)
+                return;
+
+            var thumbBytes = await ReadThumbnailBytesAsync(thumbRef).ConfigureAwait(false);
+            if (seq != Volatile.Read(ref _trackRefreshSeq)) return;
+
+            var sig = ComputeThumbnailSignature(thumbBytes);
+            int[]? verifyDelays;
+            CancellationToken verifyCt = default;
+            lock (_lock)
+            {
+                verifyDelays = CommitThumbnailLocked(seq, session, track, thumbBytes, sig, fromVerify: false);
+                if (verifyDelays is { Length: > 0 })
+                    verifyCt = ResetThumbVerifyTokenLocked();
+            }
+
+            if (verifyDelays is { Length: > 0 })
+                _ = VerifyThumbnailDelayedAsync(seq, session, track, verifyDelays, verifyCt);
+        }
+        finally
+        {
+            readyTcs?.TrySetResult(true);
         }
     }
 
@@ -503,7 +1202,7 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
         }
         catch
         {
-            // 세션 소멸 레이스
+            // 会话销毁竞态
         }
 
         if (playing != IsPlaying)
@@ -514,10 +1213,24 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
     }
 
     /// <summary>
-    /// 보간된 현재 재생 위치. SMTC 타임라인은 앱별로 갱신이 드물어
-    /// LastUpdatedTime 이후 경과분을 더한다 (Spike.Smtc에서 검증).
-    /// 새 타임라인 갱신 때 값이 뒤로 튀는 떨림(특히 Apple Music)을 막기 위해
-    /// 같은 곡 재생 중 1초 미만의 역행은 흡수한다(큰 변화=시킹은 그대로 반영).
+    /// 当前播放位置的估计值。
+    ///
+    /// <b>以本机单调时钟为主时钟</b>：播放时位置 = 锚点 + Stopwatch 流逝，
+    /// SMTC 上报的位置只当"测量值"，用于重锚（切歌 / 暂停恢复 / 明显 seek / 持续偏离）。
+    /// 这样做的原因是实测发现 Apple Music 上报的位置呈锯齿状（每 ~81 秒一次性前跳约 2 秒，
+    /// 期间最多落后真实时间 2 秒），直接采信会让歌词随之摆动，而一个固定补偿值
+    /// 只能在平均意义上正确。详见 <see cref="LogTimingSample"/> 的日志字段说明。
+    /// </summary>
+    /// <summary>
+    /// 当前播放位置的估计值。
+    ///
+    /// 以播放器上报的位置为基准：`上报值 + (现在 − 该值的发布时间)`，再加
+    /// <see cref="LatencyCompensation"/> 那几十毫秒。这是唯一可靠的基准，
+    /// 因为播放器自己的时钟速率未必是 1.0（实测 Apple Music 约 0.96~0.99），
+    /// 用墙钟从零推算会持续领先、越放越偏。
+    ///
+    /// 额外处理一种异常：有的播放器只更新 LastUpdatedTime 而位置值不动，
+    /// 此时按"距上次位置真正变化"的时长外推，避免进度卡死。
     /// </summary>
     public TimeSpan? GetEstimatedPosition()
     {
@@ -525,34 +1238,329 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
         lock (_lock) session = _session;
         if (session is null) return null;
 
-        TimeSpan position;
-        bool playing = IsPlaying;
+        TimeSpan reported;
+        DateTimeOffset lastUpdated;
+        bool playingNow;
+        TrackInfo? durationUpdatedTrack = null;
         try
         {
             var timeline = session.GetTimelineProperties();
-            position = timeline.Position;
-            if (playing)
+            if (timeline.EndTime > TimeSpan.Zero)
             {
-                var elapsed = DateTimeOffset.Now - timeline.LastUpdatedTime;
-                if (elapsed > TimeSpan.Zero && elapsed < TimeSpan.FromMinutes(30))
-                    position += elapsed;
+                lock (_lock)
+                {
+                    if (SameSession(session, _session))
+                        durationUpdatedTrack = TryUpdateTrackDurationLocked(timeline.EndTime);
+                }
             }
+
+            reported = timeline.Position;
+            lastUpdated = timeline.LastUpdatedTime;
+            // 直接问会话，不用缓存字段 IsPlaying：冷启动时它最多晚 250ms，
+            // 会让首帧误判成"暂停"、跳过外推，整首歌滞后。
+            playingNow = session.GetPlaybackInfo().PlaybackStatus
+                == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing;
         }
         catch
         {
             return null;
         }
 
+        if (durationUpdatedTrack is not null)
+            TrackChanged?.Invoke(durationUpdatedTrack);
+
+        var now = DateTimeOffset.Now;
         var trackKey = CurrentTrack is { } t ? $"{t.Title}|{t.Artist}" : null;
-        if (playing && trackKey == _smoothedTrackKey && _smoothedPosition != TimeSpan.MinValue)
+        var compensation = EffectiveLatencyCompensation;
+        var age = now - lastUpdated;
+        if (age < TimeSpan.Zero || age > TimeSpan.FromMinutes(30)) age = TimeSpan.Zero; // 明显异常，不外推
+        var timelineValid = reported > TimeSpan.Zero || lastUpdated > DateTimeOffset.UnixEpoch;
+
+        TimeSpan result;
+        lock (_lock)
         {
-            var delta = position - _smoothedPosition;
-            if (delta < TimeSpan.Zero && delta > -BackwardTolerance)
-                position = _smoothedPosition; // 작은 역행은 유지
+            // 换曲/首次播放时初始化本机推算锚点；若 SMTC 完全未更新时间戳且位置为 0（如 B 站 PC），直接进入本机推算模式
+            if (playingNow && (!string.Equals(trackKey, _timingTrackKey, StringComparison.Ordinal)
+                               || _trackPlayStartedAt == DateTimeOffset.MinValue))
+            {
+                var initialPos = reported + age;
+                if (initialPos < TimeSpan.Zero) initialPos = TimeSpan.Zero;
+                _timingTrackKey = trackKey;
+                _trackPlayStartedAt = now - initialPos;
+                _wallAnchorPosition = initialPos;
+                _wallAnchorAt = now;
+                _positionWindowStart = DateTimeOffset.MinValue;
+                _positionReliable = timelineValid;
+                _seekAnchorActive = false;
+                _seekBaselineReported = TimeSpan.MinValue;
+                _lastReportedValue = reported;
+                _lastAdvanceAt = timelineValid ? now : DateTimeOffset.MinValue;
+            }
+
+            if (!playingNow)
+            {
+                var useLocalClock = !_positionReliable || _seekAnchorActive;
+                if (_wallAnchorAt != DateTimeOffset.MinValue)
+                {
+                    // 刚从播放切到暂停：冻结当前锚点位置，避免恢复播放时把暂停时长算进去
+                    var frozen = useLocalClock
+                        ? (_lastResult > compensation ? _lastResult - compensation : _wallAnchorPosition)
+                        : reported;
+                    _wallAnchorPosition = frozen < TimeSpan.Zero ? TimeSpan.Zero : frozen;
+                    _wallAnchorAt = DateTimeOffset.MinValue;
+                }
+
+                if (useLocalClock && IsSignificantJump(reported, _lastReportedValue))
+                {
+                    _lastReportedValue = reported;
+                    _lastAdvanceAt = now;
+                    _seekAnchorActive = false;
+                    _wallAnchorPosition = reported < TimeSpan.Zero ? TimeSpan.Zero : reported;
+                    _lastResult = _wallAnchorPosition + compensation;
+                }
+
+                // 暂停时若使用本地计时或刚完成人工对准，沿用本地冻结位置
+                result = useLocalClock ? _lastResult : reported + compensation;
+            }
+            else
+            {
+                if (reported != _lastReportedValue)
+                {
+                    var isLowJitter = reported <= TimeSpan.FromSeconds(1.5)
+                        && _lastReportedValue != TimeSpan.MinValue
+                        && _lastReportedValue <= TimeSpan.FromSeconds(1.5);
+                    var postSeekMoved = _seekAnchorActive
+                        && _seekBaselineReported != TimeSpan.MinValue
+                        && reported != _seekBaselineReported
+                        && !isLowJitter;
+                    var jumped = postSeekMoved || IsSignificantJump(reported, _lastReportedValue);
+                    _lastReportedValue = reported;
+                    _lastAdvanceAt = now;
+
+                    if (jumped)
+                    {
+                        _positionWindowStart = now;
+                        _positionWindowPosition = reported;
+                    }
+
+                    // 播放器自身确实移动了上报位置时重锚；不报位置导致始终停留在原值时不会误触发
+                    if ((!_positionReliable || _seekAnchorActive) && jumped)
+                    {
+                        var reanchored = reported + age;
+                        if (reanchored < TimeSpan.Zero) reanchored = TimeSpan.Zero;
+                        _wallAnchorPosition = reanchored;
+                        _wallAnchorAt = now;
+                        _seekAnchorActive = false;
+                    }
+                }
+                else if (_lastAdvanceAt != DateTimeOffset.MinValue && lastUpdated > _lastAdvanceAt)
+                {
+                    // 播放器只更新了 LastUpdatedTime 而位置值不动：用距上次位置真正变化的时间外推，避免进度卡死或倒退
+                    var sinceAdvance = now - _lastAdvanceAt;
+                    if (sinceAdvance > age && sinceAdvance <= TimeSpan.FromMinutes(30))
+                        age = sinceAdvance;
+                }
+
+                // ---- 观测窗口：判断这个播放器到底有没有在报位置 ----
+                // B 站 UWP/PC、部分网页播放器只把位置在 0/1 之间抖一下，或根本不更新 SMTC 位置。
+                if (_positionWindowStart == DateTimeOffset.MinValue)
+                {
+                    _positionWindowStart = now;
+                    _positionWindowPosition = reported;
+                }
+                else if ((now - _positionWindowStart).TotalSeconds >= 5)
+                {
+                    var advanced = reported - _positionWindowPosition;
+                    var reliable = advanced >= TimeSpan.FromSeconds(2.5);
+                    if (reliable != _positionReliable)
+                    {
+                        _positionReliable = reliable;
+                        if (!reliable)
+                        {
+                            // 无缝接续当前已推进或刚对齐的位置，不回退覆盖成 0:00
+                            var currentPos = _seekAnchorActive
+                                ? _wallAnchorPosition + (_wallAnchorAt == DateTimeOffset.MinValue ? TimeSpan.Zero : now - _wallAnchorAt)
+                                : (_lastResult > compensation ? _lastResult - compensation : reported + age);
+                            _wallAnchorPosition = currentPos < TimeSpan.Zero ? TimeSpan.Zero : currentPos;
+                            _wallAnchorAt = now;
+                            _seekAnchorActive = false;
+                        }
+                        else
+                        {
+                            _wallAnchorPosition = reported + age;
+                            _wallAnchorAt = now;
+                            _seekAnchorActive = false;
+                        }
+                        Musebase.Windows.Log.Write(reliable
+                            ? $"[sync] 播放器位置恢复正常（5 秒内前进 {advanced.TotalSeconds:0.0}s），恢复跟随上报值"
+                            : $"[sync] 播放器 5 秒内只前进 {advanced.TotalSeconds:0.0}s，判定不报位置，改用本机计时推算");
+                    }
+                    _positionWindowStart = now;
+                    _positionWindowPosition = reported;
+                }
+
+                if (_positionReliable && _seekAnchorActive && _lastSeekAt != DateTimeOffset.MinValue
+                    && (now - _lastSeekAt).TotalSeconds > 3.0)
+                {
+                    _seekAnchorActive = false;
+                }
+
+                if (!_positionReliable || _seekAnchorActive)
+                {
+                    // 不报/间歇报位置的播放器或刚手工对准时：从锚点按本机流逝时间平滑推进
+                    if (_wallAnchorAt == DateTimeOffset.MinValue)
+                        _wallAnchorAt = now;
+                    var elapsed = _wallAnchorPosition + (now - _wallAnchorAt);
+                    if (elapsed < TimeSpan.Zero) elapsed = TimeSpan.Zero;
+                    if (CurrentTrack?.Duration is { } dur && elapsed > dur) elapsed = dur;
+                    result = elapsed + compensation;
+                }
+                else
+                {
+                    result = reported + age + compensation;
+                    _wallAnchorPosition = reported + age;
+                    _wallAnchorAt = now;
+                }
+
+                // 上报位置偶尔回退一两百毫秒：在同曲播放中依本地时间平滑递增，避免进度条倒退
+                if (trackKey == _smoothedTrackKey
+                    && _smoothedPosition != TimeSpan.MinValue
+                    && _lastSampleAt != DateTimeOffset.MinValue
+                    && result < _smoothedPosition
+                    && _smoothedPosition - result <= BackwardTolerance)
+                {
+                    var localElapsed = now - _lastSampleAt;
+                    if (localElapsed > TimeSpan.Zero && localElapsed < TimeSpan.FromSeconds(0.5))
+                        result = _smoothedPosition + localElapsed;
+                }
+
+                _smoothedPosition = result;
+                _smoothedTrackKey = trackKey;
+                _lastSampleAt = now;
+            }
+
+            if (result < TimeSpan.Zero) result = TimeSpan.Zero;
+            _lastResult = result;
         }
-        _smoothedPosition = position;
-        _smoothedTrackKey = trackKey;
-        return position;
+
+        if (_timingDiagnostics)
+            LogTimingSample(reported, lastUpdated, now, result);
+
+        return result;
+    }
+
+    private static bool IsSignificantJump(TimeSpan current, TimeSpan previous)
+    {
+        if (previous == TimeSpan.MinValue) return false;
+        // 忽略 0s <-> 1s 抖动，仅响应真实拖动/切段/重置
+        if (current <= TimeSpan.FromSeconds(1.5) && previous <= TimeSpan.FromSeconds(1.5))
+            return false;
+        return Math.Abs((current - previous).TotalSeconds) > 1.5;
+    }
+
+    /// 时同步诊断（方案 0）：只在播放器真的给出**新**位置样本时记一行，不会刷屏。
+    ///
+    /// 字段判读：
+    /// - <c>reported</c>：播放器上报的播放位置；
+    /// - <c>gap</c>：距上一次上报经过的真实时间；<c>advanced</c>：上报位置实际前进了多少；
+    /// - <c>skew</c> = advanced − gap。持续不为 0 → 播放器位置与墙钟速率不同，
+    ///   误差会随播放时长累积（这就是"越到后面越偏"）；
+    /// - <c>stale</c> = now − LastUpdatedTime：播放器有多"懒"，越大说明外推越久、误差上界越大；
+    /// - <c>residual</c> = 本次上报 − 按上次样本外推的预测值。≈0 表示外推准；
+    ///   恒定偏置 = 固定延迟（补偿值问题）；秒级跳变 = seek / 切歌 / 播放器重新计时；
+    /// - <c>comp</c>：当前生效的固定补偿；
+    /// - <c>est</c>：我们最终给出的位置；<c>d</c> = est − reported，正数表示我们比播放器报告更靠前；
+    /// - <c>cor</c>：自校准已施加的毫秒数；<c>max</c>：本曲观测到的最大残差（校准上限）。
+    /// 每 30 个样本再打一行汇总（平均 skew / residual / stale），方便一眼定性。
+    /// </summary>
+    private void LogTimingSample(TimeSpan reported, DateTimeOffset lastUpdated, DateTimeOffset now, TimeSpan estimate)
+    {
+        lock (_diagLock)
+        {
+            if (!_timingDiagnostics) return;
+
+            var trackKey = CurrentTrack is { } track ? $"{track.Title}|{track.Artist}" : "(无曲目)";
+            var playerKey = CurrentTrack?.SourceAppId ?? "(未知)";
+            var effectiveComp = EffectiveLatencyCompensation;
+            if (!string.Equals(trackKey, _diagTrackKey, StringComparison.Ordinal)
+                || !string.Equals(playerKey, _diagPlayerKey, StringComparison.Ordinal))
+            {
+                FlushTimingSummary();
+                Musebase.Windows.Log.Write($"[timing] ---- 曲目切换 → {trackKey}"
+                    + $"｜播放器={playerKey}｜补偿={effectiveComp.TotalMilliseconds:0}ms ----");
+                _diagTrackKey = trackKey;
+                _diagPlayerKey = playerKey;
+                _diagLastUpdate = DateTimeOffset.MinValue;
+                _diagLastSeenAt = DateTimeOffset.MinValue;
+                _diagLastReported = TimeSpan.MinValue;
+            }
+
+            if (lastUpdated == _diagLastUpdate && reported == _diagLastReported) return; // 不是新样本
+            if (!IsPlaying) return; // 暂停时位置本就不前进，记下来只会污染统计
+
+            var gap = _diagLastSeenAt == DateTimeOffset.MinValue ? double.NaN : (now - _diagLastSeenAt).TotalSeconds;
+            var advanced = _diagLastReported == TimeSpan.MinValue ? double.NaN : (reported - _diagLastReported).TotalSeconds;
+            var skewMs = double.IsNaN(gap) ? double.NaN : (advanced - gap) * 1000;
+            var residual = double.IsNaN(gap) ? double.NaN : reported.TotalSeconds - (_diagLastReported.TotalSeconds + gap);
+            var stale = (now - lastUpdated).TotalSeconds;
+
+            var line = $"[timing] t={reported.TotalSeconds:0.000}s stale={stale:0.000}s"
+                + $" comp={effectiveComp.TotalMilliseconds:0}ms"
+                + $" est={estimate.TotalSeconds:0.000}s d={(estimate - reported).TotalSeconds:+0.000;-0.000;0.000}s";
+            if (!double.IsNaN(gap))
+                line += $" gap={gap:0.000}s advanced={advanced:0.000}s"
+                    + $" skew={skewMs:+0;-0;0}ms residual={residual:+0.000;-0.000;0.000}s";
+            Musebase.Windows.Log.Write(line);
+
+            _diagSamples++;
+            // 汇总只统计"正常播放"的样本：seek/切歌造成的秒级跳变不参与平均
+            var normal = !double.IsNaN(residual) && Math.Abs(residual) <= 1.0 && Math.Abs(skewMs) <= 500;
+            if (normal)
+            {
+                _diagSkewSumMs += skewMs;
+                _diagSkewCount++;
+                _diagResidualSum += residual;
+                _diagResidualCount++;
+                _diagStaleSum += stale;
+                _diagStaleCount++;
+            }
+            if (_diagSamples % 30 == 0) FlushTimingSummary();
+
+            _diagLastUpdate = lastUpdated;
+            _diagLastSeenAt = now;
+            _diagLastReported = reported;
+        }
+    }
+
+    private void FlushTimingSummary()
+    {
+        if (_diagSamples == 0) return;
+        Musebase.Windows.Log.Write($"[timing] 汇总 样本={_diagSamples}"
+            + (_diagSkewCount > 0 ? $" 平均skew={_diagSkewSumMs / _diagSkewCount:+0;-0;0}ms" : "")
+            + (_diagResidualCount > 0 ? $" 平均residual={_diagResidualSum / _diagResidualCount:+0.000;-0.000;0.000}s" : "")
+            + (_diagStaleCount > 0 ? $" 平均stale={_diagStaleSum / _diagStaleCount:0.000}s" : ""));
+        ResetTimingSummaryCounters();
+    }
+
+    private void ResetTimingSummaryCounters()
+    {
+        _diagSamples = 0;
+        _diagSkewSumMs = 0;
+        _diagSkewCount = 0;
+        _diagResidualSum = 0;
+        _diagResidualCount = 0;
+        _diagStaleSum = 0;
+        _diagStaleCount = 0;
+    }
+
+    private void ResetTimingDiagnosticsState()
+    {
+        _diagTrackKey = null;
+        _diagPlayerKey = null;
+        _diagLastUpdate = DateTimeOffset.MinValue;
+        _diagLastSeenAt = DateTimeOffset.MinValue;
+        _diagLastReported = TimeSpan.MinValue;
+        ResetTimingSummaryCounters();
     }
 
     public void Dispose()
@@ -561,10 +1569,13 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
         _pollTimer = null;
         lock (_lock)
         {
+            CancelThumbVerifyLocked();
+            _thumbReadyTcs?.TrySetResult(false);
             if (_session is not null)
             {
                 _session.MediaPropertiesChanged -= OnMediaPropertiesChanged;
                 _session.PlaybackInfoChanged -= OnPlaybackInfoChanged;
+                _session.TimelinePropertiesChanged -= OnTimelinePropertiesChanged;
                 _session = null;
             }
         }

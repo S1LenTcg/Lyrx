@@ -1,6 +1,6 @@
 namespace Musebase.Engine;
 
-/// <summary>가사 검색·표시 상태 종류(현지화는 소비자 UI가 담당).</summary>
+/// <summary>歌词搜索与显示状态的种类（本地化由消费者 UI 负责）。</summary>
 public enum LyricsStatusKind
 {
     NoTrack,
@@ -15,8 +15,8 @@ public enum LyricsStatusKind
 }
 
 /// <summary>
-/// 엔진이 발행하는 구조화된 상태. 문자열/현지화 대신 종류+데이터를 전달해
-/// 엔진을 UI(로컬라이제이션)에서 분리한다. 소비자가 Loc 등으로 문구를 만든다.
+/// 引擎发布的结构化状态。传递种类+数据而不是字符串/本地化文案，
+/// 从而把引擎与 UI（本地化）解耦。由消费者用 Loc 等生成文案。
 /// </summary>
 public sealed record LyricsStatus(
     LyricsStatusKind Kind,
@@ -25,17 +25,17 @@ public sealed record LyricsStatus(
     double? Quality = null);
 
 /// <summary>
-/// 대상 언어 번역의 표시 상태(가사 소스/품질 옆에 표기). 현지화는 소비자 UI가 담당.
-/// UI는 예: "가사: QQMusic (품질 1.04) · 번역: 한도초과"처럼 소스 텍스트 옆에 붙인다.
+/// 目标语言翻译的显示状态（标注在歌词来源/质量旁边）。本地化由消费者 UI 负责。
+/// UI 会像 "歌词: QQMusic (质量 1.04) · 翻译: 配额超限" 这样贴在来源文本旁边。
 /// </summary>
 public enum TranslationDisplayStatus
 {
-    None,        // 번역 엔진 꺼짐/불필요(대상=중국어 등) — 표기 안 함
-    Translating, // 번역 진행 중
-    Live,        // 이번에 번역 API로 채움(정상 번역)
-    Cache,       // 캐시에서 채움(오프라인/재재생)
-    Quota,       // 한도 초과·요청 제한으로 실패
-    Failed,      // 그 외 실패(인증/서버/네트워크)
-    Disabled,      // 사용자가 API 번역을 끔 — 채우지 못한 줄이 남아 있음(번역 없이 표시 중)
-    DisabledCached, // 사용자가 API 번역을 껐지만 필요한 줄이 캐시/기존 번역으로 모두 채워짐(번역은 정상 표시)
+    None,        // 翻译引擎关闭 / 不需要（目标=中文等）—— 不标注
+    Translating, // 翻译进行中
+    Live,        // 本次由翻译 API 填充（正常翻译）
+    Cache,       // 由缓存填充（离线 / 重新播放）
+    Quota,       // 因配额超限、请求受限而失败
+    Failed,      // 其他失败（认证/服务器/网络）
+    Disabled,      // 用户关闭了 API 翻译 —— 仍有未填充的行（正在无翻译显示）
+    DisabledCached, // 用户关闭了 API 翻译，但需要的行已由缓存/既有翻译全部填充（翻译正常显示）
 }

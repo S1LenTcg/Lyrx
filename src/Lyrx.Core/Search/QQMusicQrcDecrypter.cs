@@ -1,13 +1,13 @@
 namespace Musebase.Core.Search;
 
 /// <summary>
-/// QQ 音乐 QRC 복호화. LyricsKit의 QQMusicQrcDecrypter.swift(QrcDecoder/QrcDecodeHelper) 포팅.
-/// 3중 DES(ddes KEY1 → des KEY2 → ddes KEY3, ECB, 8바이트 블록)로 hex 페이로드를 복호한 뒤
-/// 앞 2바이트를 제외하고 zlib 해제한다. Swift Int(64bit) 산술을 그대로 재현하기 위해 long을 사용한다.
+/// QQ 音乐 QRC 解密。LyricsKit 的 QQMusicQrcDecrypter.swift(QrcDecoder/QrcDecodeHelper) 移植。
+/// 用三重 DES(ddes KEY1 → des KEY2 → ddes KEY3，ECB，8 字节块)解密 hex 载荷，然后
+/// 去掉前 2 字节再做 zlib 解压。为忠实重现 Swift Int(64bit) 的运算，使用 long。
 /// </summary>
 internal static class QQMusicQrcDecrypter
 {
-    // 16바이트 문자열이지만 DES 키 스케줄은 앞 8바이트만 참조한다(원본과 동일).
+    // 16 字节的字符串，但 DES 密钥调度只引用前 8 字节(与原始实现一致)。
     private static readonly byte[] Key1 = "!@#)(NHLiuy*$%^&"u8.ToArray();
     private static readonly byte[] Key2 = "123ZXC!@#)(*$%^&"u8.ToArray();
     private static readonly byte[] Key3 = "!@#)(*$%^&abcDEF"u8.ToArray();
@@ -15,7 +15,7 @@ internal static class QQMusicQrcDecrypter
     private const int Encrypt = 1;
     private const int Decrypt = 0;
 
-    /// <summary>hex 문자열 → 복호·해제된 QRC 텍스트. 실패 시 null.</summary>
+    /// <summary>hex 字符串 → 解密并解压后的 QRC 文本。失败时为 null。</summary>
     public static string? Decode(string hex)
     {
         byte[] data;
@@ -37,10 +37,10 @@ internal static class QQMusicQrcDecrypter
         return ZlibInflate.InflateToString(data);
     }
 
-    /// <summary>DES 암호화(ENCRYPT 스케줄)로 각 8바이트 블록을 in-place 변환.</summary>
+    /// <summary>按 DES 加密(ENCRYPT 调度)对每个 8 字节块原地变换。</summary>
     internal static void Des(byte[] data, byte[] key, int len) => Crypt(data, key, len, Encrypt);
 
-    /// <summary>DES 복호화(DECRYPT 스케줄)로 각 8바이트 블록을 in-place 변환.</summary>
+    /// <summary>按 DES 解密(DECRYPT 调度)对每个 8 字节块原地变换。</summary>
     internal static void Ddes(byte[] data, byte[] key, int len) => Crypt(data, key, len, Decrypt);
 
     private static void Crypt(byte[] data, byte[] key, int len, int mode)
@@ -49,7 +49,7 @@ internal static class QQMusicQrcDecrypter
         for (var i = 0; i < len; i += 8)
         {
             var n = Math.Min(8, data.Length - i);
-            var block = new long[8]; // <8 잔여 블록은 0패딩 (정상 QRC는 8바이트 정렬)
+            var block = new long[8]; // 不足 8 字节的残余块补 0(正常 QRC 都是 8 字节对齐)
             for (var j = 0; j < n; j++) block[j] = data[i + j];
             DesCrypt(block, block, schedule);
             for (var j = 0; j < n; j++) data[i + j] = (byte)(block[j] & 0xFF);
@@ -63,7 +63,7 @@ internal static class QQMusicQrcDecrypter
         return result;
     }
 
-    // ---- DES 코어 (QrcDecodeHelper 포팅) ----
+    // ---- DES 核心 (QrcDecodeHelper 移植) ----
 
     private static long BitNum(long[] a, int b, int c) =>
         ((a[b / 32 * 4 + 3 - b % 32 / 8] >> (7 - b % 8)) & 0x01L) << c;
@@ -220,7 +220,7 @@ internal static class QQMusicQrcDecrypter
         InvIP(state, output);
     }
 
-    // ---- S-Box 테이블 ----
+    // ---- S-Box 表 ----
 
     private static readonly int[] Sbox1 =
     [

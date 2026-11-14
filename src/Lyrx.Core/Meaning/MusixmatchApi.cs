@@ -3,18 +3,18 @@ using Musebase.Core.Search;
 
 namespace Musebase.Core.Meaning;
 
-/// <summary>Musixmatch가 알려 준 곡 하나. <see cref="ShareUrl"/>이 그 곡의 공식 페이지 주소다.</summary>
+/// <summary>Musixmatch 返回的单个曲目。<see cref="ShareUrl"/> 就是该曲目的官方页面地址。</summary>
 public sealed record MusixmatchTrack(long TrackId, string? ShareUrl, string? Name, string? Artist);
 
 /// <summary>
-/// Musixmatch 공식 API(<c>api.musixmatch.com/ws/1.1</c>)로 곡을 찾아 **정확한 곡 페이지 주소**를 얻는다.
+/// 通过 Musixmatch 官方 API（<c>api.musixmatch.com/ws/1.1</c>）找到曲目，得到**精确的曲目页面地址**。
 ///
-/// <b>주소를 규칙으로 만들면 안 되는 이유</b>가 실측으로 확인됐다 — <c>/lyrics/Pearl-Jam/Even-Flow</c>는
-/// 오류 없이 200을 주면서 조용히 <c>/lyrics/Pearl-Jam/Alive</c>(다른 곡!)로 넘어간다.
-/// 사용자를 엉뚱한 곡으로 보내는 실패라 추측은 금지이고, 검색 결과 페이지를 서버가 긁는 길도
-/// 익명 요청이 로그인 페이지로 리다이렉트되어 막혀 있다. 남은 정당한 길이 이 API다.
+/// <b>为什么不能按规则拼地址</b>已被实测证实 —— <c>/lyrics/Pearl-Jam/Even-Flow</c>
+/// 会不带任何错误地返回 200，却悄悄跳转到 <c>/lyrics/Pearl-Jam/Alive</c>（另一首歌！）。
+/// 这属于把用户送到错误曲目上的失败，所以禁止猜测；而由服务器抓取搜索结果页面这条路
+/// 也已被堵住：匿名请求会被重定向到登录页。剩下唯一正当的途径就是这个 API。
 ///
-/// 키는 <see href="https://developer.musixmatch.com"/>에서 발급한다. 없으면 조용히 꺼진다.
+/// 密钥在 <see href="https://developer.musixmatch.com"/> 申请。没有则静默关闭。
 /// </summary>
 public sealed class MusixmatchApi
 {
@@ -55,17 +55,17 @@ public sealed class MusixmatchApi
         }
         catch (Exception)
         {
-            return null; // 소스·링크 모두 부가 기능 — 실패해도 가사에 영향이 없어야 한다
+            return null; // 来源与链接都是附加功能 —— 即使失败也不应影响歌词
         }
     }
 
     /// <summary>
-    /// 응답에서 이 곡을 고른다(순수 함수 — 테스트 대상).
+    /// 从响应中挑出这首歌（纯函数 —— 是测试对象）。
     ///
-    /// <b>HTTP 200이어도 실패일 수 있다</b> — Musixmatch는 성공/실패를 본문의
-    /// <c>message.header.status_code</c>에 싣는다(키 오류 401, 플랜 초과 402 …).
-    /// 결과가 없을 때 <c>body</c>가 객체가 아니라 빈 배열로 오는 경우도 있어
-    /// 레코드 역직렬화 대신 <see cref="JsonDocument"/>로 방어적으로 읽는다.
+    /// <b>即使是 HTTP 200 也可能是失败</b> —— Musixmatch 把成功/失败放在正文的
+    /// <c>message.header.status_code</c> 里（密钥错误 401、套餐超限 402 …）。
+    /// 无结果时 <c>body</c> 有时不是对象而是空数组，
+    /// 因此用 <see cref="JsonDocument"/> 做防御式读取，而不用记录反序列化。
     /// </summary>
     internal static MusixmatchTrack? Pick(string json, string title, string artist)
     {
@@ -86,7 +86,7 @@ public sealed class MusixmatchApi
             var name = Text(track, "track_name");
             var by = Text(track, "artist_name");
 
-            // 검색 API는 무엇을 넣든 뭔가를 돌려준다 — 받아들이기 전에 확인한다.
+            // 搜索 API 无论输入什么都会返回点什么 —— 接收之前先核对。
             if (!MeaningMatch.IsSameSong(name, by, title, artist)) continue;
 
             var id = track.TryGetProperty("track_id", out var idEl) && idEl.TryGetInt64(out var v) ? v : 0;
@@ -98,7 +98,7 @@ public sealed class MusixmatchApi
     private static string? Text(JsonElement e, string name) =>
         e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
 
-    /// <summary>원본 표기 → 정제 표기 순으로 시도한다. 아티스트는 대표 이름 하나만 쓴다.</summary>
+    /// <summary>按"原始写法 → 清洗后写法"的顺序依次尝试。艺术家只用其代表名。</summary>
     private static IEnumerable<(string Title, string Artist)> Terms(string title, string artist)
     {
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);

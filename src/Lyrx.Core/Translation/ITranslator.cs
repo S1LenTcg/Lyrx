@@ -1,24 +1,24 @@
 namespace Musebase.Core.Translation;
 
-/// <summary>기계번역 백엔드 (DeepL 등)</summary>
+/// <summary>机器翻译后端（DeepL 等）</summary>
 public interface ITranslator
 {
     /// <summary>
-    /// 텍스트 배열을 대상 언어로 번역. 입력과 같은 길이의 배열을 반환하며
-    /// 개별 실패 항목은 null.
+    /// 把文本数组翻译成目标语言。返回与输入等长的数组，
+    /// 单条失败项为 null。
     /// </summary>
     Task<IReadOnlyList<string?>> TranslateAsync(
         IReadOnlyList<string> texts, string targetLang, CancellationToken ct = default);
 }
 
-/// <summary>라인 단위 번역 캐시. 키 = (원문, 대상 언어).</summary>
+/// <summary>按行翻译缓存。键 = (原文, 目标语言)。</summary>
 public interface ITranslationCache
 {
     string? Get(string text, string targetLang);
     void Set(string text, string targetLang, string translation);
 }
 
-/// <summary>테스트/캐시 미사용 시나리오용 인메모리 캐시</summary>
+/// <summary>用于测试/不使用缓存场景的内存缓存</summary>
 public sealed class InMemoryTranslationCache : ITranslationCache
 {
     private readonly Dictionary<(string, string), string> _store = new();

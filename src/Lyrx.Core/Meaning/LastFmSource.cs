@@ -7,10 +7,10 @@ using Musebase.Core.Search;
 namespace Musebase.Core.Meaning;
 
 /// <summary>
-/// Last.fm <c>track.getInfo</c>의 <c>wiki</c>(곡 해설)를 가져온다. 무료 API 키만 있으면 되고
-/// 인증 플로우가 없다. Genius에 About이 없는 곡을 자주 메워 준다.
+/// 获取 Last.fm <c>track.getInfo</c> 的 <c>wiki</c>（曲目解说）。只需免费 API 密钥，
+/// 没有认证流程。常能补上 Genius 里没有 About 的曲目。
 ///
-/// 본문 끝에는 항상 "Read more on Last.fm" 링크가 HTML로 붙어 오므로 잘라 낸다.
+/// 正文末尾总会有 HTML 形式的 "Read more on Last.fm" 链接，需要截掉。
 /// </summary>
 public sealed partial class LastFmSource : ISongMeaningSource
 {
@@ -49,7 +49,7 @@ public sealed partial class LastFmSource : ISongMeaningSource
                         + $"&artist={Uri.EscapeDataString(a)}&track={Uri.EscapeDataString(t)}"
                         + "&autocorrect=1";
 
-                // Last.fm은 오류도 HTTP 200에 담아 보내므로 본문을 봐야 한다.
+                // Last.fm 连错误也放在 HTTP 200 里返回，所以必须看正文。
                 var body = await _http.GetFromJsonAsync<LastFmEnvelope>(url, Json, cts.Token).ConfigureAwait(false);
                 var wiki = body?.Track?.Wiki;
                 var text = Clean(wiki?.Content) ?? Clean(wiki?.Summary);
@@ -60,7 +60,7 @@ public sealed partial class LastFmSource : ISongMeaningSource
         }
         catch (Exception)
         {
-            return null; // 조용한 강등
+            return null; // 静默降级
         }
     }
 
@@ -78,7 +78,7 @@ public sealed partial class LastFmSource : ISongMeaningSource
         }
     }
 
-    /// <summary>HTML 태그와 꼬리표("Read more on Last.fm")를 걷어 낸다.</summary>
+    /// <summary>清除 HTML 标签与尾巴标记（"Read more on Last.fm"）。</summary>
     private static string? Clean(string? raw)
     {
         if (string.IsNullOrWhiteSpace(raw)) return null;
@@ -95,7 +95,7 @@ public sealed partial class LastFmSource : ISongMeaningSource
     [GeneratedRegex(@"\s+")]
     private static partial Regex WhitespaceRegex();
 
-    // ---- 응답 모델(필요한 필드만) ----
+    // ---- 响应模型（仅保留需要的字段）----
 
     private sealed record LastFmEnvelope(LastFmTrack? Track);
     private sealed record LastFmTrack(string? Url, LastFmWiki? Wiki);

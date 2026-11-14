@@ -3,9 +3,9 @@ using System.Text.RegularExpressions;
 namespace Musebase.Core;
 
 /// <summary>
-/// 가사 라인 첨부(번역, 인라인 타임태그 등). LyricsKit의 LyricsLine.Attachments 포팅.
-/// 값은 직렬화 문자열로 보관하고, 필요한 타입만 헬퍼로 해석한다.
-/// (후리가나/로마자 RangeAttribute는 PRD 비목표라 제외)
+/// 歌词行附件（翻译、内联时间标签等）。LyricsKit 的 LyricsLine.Attachments 移植。
+/// 值以序列化字符串保存，只由辅助方法解析出需要的类型。
+/// （注音/罗马字 RangeAttribute 不属于 PRD 目标，故排除）
 /// </summary>
 public sealed class LineAttachments : IEquatable<LineAttachments>
 {
@@ -34,7 +34,7 @@ public sealed class LineAttachments : IEquatable<LineAttachments>
         string.IsNullOrEmpty(languageCode) ? TagTranslationPrefix : $"{TagTranslationPrefix}:{languageCode}";
 
     /// <summary>
-    /// 번역 취득. 언어 후보 순서대로 찾고, 후보가 없으면 "tr" → 임의의 "tr*" 태그 순.
+    /// 获取翻译。按语言候选顺序查找，没有候选时按 "tr" → 任意 "tr*" 标签的顺序。
     /// </summary>
     public string? Translation(params string?[] languageCodeCandidates)
     {
@@ -54,7 +54,7 @@ public sealed class LineAttachments : IEquatable<LineAttachments>
         return null;
     }
 
-    /// <summary>글자 단위 카라오케용 인라인 타임태그. 없거나 형식이 다르면 null.</summary>
+    /// <summary>字符级卡拉OK用的内联时间标签。没有该标签或格式不符时返回 null。</summary>
     public InlineTimeTags? GetInlineTimeTags() =>
         _content.TryGetValue(TagTimeTag, out var raw) ? InlineTimeTags.Parse(raw) : null;
 
@@ -83,8 +83,8 @@ public sealed class LineAttachments : IEquatable<LineAttachments>
 }
 
 /// <summary>
-/// 인라인 타임태그 목록: &lt;msec,charIndex&gt;... + 선택적 &lt;durationMsec&gt;.
-/// 라인 시작 기준 오프셋(초)과 적용 문자 인덱스.
+/// 内联时间标签列表：&lt;msec,charIndex&gt;... + 可选的 &lt;durationMsec&gt;。
+/// 以行首为基准的偏移（秒）与生效的字符索引。
 /// </summary>
 public sealed record InlineTimeTags(IReadOnlyList<InlineTimeTags.Entry> Tags, double? Duration)
 {
@@ -102,7 +102,7 @@ public sealed record InlineTimeTags(IReadOnlyList<InlineTimeTags.Entry> Tags, do
         if (tags.Count == 0) return null;
 
         double? duration = null;
-        // <msec,idx>가 아닌 단독 <msec>만 지속시간으로 취급
+        // 只把不是 <msec,idx> 形式的单独 <msec> 视为持续时长
         foreach (Match m in LrcRegex.InlineDuration().Matches(raw))
         {
             if (!m.Groups[1].Value.Contains(','))
@@ -115,9 +115,9 @@ public sealed record InlineTimeTags(IReadOnlyList<InlineTimeTags.Entry> Tags, do
     }
 
     /// <summary>
-    /// 라인 시작 기준 경과 시각(초)에 도달한 (소수) 글자 인덱스.
-    /// 태그 구간을 선형 보간한다. 마지막 태그 이후는 마지막 인덱스에 고정.
-    /// 글자 단위 카라오케 채움에서 채울 글자 위치를 구하는 데 쓴다.
+    /// 相对于行首的经过时间（秒）所到达的（小数）字符索引。
+    /// 在标签区间内做线性插值。最后一个标签之后固定在最后一个索引。
+    /// 用于字符级卡拉OK填充时求出应填充到的字符位置。
     /// </summary>
     public double CharIndexAt(double time)
     {
