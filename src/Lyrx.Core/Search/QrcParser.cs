@@ -52,6 +52,7 @@ internal static class QrcParser
 
         foreach (var (k, v) in idTags) lyrics.IdTags[k] = v;
         lyrics.Metadata.AttachmentTags = new HashSet<string> { LineAttachments.TagTimeTag };
+        lyrics.FoldInterleavedTranslations();
         return lyrics;
     }
 }

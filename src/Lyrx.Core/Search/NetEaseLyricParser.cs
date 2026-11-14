@@ -96,6 +96,7 @@ internal static class NetEaseLyricParser
         }
 
         lyrics.Metadata.AttachmentTags = new HashSet<string> { LineAttachments.TagTimeTag };
+        lyrics.FoldInterleavedTranslations();
         return lyrics;
     }
 }

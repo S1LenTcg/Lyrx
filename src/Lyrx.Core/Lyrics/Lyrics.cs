@@ -89,55 +89,139 @@ public sealed class Lyrics
     }
 
     /// <summary>
-    /// 折叠“同时间戳双语交错”LRC（例如部分歌词源把原文和译文写成同时间戳的连续两行）：
-    /// 若整首歌存在多组同时间戳配对，则把第二行并入第一行的默认译文标签，受「文A」开关统一控制。
+    /// 折叠交错双语歌词（同时间戳配对，或"一句外文原词紧跟一句纯中文译文"且整曲占比达标的顺序配对）：
+    /// 把译文行并入原词行的默认译文标签，受「文A」开关统一控制。
     /// </summary>
-    private void FoldInterleavedTranslations()
+    internal void FoldInterleavedTranslations()
     {
-        const double sameTimeThreshold = 0.02;
-
-        static bool IsCreditLine(string s) =>
-            s.Contains('：') || s.Contains(':') || s.StartsWith("作词", StringComparison.Ordinal) || s.StartsWith("作曲", StringComparison.Ordinal);
-
-        bool CanPair(int i)
+        var seqPairs = CountPairs(IsSequentialTranslationPair);
+        if (seqPairs >= 4)
         {
-            if (i + 1 >= Lines.Count) return false;
-            var a = Lines[i];
-            var b = Lines[i + 1];
-            if (Math.Abs(b.Position - a.Position) >= sameTimeThreshold) return false;
-            if (string.IsNullOrWhiteSpace(a.Content) || string.IsNullOrWhiteSpace(b.Content)) return false;
-            if (a.Attachments.Translation() is not null || b.Attachments.Translation() is not null) return false;
-            if (string.Equals(a.Content.Trim(), b.Content.Trim(), StringComparison.OrdinalIgnoreCase)) return false;
-            if (a.Position <= 0.5 && IsCreditLine(a.Content) && IsCreditLine(b.Content)) return false;
-            return true;
-        }
-
-        var pairCount = 0;
-        for (var i = 0; i < Lines.Count - 1; i++)
-        {
-            if (CanPair(i))
+            var eligibleCount = Lines.Count(l =>
+                !string.IsNullOrWhiteSpace(l.Content)
+                && l.Attachments.Translation() is null
+                && !IsMetadataCreditLine(l.Content));
+            if (eligibleCount > 0 && (2.0 * seqPairs / eligibleCount) >= 0.65)
             {
-                pairCount++;
-                i++;
+                ApplyFold(IsSequentialTranslationPair);
+                return;
             }
         }
-        if (pairCount < 3) return;
 
-        var folded = new List<LyricsLine>(Lines.Count - pairCount);
+        if (CountPairs(IsSameTimePair) >= 3)
+            ApplyFold(IsSameTimePair);
+    }
+
+    private bool IsSameTimePair(int i)
+    {
+        if (i + 1 >= Lines.Count) return false;
+        var a = Lines[i];
+        var b = Lines[i + 1];
+        if (Math.Abs(b.Position - a.Position) >= 0.02) return false;
+        if (string.IsNullOrWhiteSpace(a.Content) || string.IsNullOrWhiteSpace(b.Content)) return false;
+        if (a.Attachments.Translation() is not null || b.Attachments.Translation() is not null) return false;
+        if (string.Equals(a.Content.Trim(), b.Content.Trim(), StringComparison.OrdinalIgnoreCase)) return false;
+        return !(a.Position <= 0.5 && IsIntroColonCredit(a.Content) && IsIntroColonCredit(b.Content));
+    }
+
+    private bool IsSequentialTranslationPair(int i)
+    {
+        if (i + 1 >= Lines.Count) return false;
+        var a = Lines[i];
+        var b = Lines[i + 1];
+        var dt = b.Position - a.Position;
+        if (dt < -0.02 || dt > 15.0) return false;
+        if (string.IsNullOrWhiteSpace(a.Content) || string.IsNullOrWhiteSpace(b.Content)) return false;
+        if (a.Attachments.Translation() is not null || b.Attachments.Translation() is not null) return false;
+        if (IsMetadataCreditLine(a.Content) || IsMetadataCreditLine(b.Content)) return false;
+        return IsForeignSourceLine(a.Content) && IsChineseTranslationLine(b.Content);
+    }
+
+    private int CountPairs(Func<int, bool> matcher)
+    {
+        var pairs = 0;
+        for (var i = 0; i < Lines.Count - 1; i++)
+        {
+            if (!matcher(i)) continue;
+            pairs++;
+            i++;
+        }
+        return pairs;
+    }
+
+    private void ApplyFold(Func<int, bool> matcher)
+    {
+        var folded = new List<LyricsLine>(Lines.Count);
+        var trTag = LineAttachments.TranslationTag();
+        var attached = false;
         for (var i = 0; i < Lines.Count; i++)
         {
             var current = Lines[i];
-            if (CanPair(i))
+            if (matcher(i))
             {
                 var tr = Lines[i + 1].Content.Trim();
                 if (tr.Length > 0 && tr != "//")
-                    current.Attachments[LineAttachments.TranslationTag()] = tr;
+                {
+                    current.Attachments[trTag] = tr;
+                    attached = true;
+                }
                 i++;
             }
             folded.Add(current);
         }
         Lines.Clear();
         Lines.AddRange(folded);
+        if (attached && !Metadata.AttachmentTags.Contains(trTag))
+            Metadata.AttachmentTags = new HashSet<string>(Metadata.AttachmentTags) { trTag };
+    }
+
+    private static bool IsIntroColonCredit(string s) =>
+        s.Contains('：') || s.Contains(':') || IsMetadataCreditLine(s);
+
+    private static bool IsMetadataCreditLine(string s)
+    {
+        var t = s.TrimStart();
+        return t.StartsWith("作词", StringComparison.Ordinal)
+            || t.StartsWith("作曲", StringComparison.Ordinal)
+            || t.StartsWith("编曲", StringComparison.Ordinal)
+            || t.StartsWith("制作", StringComparison.Ordinal)
+            || t.StartsWith("混音", StringComparison.Ordinal)
+            || t.StartsWith("母带", StringComparison.Ordinal)
+            || t.StartsWith("和声", StringComparison.Ordinal)
+            || t.StartsWith("录音", StringComparison.Ordinal)
+            || t.StartsWith("监制", StringComparison.Ordinal)
+            || t.StartsWith("词：", StringComparison.Ordinal) || t.StartsWith("词:", StringComparison.Ordinal)
+            || t.StartsWith("曲：", StringComparison.Ordinal) || t.StartsWith("曲:", StringComparison.Ordinal)
+            || t.StartsWith("翻译", StringComparison.Ordinal)
+            || t.StartsWith("Lyrics by", StringComparison.OrdinalIgnoreCase)
+            || t.StartsWith("Composed by", StringComparison.OrdinalIgnoreCase)
+            || t.StartsWith("Arranged by", StringComparison.OrdinalIgnoreCase)
+            || t.StartsWith("Produced by", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static (int cjk, int kana, int hangul, int latin) ClassifyScript(string s)
+    {
+        int cjk = 0, kana = 0, hangul = 0, latin = 0;
+        foreach (var c in s)
+        {
+            if (c >= '\u4E00' && c <= '\u9FFF') cjk++;
+            else if (c >= '\u3040' && c <= '\u30FF') kana++;
+            else if (c >= '\uAC00' && c <= '\uD7AF') hangul++;
+            else if (char.IsLetter(c)) latin++;
+        }
+        return (cjk, kana, hangul, latin);
+    }
+
+    private static bool IsForeignSourceLine(string s)
+    {
+        var (cjk, kana, hangul, latin) = ClassifyScript(s);
+        return kana > 0 || (cjk == 0 && (hangul > 0 || latin > 0));
+    }
+
+    private static bool IsChineseTranslationLine(string s)
+    {
+        var (cjk, kana, hangul, latin) = ClassifyScript(s);
+        return cjk > 0 && kana == 0 && hangul == 0 && cjk >= latin;
     }
 
     /// <summary>[offset:] 标签（毫秒）</summary>

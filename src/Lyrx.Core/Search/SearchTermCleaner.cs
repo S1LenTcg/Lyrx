@@ -244,9 +244,9 @@ public static partial class SearchTermCleaner
     [GeneratedRegex(@"\s(?:feat|ft|featuring)\b\.?\s.*$", RegexOptions.IgnoreCase)]
     private static partial Regex InlineFeatRegex();
 
-    // " • 智能随机播放推荐" / " • 为你推荐的歌单" — 流媒体应用在艺人后面追加的
-    // 上下文标注（实测：Spotify Android）。只针对两侧带空格的圆点，名字内部的符号则保留。
-    [GeneratedRegex(@"\s[•·]\s.*$")]
+    // " • 智能随机播放推荐"（Spotify Android）与 "艺人 — 专辑名"（Apple Music Windows 等）—
+    // 只针对两侧带空白符的分隔符，艺人名内部的连字符（如 G-Dragon）则保留。
+    [GeneratedRegex(@"\s+[•·—]\s+.*$")]
     private static partial Regex BulletSuffixRegex();
 
     // 视频站点名。B 站 UWP / AcFun 这类应用的 SMTC 元数据里，艺人常被填成站点名，

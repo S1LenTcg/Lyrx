@@ -80,6 +80,7 @@ internal static class KrcParser
                     new HashSet<string>(lyrics.Metadata.AttachmentTags) { LineAttachments.TranslationTag() };
         }
 
+        lyrics.FoldInterleavedTranslations();
         return lyrics;
     }
 
