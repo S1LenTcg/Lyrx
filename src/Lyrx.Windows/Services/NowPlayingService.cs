@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Threading;
 using Windows.Media;
 using Windows.Media.Control;
@@ -233,6 +234,9 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
     private TimeSpan _wallAnchorPosition;
     private DateTimeOffset _wallAnchorAt = DateTimeOffset.MinValue;
     private DateTimeOffset _lastSeekAt = DateTimeOffset.MinValue;
+    private bool _seekAnchorActive;
+    private TimeSpan _seekBaselineReported = TimeSpan.MinValue;
+    private long _seekSeq;
 
     /// <summary>本机开始计时的那首曲目（配上 <see cref="_trackPlayStartedAt"/> 使用）。</summary>
     private string? _timingTrackKey;
@@ -255,12 +259,6 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
     /// </summary>
     public TimeSpan LatencyCompensation { get; set; } = TimeSpan.FromMilliseconds(1400);
 
-    /// <summary>
-    /// 浏览器播放位置的固定补偿（默认 -1.5s）。
-    /// 网页视频（如 B 站）音频管线缓冲与视频前奏通常使人声滞后约 1.5 秒，负向补偿可让歌词与人声对齐。
-    /// </summary>
-    public TimeSpan BrowserLatencyCompensation { get; set; } = TimeSpan.FromMilliseconds(-1500);
-
     /// <summary>判断是否为 Apple Music 客户端。</summary>
     public static bool IsAppleMusicSource(string? appId)
     {
@@ -270,23 +268,36 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
     }
 
     /// <summary>
-    /// 当前播放源生效的时延补偿：Apple Music 使用 +1.4s，浏览器使用 -1.5s，其他播放器使用 0ms。
+    /// 当前播放源生效的时延补偿：Apple Music 使用 <see cref="LatencyCompensation"/>，其他情况使用 0ms。
     /// </summary>
     public TimeSpan EffectiveLatencyCompensation
     {
         get
         {
             var appId = CurrentTrack?.SourceAppId ?? _session?.SourceAppUserModelId;
-            if (IsAppleMusicSource(appId)) return LatencyCompensation;
-            if (IsBrowserSource(appId)) return BrowserLatencyCompensation;
-            return TimeSpan.Zero;
+            return IsAppleMusicSource(appId) ? LatencyCompensation : TimeSpan.Zero;
         }
     }
 
     // ---- 时同步诊断（方案 0）----
 
-    /// <summary>是否记录播放器位置样本，用于判断歌词时间误差属于哪种成因。诊断完改成 false 即可安静。</summary>
-    public bool TimingDiagnostics { get; set; } = true;
+    private volatile bool _timingDiagnostics;
+    private readonly object _diagLock = new();
+
+    /// <summary>是否记录播放器位置样本（<c>[timing]</c>），用于判断歌词时间误差属于哪种成因。默认关闭。</summary>
+    public bool TimingDiagnostics
+    {
+        get => _timingDiagnostics;
+        set
+        {
+            lock (_diagLock)
+            {
+                if (_timingDiagnostics == value) return;
+                _timingDiagnostics = value;
+                if (!value) ResetTimingDiagnosticsState();
+            }
+        }
+    }
 
     private DateTimeOffset _diagLastUpdate = DateTimeOffset.MinValue;
     private DateTimeOffset _diagLastSeenAt = DateTimeOffset.MinValue;
@@ -581,40 +592,73 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
         catch { return false; }
     }
 
-    /// <summary>跳转播放进度。若物理播放器支持则改变播放进度；不支持时自动校准本地推算时钟。</summary>
+    /// <summary>跳转播放进度。若物理播放器支持则改变播放进度；不支持或仅校准时钟时对齐本地推算基准。</summary>
     public async Task<bool> SeekAsync(TimeSpan position)
     {
+        Session? session;
+        lock (_lock) session = _session;
+
+        var now = DateTimeOffset.Now;
         var compensation = EffectiveLatencyCompensation;
         var physicalTicks = Math.Max(0, (position - compensation).Ticks);
         var physicalTarget = TimeSpan.FromTicks(physicalTicks);
         var displayTarget = position < TimeSpan.Zero ? TimeSpan.Zero : position;
-        var now = DateTimeOffset.Now;
+        var playing = session is not null && IsSessionPlaying(session);
+        var appId = CurrentTrack?.SourceAppId ?? session?.SourceAppUserModelId;
+        var allowLocalCalibrationFallback = IsVideoSite(appId);
+        long seekSeq;
 
-        // 无论物理播放器是否支持跳转，都立即对齐本地推算基准时钟（针对 B 站等不报位置、不支持跳转的应用）
-        _lastReportedValue = physicalTarget;
-        _lastAdvanceAt = now;
-        _trackPlayStartedAt = now - physicalTarget;
-        _wallAnchorPosition = physicalTarget;
-        _wallAnchorAt = now;
-        _lastSeekAt = now;
-        _positionWindowStart = now;
-        _positionWindowPosition = physicalTarget;
-        _lastResult = displayTarget;
-        _smoothedPosition = displayTarget;
-        _lastSampleAt = now;
+        lock (_lock)
+        {
+            seekSeq = Interlocked.Increment(ref _seekSeq);
+            if (!_positionReliable) allowLocalCalibrationFallback = true;
 
-        Session? session;
-        lock (_lock) session = _session;
-        if (session is null) return false;
+            // 保存跳转前真实观测到的 SMTC 上报值；不要把 _lastReportedValue/_positionWindowPosition 改写成 target，
+            // 否则 B 站 PC 等始终报 0:00 的播放器会在下一帧被 postSeekSnap 误判为"退回 0:00"，瞬间冲掉对准结果。
+            _seekBaselineReported = _lastReportedValue;
+            _seekAnchorActive = true;
+            _trackPlayStartedAt = now - physicalTarget;
+            _wallAnchorPosition = physicalTarget;
+            _wallAnchorAt = playing ? now : DateTimeOffset.MinValue;
+            _lastSeekAt = now;
+            _lastResult = displayTarget;
+            _smoothedPosition = displayTarget;
+            _lastSampleAt = now;
+        }
+
+        if (session is null)
+        {
+            lock (_lock)
+            {
+                if (_seekSeq == seekSeq) _seekAnchorActive = false;
+            }
+            return false;
+        }
 
         try
         {
             var success = await session.TryChangePlaybackPositionAsync(physicalTicks);
-            if (success)
+            var settledAt = DateTimeOffset.Now;
+            var stillPlaying = IsSessionPlaying(session);
+
+            if (!success && !allowLocalCalibrationFallback)
             {
-                var settledAt = DateTimeOffset.Now;
-                _lastSeekAt = settledAt;
-                _wallAnchorAt = settledAt;
+                lock (_lock)
+                {
+                    // 正常报时长的音频播放器拒绝跳转时撤回超前锚点，避免歌词跑偏而音乐原地不动
+                    if (_seekSeq == seekSeq) _seekAnchorActive = false;
+                }
+                Musebase.Windows.Log.Write("[sync] 播放器拒绝物理跳转，保持真实位置");
+                return false;
+            }
+
+            lock (_lock)
+            {
+                if (_seekSeq == seekSeq)
+                {
+                    _lastSeekAt = settledAt;
+                    if (stillPlaying) _wallAnchorAt = settledAt;
+                }
             }
             Musebase.Windows.Log.Write(success
                 ? $"[smtc] 物理播放器已跳转到: {physicalTarget:mm\\:ss} (歌词={displayTarget:mm\\:ss})"
@@ -623,6 +667,15 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
         }
         catch (Exception ex)
         {
+            if (!allowLocalCalibrationFallback)
+            {
+                lock (_lock)
+                {
+                    if (_seekSeq == seekSeq) _seekAnchorActive = false;
+                }
+                Musebase.Windows.Log.Write($"[sync] 物理跳转异常: {ex.Message}");
+                return false;
+            }
             Musebase.Windows.Log.Write($"[sync] 物理跳转异常（已校准本地时钟）: {ex.Message}");
             return true;
         }
@@ -676,6 +729,17 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
         }
     }
 
+    private long _thumbnailVersion;
+    private long _trackRefreshSeq;
+    private string? _lastThumbnailSignature;
+    private volatile bool _hasThumbnail;
+
+    /// <summary>当前 SMTC 曲目封面变更计数；当同一首歌延后或更换推送 SMTC 封面时会递增。</summary>
+    public long ThumbnailVersion => Volatile.Read(ref _thumbnailVersion);
+
+    /// <summary>当前 SMTC 会话最近一次检测到的封面缩略图是否非空。</summary>
+    public bool HasThumbnail => _hasThumbnail;
+
     /// <summary>
     /// 取来正在播放曲目的专辑封面，且<b>完全按照播放应用提供的原样</b>。
     ///
@@ -693,8 +757,20 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
         try
         {
             var props = await session.TryGetMediaPropertiesAsync();
-            if (props.Thumbnail is not { } reference) return null;
+            return await ReadThumbnailBytesAsync(props.Thumbnail);
+        }
+        catch (Exception)
+        {
+            return null; // 会话消失的竞态等 — 按无封面处理
+        }
+    }
 
+    private static async Task<byte[]?> ReadThumbnailBytesAsync(
+        global::Windows.Storage.Streams.IRandomAccessStreamReference? reference)
+    {
+        if (reference is null) return null;
+        try
+        {
             using var stream = await reference.OpenReadAsync();
             if (stream.Size is 0 or > 8 * 1024 * 1024) return null; // 跳过异常尺寸
 
@@ -706,16 +782,32 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
         }
         catch (Exception)
         {
-            return null; // 会话消失的竞态等 — 按无封面处理
+            return null;
         }
+    }
+
+    private static string ComputeThumbnailSignature(byte[]? bytes) =>
+        bytes is { Length: > 0 }
+            ? $"{bytes.Length}:{Convert.ToHexString(SHA256.HashData(bytes))}"
+            : "";
+
+    private static bool SameTrackIdentity(TrackInfo? a, TrackInfo? b)
+    {
+        if (ReferenceEquals(a, b)) return true;
+        if (a is null || b is null) return false;
+        return string.Equals(a.Title, b.Title, StringComparison.Ordinal)
+            && string.Equals(a.Artist, b.Artist, StringComparison.Ordinal)
+            && string.Equals(a.SourceAppId, b.SourceAppId, StringComparison.Ordinal);
     }
 
     private async Task RefreshTrackAsync()
     {
+        var seq = Interlocked.Increment(ref _trackRefreshSeq);
         Session? session;
         lock (_lock) session = _session;
 
         TrackInfo? track = null;
+        global::Windows.Storage.Streams.IRandomAccessStreamReference? thumbRef = null;
         if (session is not null)
         {
             try
@@ -749,6 +841,7 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
                         finalTitle,
                         finalArtist,
                         album, duration, session.SourceAppUserModelId);
+                    thumbRef = props.Thumbnail;
                 }
             }
             catch
@@ -757,7 +850,8 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
             }
         }
 
-        if (!Equals(track, CurrentTrack))
+        var trackChanged = !Equals(track, CurrentTrack);
+        if (trackChanged)
         {
             CurrentTrack = track;
             lock (_lock)
@@ -775,8 +869,44 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
                 _wallAnchorPosition = TimeSpan.Zero;
                 _timingTrackKey = null;
                 _trackPlayStartedAt = DateTimeOffset.MinValue;
+                _seekAnchorActive = false;
+                _seekBaselineReported = TimeSpan.MinValue;
+                _lastThumbnailSignature = null;
+                _hasThumbnail = thumbRef is not null;
             }
             TrackChanged?.Invoke(track);
+        }
+
+        if (track is null)
+        {
+            if (seq == Volatile.Read(ref _trackRefreshSeq))
+            {
+                lock (_lock)
+                {
+                    _lastThumbnailSignature = null;
+                    _hasThumbnail = false;
+                }
+            }
+            return;
+        }
+
+        var thumbBytes = await ReadThumbnailBytesAsync(thumbRef).ConfigureAwait(false);
+        if (seq != Volatile.Read(ref _trackRefreshSeq)) return;
+
+        var sig = ComputeThumbnailSignature(thumbBytes);
+        lock (_lock)
+        {
+            if (!SameTrackIdentity(track, CurrentTrack)) return;
+            _hasThumbnail = thumbBytes is { Length: > 0 };
+            if (trackChanged)
+            {
+                _lastThumbnailSignature = sig;
+            }
+            else if (_lastThumbnailSignature is null || !string.Equals(sig, _lastThumbnailSignature, StringComparison.Ordinal))
+            {
+                _lastThumbnailSignature = sig;
+                Interlocked.Increment(ref _thumbnailVersion);
+            }
         }
     }
 
@@ -858,149 +988,176 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
         var compensation = EffectiveLatencyCompensation;
         var age = now - lastUpdated;
         if (age < TimeSpan.Zero || age > TimeSpan.FromMinutes(30)) age = TimeSpan.Zero; // 明显异常，不外推
-
-        // 换曲/首次播放时初始化本机推算锚点（若播放器已有初始位置则直接从该位置接续，避免退回 0:00）
-        if (playingNow && (!string.Equals(trackKey, _timingTrackKey, StringComparison.Ordinal)
-                           || _trackPlayStartedAt == DateTimeOffset.MinValue))
-        {
-            var initialPos = reported + age;
-            if (initialPos < TimeSpan.Zero) initialPos = TimeSpan.Zero;
-            _timingTrackKey = trackKey;
-            _trackPlayStartedAt = now - initialPos;
-            _wallAnchorPosition = initialPos;
-            _wallAnchorAt = now;
-            _positionWindowStart = DateTimeOffset.MinValue;
-            _positionReliable = true;
-            _lastReportedValue = reported;
-            _lastAdvanceAt = now;
-        }
+        var timelineValid = reported > TimeSpan.Zero || lastUpdated > DateTimeOffset.UnixEpoch;
 
         TimeSpan result;
-        if (!playingNow)
+        lock (_lock)
         {
-            if (_wallAnchorAt != DateTimeOffset.MinValue)
+            // 换曲/首次播放时初始化本机推算锚点；若 SMTC 完全未更新时间戳且位置为 0（如 B 站 PC），直接进入本机推算模式
+            if (playingNow && (!string.Equals(trackKey, _timingTrackKey, StringComparison.Ordinal)
+                               || _trackPlayStartedAt == DateTimeOffset.MinValue))
             {
-                // 刚从播放切到暂停：冻结当前锚点位置，避免恢复播放时把暂停时长算进去
-                var frozen = _positionReliable
-                    ? reported
-                    : (_lastResult > compensation ? _lastResult - compensation : _wallAnchorPosition);
-                _wallAnchorPosition = frozen < TimeSpan.Zero ? TimeSpan.Zero : frozen;
-                _wallAnchorAt = DateTimeOffset.MinValue;
-            }
-
-            if (!_positionReliable && IsSignificantJump(reported, _lastReportedValue))
-            {
+                var initialPos = reported + age;
+                if (initialPos < TimeSpan.Zero) initialPos = TimeSpan.Zero;
+                _timingTrackKey = trackKey;
+                _trackPlayStartedAt = now - initialPos;
+                _wallAnchorPosition = initialPos;
+                _wallAnchorAt = now;
+                _positionWindowStart = DateTimeOffset.MinValue;
+                _positionReliable = timelineValid;
+                _seekAnchorActive = false;
+                _seekBaselineReported = TimeSpan.MinValue;
                 _lastReportedValue = reported;
-                _lastAdvanceAt = now;
-                _wallAnchorPosition = reported < TimeSpan.Zero ? TimeSpan.Zero : reported;
-                _lastResult = _wallAnchorPosition + compensation;
+                _lastAdvanceAt = timelineValid ? now : DateTimeOffset.MinValue;
             }
 
-            // 暂停时不要回头用播放器那个 0/1 的假位置，否则进度条会跳回开头
-            result = _positionReliable ? reported + compensation : _lastResult;
-        }
-        else
-        {
-            if (reported != _lastReportedValue)
+            if (!playingNow)
             {
-                var postSeekSnap = _lastSeekAt != DateTimeOffset.MinValue
-                    && (now - _lastSeekAt).TotalSeconds <= 3.0
-                    && Math.Abs((reported - _lastReportedValue).TotalSeconds) > 0.3;
-                var jumped = postSeekSnap || IsSignificantJump(reported, _lastReportedValue);
-                _lastReportedValue = reported;
-                _lastAdvanceAt = now;
-
-                // 浏览器等不持续报位置的播放器在用户手动拖动/重播或跳转对齐关键帧时，立即重锚
-                if (!_positionReliable && jumped)
+                var useLocalClock = !_positionReliable || _seekAnchorActive;
+                if (_wallAnchorAt != DateTimeOffset.MinValue)
                 {
-                    var reanchored = reported + age;
-                    if (reanchored < TimeSpan.Zero) reanchored = TimeSpan.Zero;
-                    _wallAnchorPosition = reanchored;
-                    _wallAnchorAt = now;
-                    _positionWindowStart = now;
-                    _positionWindowPosition = reported;
+                    // 刚从播放切到暂停：冻结当前锚点位置，避免恢复播放时把暂停时长算进去
+                    var frozen = useLocalClock
+                        ? (_lastResult > compensation ? _lastResult - compensation : _wallAnchorPosition)
+                        : reported;
+                    _wallAnchorPosition = frozen < TimeSpan.Zero ? TimeSpan.Zero : frozen;
+                    _wallAnchorAt = DateTimeOffset.MinValue;
                 }
-            }
-            else if (_lastAdvanceAt != DateTimeOffset.MinValue && lastUpdated > _lastAdvanceAt)
-            {
-                // 播放器只更新了 LastUpdatedTime 而位置值不动：用距上次位置真正变化的时间外推，避免进度卡死或倒退
-                var sinceAdvance = now - _lastAdvanceAt;
-                if (sinceAdvance > age && sinceAdvance <= TimeSpan.FromMinutes(30))
-                    age = sinceAdvance;
-            }
 
-            // ---- 观测窗口：判断这个播放器到底有没有在报位置 ----
-            // B 站 UWP / 部分网页播放器只把位置在 0/1 之间抖一下，或仅在 seek/play 时更新一次。
-            if (_positionWindowStart == DateTimeOffset.MinValue)
-            {
-                _positionWindowStart = now;
-                _positionWindowPosition = reported;
-            }
-            else if ((now - _positionWindowStart).TotalSeconds >= 5)
-            {
-                var advanced = reported - _positionWindowPosition;
-                var reliable = advanced >= TimeSpan.FromSeconds(2.5);
-                if (reliable != _positionReliable)
+                if (useLocalClock && IsSignificantJump(reported, _lastReportedValue))
                 {
-                    _positionReliable = reliable;
-                    if (!reliable)
-                    {
-                        // 无缝接续当前已推进到的位置，不回跳到旧的 _trackPlayStartedAt
-                        var currentPos = _lastResult > compensation ? _lastResult - compensation : reported + age;
-                        _wallAnchorPosition = currentPos < TimeSpan.Zero ? TimeSpan.Zero : currentPos;
-                        _wallAnchorAt = now;
-                    }
-                    else
-                    {
-                        _wallAnchorPosition = reported + age;
-                        _wallAnchorAt = now;
-                    }
-                    Musebase.Windows.Log.Write(reliable
-                        ? $"[sync] 播放器位置恢复正常（5 秒内前进 {advanced.TotalSeconds:0.0}s），恢复跟随上报值"
-                        : $"[sync] 播放器 5 秒内只前进 {advanced.TotalSeconds:0.0}s，判定不报位置，改用本机计时推算");
+                    _lastReportedValue = reported;
+                    _lastAdvanceAt = now;
+                    _seekAnchorActive = false;
+                    _wallAnchorPosition = reported < TimeSpan.Zero ? TimeSpan.Zero : reported;
+                    _lastResult = _wallAnchorPosition + compensation;
                 }
-                _positionWindowStart = now;
-                _positionWindowPosition = reported;
-            }
 
-            if (!_positionReliable)
-            {
-                // 不报/间歇报位置的播放器：从冻结锚点按本机流逝时间平滑推进（暂停恢复不跳变）
-                if (_wallAnchorAt == DateTimeOffset.MinValue)
-                    _wallAnchorAt = now;
-                var elapsed = _wallAnchorPosition + (now - _wallAnchorAt);
-                if (elapsed < TimeSpan.Zero) elapsed = TimeSpan.Zero;
-                if (CurrentTrack?.Duration is { } dur && elapsed > dur) elapsed = dur;
-                result = elapsed + compensation;
+                // 暂停时若使用本地计时或刚完成人工对准，沿用本地冻结位置
+                result = useLocalClock ? _lastResult : reported + compensation;
             }
             else
             {
-                result = reported + age + compensation;
-                _wallAnchorPosition = reported + age;
-                _wallAnchorAt = now;
+                if (reported != _lastReportedValue)
+                {
+                    var isLowJitter = reported <= TimeSpan.FromSeconds(1.5)
+                        && _lastReportedValue != TimeSpan.MinValue
+                        && _lastReportedValue <= TimeSpan.FromSeconds(1.5);
+                    var postSeekMoved = _seekAnchorActive
+                        && _seekBaselineReported != TimeSpan.MinValue
+                        && reported != _seekBaselineReported
+                        && !isLowJitter;
+                    var jumped = postSeekMoved || IsSignificantJump(reported, _lastReportedValue);
+                    _lastReportedValue = reported;
+                    _lastAdvanceAt = now;
+
+                    if (jumped)
+                    {
+                        _positionWindowStart = now;
+                        _positionWindowPosition = reported;
+                    }
+
+                    // 播放器自身确实移动了上报位置时重锚；不报位置导致始终停留在原值时不会误触发
+                    if ((!_positionReliable || _seekAnchorActive) && jumped)
+                    {
+                        var reanchored = reported + age;
+                        if (reanchored < TimeSpan.Zero) reanchored = TimeSpan.Zero;
+                        _wallAnchorPosition = reanchored;
+                        _wallAnchorAt = now;
+                        _seekAnchorActive = false;
+                    }
+                }
+                else if (_lastAdvanceAt != DateTimeOffset.MinValue && lastUpdated > _lastAdvanceAt)
+                {
+                    // 播放器只更新了 LastUpdatedTime 而位置值不动：用距上次位置真正变化的时间外推，避免进度卡死或倒退
+                    var sinceAdvance = now - _lastAdvanceAt;
+                    if (sinceAdvance > age && sinceAdvance <= TimeSpan.FromMinutes(30))
+                        age = sinceAdvance;
+                }
+
+                // ---- 观测窗口：判断这个播放器到底有没有在报位置 ----
+                // B 站 UWP/PC、部分网页播放器只把位置在 0/1 之间抖一下，或根本不更新 SMTC 位置。
+                if (_positionWindowStart == DateTimeOffset.MinValue)
+                {
+                    _positionWindowStart = now;
+                    _positionWindowPosition = reported;
+                }
+                else if ((now - _positionWindowStart).TotalSeconds >= 5)
+                {
+                    var advanced = reported - _positionWindowPosition;
+                    var reliable = advanced >= TimeSpan.FromSeconds(2.5);
+                    if (reliable != _positionReliable)
+                    {
+                        _positionReliable = reliable;
+                        if (!reliable)
+                        {
+                            // 无缝接续当前已推进或刚对齐的位置，不回退覆盖成 0:00
+                            var currentPos = _seekAnchorActive
+                                ? _wallAnchorPosition + (_wallAnchorAt == DateTimeOffset.MinValue ? TimeSpan.Zero : now - _wallAnchorAt)
+                                : (_lastResult > compensation ? _lastResult - compensation : reported + age);
+                            _wallAnchorPosition = currentPos < TimeSpan.Zero ? TimeSpan.Zero : currentPos;
+                            _wallAnchorAt = now;
+                            _seekAnchorActive = false;
+                        }
+                        else
+                        {
+                            _wallAnchorPosition = reported + age;
+                            _wallAnchorAt = now;
+                            _seekAnchorActive = false;
+                        }
+                        Musebase.Windows.Log.Write(reliable
+                            ? $"[sync] 播放器位置恢复正常（5 秒内前进 {advanced.TotalSeconds:0.0}s），恢复跟随上报值"
+                            : $"[sync] 播放器 5 秒内只前进 {advanced.TotalSeconds:0.0}s，判定不报位置，改用本机计时推算");
+                    }
+                    _positionWindowStart = now;
+                    _positionWindowPosition = reported;
+                }
+
+                if (_positionReliable && _seekAnchorActive && _lastSeekAt != DateTimeOffset.MinValue
+                    && (now - _lastSeekAt).TotalSeconds > 3.0)
+                {
+                    _seekAnchorActive = false;
+                }
+
+                if (!_positionReliable || _seekAnchorActive)
+                {
+                    // 不报/间歇报位置的播放器或刚手工对准时：从锚点按本机流逝时间平滑推进
+                    if (_wallAnchorAt == DateTimeOffset.MinValue)
+                        _wallAnchorAt = now;
+                    var elapsed = _wallAnchorPosition + (now - _wallAnchorAt);
+                    if (elapsed < TimeSpan.Zero) elapsed = TimeSpan.Zero;
+                    if (CurrentTrack?.Duration is { } dur && elapsed > dur) elapsed = dur;
+                    result = elapsed + compensation;
+                }
+                else
+                {
+                    result = reported + age + compensation;
+                    _wallAnchorPosition = reported + age;
+                    _wallAnchorAt = now;
+                }
+
+                // 上报位置偶尔回退一两百毫秒：在同曲播放中依本地时间平滑递增，避免进度条倒退
+                if (trackKey == _smoothedTrackKey
+                    && _smoothedPosition != TimeSpan.MinValue
+                    && _lastSampleAt != DateTimeOffset.MinValue
+                    && result < _smoothedPosition
+                    && _smoothedPosition - result <= BackwardTolerance)
+                {
+                    var localElapsed = now - _lastSampleAt;
+                    if (localElapsed > TimeSpan.Zero && localElapsed < TimeSpan.FromSeconds(0.5))
+                        result = _smoothedPosition + localElapsed;
+                }
+
+                _smoothedPosition = result;
+                _smoothedTrackKey = trackKey;
+                _lastSampleAt = now;
             }
 
-            // 上报位置偶尔回退一两百毫秒：在同曲播放中依本地时间平滑递增，避免进度条倒退
-            if (trackKey == _smoothedTrackKey
-                && _smoothedPosition != TimeSpan.MinValue
-                && _lastSampleAt != DateTimeOffset.MinValue
-                && result < _smoothedPosition
-                && _smoothedPosition - result <= BackwardTolerance)
-            {
-                var localElapsed = now - _lastSampleAt;
-                if (localElapsed > TimeSpan.Zero && localElapsed < TimeSpan.FromSeconds(0.5))
-                    result = _smoothedPosition + localElapsed;
-            }
-
-            _smoothedPosition = result;
-            _smoothedTrackKey = trackKey;
-            _lastSampleAt = now;
+            if (result < TimeSpan.Zero) result = TimeSpan.Zero;
+            _lastResult = result;
         }
 
-        if (result < TimeSpan.Zero) result = TimeSpan.Zero;
-        _lastResult = result;
-
-        if (TimingDiagnostics)
+        if (_timingDiagnostics)
             LogTimingSample(reported, lastUpdated, now, result);
 
         return result;
@@ -1032,56 +1189,61 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
     /// </summary>
     private void LogTimingSample(TimeSpan reported, DateTimeOffset lastUpdated, DateTimeOffset now, TimeSpan estimate)
     {
-        var trackKey = CurrentTrack is { } track ? $"{track.Title}|{track.Artist}" : "(无曲目)";
-        var playerKey = CurrentTrack?.SourceAppId ?? "(未知)";
-        var effectiveComp = EffectiveLatencyCompensation;
-        if (!string.Equals(trackKey, _diagTrackKey, StringComparison.Ordinal)
-            || !string.Equals(playerKey, _diagPlayerKey, StringComparison.Ordinal))
+        lock (_diagLock)
         {
-            FlushTimingSummary();
-            Musebase.Windows.Log.Write($"[timing] ---- 曲目切换 → {trackKey}"
-                + $"｜播放器={playerKey}｜补偿={effectiveComp.TotalMilliseconds:0}ms ----");
-            _diagTrackKey = trackKey;
-            _diagPlayerKey = playerKey;
-            _diagLastUpdate = DateTimeOffset.MinValue;
-            _diagLastSeenAt = DateTimeOffset.MinValue;
-            _diagLastReported = TimeSpan.MinValue;
+            if (!_timingDiagnostics) return;
+
+            var trackKey = CurrentTrack is { } track ? $"{track.Title}|{track.Artist}" : "(无曲目)";
+            var playerKey = CurrentTrack?.SourceAppId ?? "(未知)";
+            var effectiveComp = EffectiveLatencyCompensation;
+            if (!string.Equals(trackKey, _diagTrackKey, StringComparison.Ordinal)
+                || !string.Equals(playerKey, _diagPlayerKey, StringComparison.Ordinal))
+            {
+                FlushTimingSummary();
+                Musebase.Windows.Log.Write($"[timing] ---- 曲目切换 → {trackKey}"
+                    + $"｜播放器={playerKey}｜补偿={effectiveComp.TotalMilliseconds:0}ms ----");
+                _diagTrackKey = trackKey;
+                _diagPlayerKey = playerKey;
+                _diagLastUpdate = DateTimeOffset.MinValue;
+                _diagLastSeenAt = DateTimeOffset.MinValue;
+                _diagLastReported = TimeSpan.MinValue;
+            }
+
+            if (lastUpdated == _diagLastUpdate && reported == _diagLastReported) return; // 不是新样本
+            if (!IsPlaying) return; // 暂停时位置本就不前进，记下来只会污染统计
+
+            var gap = _diagLastSeenAt == DateTimeOffset.MinValue ? double.NaN : (now - _diagLastSeenAt).TotalSeconds;
+            var advanced = _diagLastReported == TimeSpan.MinValue ? double.NaN : (reported - _diagLastReported).TotalSeconds;
+            var skewMs = double.IsNaN(gap) ? double.NaN : (advanced - gap) * 1000;
+            var residual = double.IsNaN(gap) ? double.NaN : reported.TotalSeconds - (_diagLastReported.TotalSeconds + gap);
+            var stale = (now - lastUpdated).TotalSeconds;
+
+            var line = $"[timing] t={reported.TotalSeconds:0.000}s stale={stale:0.000}s"
+                + $" comp={effectiveComp.TotalMilliseconds:0}ms"
+                + $" est={estimate.TotalSeconds:0.000}s d={(estimate - reported).TotalSeconds:+0.000;-0.000;0.000}s";
+            if (!double.IsNaN(gap))
+                line += $" gap={gap:0.000}s advanced={advanced:0.000}s"
+                    + $" skew={skewMs:+0;-0;0}ms residual={residual:+0.000;-0.000;0.000}s";
+            Musebase.Windows.Log.Write(line);
+
+            _diagSamples++;
+            // 汇总只统计"正常播放"的样本：seek/切歌造成的秒级跳变不参与平均
+            var normal = !double.IsNaN(residual) && Math.Abs(residual) <= 1.0 && Math.Abs(skewMs) <= 500;
+            if (normal)
+            {
+                _diagSkewSumMs += skewMs;
+                _diagSkewCount++;
+                _diagResidualSum += residual;
+                _diagResidualCount++;
+                _diagStaleSum += stale;
+                _diagStaleCount++;
+            }
+            if (_diagSamples % 30 == 0) FlushTimingSummary();
+
+            _diagLastUpdate = lastUpdated;
+            _diagLastSeenAt = now;
+            _diagLastReported = reported;
         }
-
-        if (lastUpdated == _diagLastUpdate && reported == _diagLastReported) return; // 不是新样本
-        if (!IsPlaying) return; // 暂停时位置本就不前进，记下来只会污染统计
-
-        var gap = _diagLastSeenAt == DateTimeOffset.MinValue ? double.NaN : (now - _diagLastSeenAt).TotalSeconds;
-        var advanced = _diagLastReported == TimeSpan.MinValue ? double.NaN : (reported - _diagLastReported).TotalSeconds;
-        var skewMs = double.IsNaN(gap) ? double.NaN : (advanced - gap) * 1000;
-        var residual = double.IsNaN(gap) ? double.NaN : reported.TotalSeconds - (_diagLastReported.TotalSeconds + gap);
-        var stale = (now - lastUpdated).TotalSeconds;
-
-        var line = $"[timing] t={reported.TotalSeconds:0.000}s stale={stale:0.000}s"
-            + $" comp={effectiveComp.TotalMilliseconds:0}ms"
-            + $" est={estimate.TotalSeconds:0.000}s d={(estimate - reported).TotalSeconds:+0.000;-0.000;0.000}s";
-        if (!double.IsNaN(gap))
-            line += $" gap={gap:0.000}s advanced={advanced:0.000}s"
-                + $" skew={skewMs:+0;-0;0}ms residual={residual:+0.000;-0.000;0.000}s";
-        Musebase.Windows.Log.Write(line);
-
-        _diagSamples++;
-        // 汇总只统计"正常播放"的样本：seek/切歌造成的秒级跳变不参与平均
-        var normal = !double.IsNaN(residual) && Math.Abs(residual) <= 1.0 && Math.Abs(skewMs) <= 500;
-        if (normal)
-        {
-            _diagSkewSumMs += skewMs;
-            _diagSkewCount++;
-            _diagResidualSum += residual;
-            _diagResidualCount++;
-            _diagStaleSum += stale;
-            _diagStaleCount++;
-        }
-        if (_diagSamples % 30 == 0) FlushTimingSummary();
-
-        _diagLastUpdate = lastUpdated;
-        _diagLastSeenAt = now;
-        _diagLastReported = reported;
     }
 
     private void FlushTimingSummary()
@@ -1091,6 +1253,11 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
             + (_diagSkewCount > 0 ? $" 平均skew={_diagSkewSumMs / _diagSkewCount:+0;-0;0}ms" : "")
             + (_diagResidualCount > 0 ? $" 平均residual={_diagResidualSum / _diagResidualCount:+0.000;-0.000;0.000}s" : "")
             + (_diagStaleCount > 0 ? $" 平均stale={_diagStaleSum / _diagStaleCount:0.000}s" : ""));
+        ResetTimingSummaryCounters();
+    }
+
+    private void ResetTimingSummaryCounters()
+    {
         _diagSamples = 0;
         _diagSkewSumMs = 0;
         _diagSkewCount = 0;
@@ -1098,6 +1265,16 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
         _diagResidualCount = 0;
         _diagStaleSum = 0;
         _diagStaleCount = 0;
+    }
+
+    private void ResetTimingDiagnosticsState()
+    {
+        _diagTrackKey = null;
+        _diagPlayerKey = null;
+        _diagLastUpdate = DateTimeOffset.MinValue;
+        _diagLastSeenAt = DateTimeOffset.MinValue;
+        _diagLastReported = TimeSpan.MinValue;
+        ResetTimingSummaryCounters();
     }
 
     public void Dispose()

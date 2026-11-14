@@ -58,7 +58,22 @@ public sealed class LyricsCoordinator : IDisposable
     private DateTimeOffset? _currentLineStartedAt;
 
     public Lyrics? CurrentLyrics { get; private set; }
+    /// <summary>当前 <see cref="CurrentLyrics"/> 实际所属的曲目键（<c>LyricsCacheStore.MakeKey</c>），用于防止切歌瞬间的异步竞态把上一首歌词/封面误用到下一首。</summary>
+    public string? CurrentLyricsTrackKey { get; private set; }
     public TrackInfo? CurrentTrack => _nowPlaying.CurrentTrack;
+
+    /// <summary>返回已确认属于 <paramref name="track"/> 的当前歌词；若切歌瞬间尚未完成切换则回退 null。</summary>
+    public Lyrics? LyricsFor(TrackInfo? track) =>
+        track is not null
+        && string.Equals(CurrentLyricsTrackKey, LyricsCacheStore.MakeKey(track.Title, track.Artist), StringComparison.Ordinal)
+            ? CurrentLyrics
+            : null;
+
+    private void SetCurrentLyrics(Lyrics? lyrics, string? trackKey)
+    {
+        CurrentLyrics = lyrics;
+        CurrentLyricsTrackKey = lyrics is null ? null : trackKey;
+    }
 
     /// <summary>可序列化的当前显示状态（远程显示·绑定用）。</summary>
     public PlaybackViewState CurrentState { get; private set; } = PlaybackViewState.Empty;
@@ -210,7 +225,7 @@ public sealed class LyricsCoordinator : IDisposable
         _searchedTrackKey = trackKey;
 
         _searchCts?.Cancel();
-        CurrentLyrics = null;
+        SetCurrentLyrics(null, null);
         _lastLineIndex = int.MinValue;
         _currentLine = null;
         _currentLineStartedAt = null;
@@ -247,7 +262,7 @@ public sealed class LyricsCoordinator : IDisposable
         // 1) 缓存命中就跳过网络搜索（但目标为中文且旧缓存无译文时（LRCLIB 等），重新搜索以取得译本）
         if (Cache?.Get(track.Title, track.Artist) is { } cached && (!TargetIsChinese || cached.HasTranslation()))
         {
-            CurrentLyrics = cached;
+            SetCurrentLyrics(cached, trackKey);
             _lastLineIndex = int.MinValue;
             RaiseStatus(new LyricsStatus(LyricsStatusKind.Cache, track.ToString(), cached.Metadata.ServiceName ?? ""));
             // lyrics_search（缓存命中）：没有网络搜索，因此 perSource 为空对象
@@ -287,7 +302,7 @@ public sealed class LyricsCoordinator : IDisposable
 
             if (result.Lyrics is { } remote)
             {
-                CurrentLyrics = remote;
+                SetCurrentLyrics(remote, trackKey);
                 _lastLineIndex = int.MinValue;
                 // 提升为本地缓存——此后无需服务器（离线也行）即可立即显示。
                 try { Cache?.Set(track.Title, track.Artist, remote); }
@@ -347,7 +362,7 @@ public sealed class LyricsCoordinator : IDisposable
                 if (CurrentLyrics is null || score > bestScore)
                 {
                     bestScore = score;
-                    CurrentLyrics = lyrics;
+                    SetCurrentLyrics(lyrics, trackKey);
                     _lastLineIndex = int.MinValue; // 强制重新计算行
                     RaiseStatus(new LyricsStatus(
                         LyricsStatusKind.Found, track.ToString(), lyrics.Metadata.ServiceName ?? "", lyrics.Quality()));
@@ -447,7 +462,7 @@ public sealed class LyricsCoordinator : IDisposable
         catch (Exception e) { Log?.Invoke($"[wrong] 缓存移除失败: {e.Message}"); }
 
         _searchCts?.Cancel();
-        CurrentLyrics = null;
+        SetCurrentLyrics(null, null);
         _lastLineIndex = int.MinValue;
         _currentLine = null;
         _currentLineStartedAt = null;
@@ -483,7 +498,10 @@ public sealed class LyricsCoordinator : IDisposable
 
         Unsuppress(CurrentTrack); // 用户亲自选择的歌词，解除抑制
 
-        CurrentLyrics = lyrics;
+        var key = CurrentTrack is { } currentTrack
+            ? LyricsCacheStore.MakeKey(currentTrack.Title, currentTrack.Artist)
+            : null;
+        SetCurrentLyrics(lyrics, key);
         _lastLineIndex = int.MinValue;
         RaiseStatus(new LyricsStatus(
             LyricsStatusKind.Manual, CurrentTrack?.ToString() ?? "", lyrics.Metadata.ServiceName ?? ""));
@@ -518,7 +536,7 @@ public sealed class LyricsCoordinator : IDisposable
         if (CurrentTrack is { } cur && cur.Title == track.Title && cur.Artist == track.Artist)
         {
             _searchCts?.Cancel(); // 避免进行中的搜索覆盖编辑版本
-            CurrentLyrics = lyrics;
+            SetCurrentLyrics(lyrics, LyricsCacheStore.MakeKey(track.Title, track.Artist));
             _lastLineIndex = int.MinValue; // 重新发布当前行
             RaiseStatus(new LyricsStatus(LyricsStatusKind.Edited, track.ToString()));
         }
@@ -545,7 +563,7 @@ public sealed class LyricsCoordinator : IDisposable
                     if (cts.Token.IsCancellationRequested) return;
                     if (candidate.HasTranslation() && candidate.IsMatched())
                     {
-                        CurrentLyrics = candidate;
+                        SetCurrentLyrics(candidate, LyricsCacheStore.MakeKey(track.Title, track.Artist));
                         lyrics = candidate;
                         _lastLineIndex = int.MinValue;
                         try { Cache?.Set(track.Title, track.Artist, candidate); } catch { }
@@ -741,7 +759,7 @@ public sealed class LyricsCoordinator : IDisposable
             if (ct.IsCancellationRequested || !ReferenceEquals(CurrentLyrics, current)) return false;
             if (result.Lyrics is not { } shared || !result.HasLanguage(TargetLangLower)) continue;
 
-            CurrentLyrics = shared;
+            SetCurrentLyrics(shared, CurrentLyricsTrackKey);
             _lastLineIndex = int.MinValue; // 带着已补上的译文重新发布
             try { Cache?.Set(track.Title, track.Artist, shared); }
             catch (Exception e) { Log?.Invoke($"[server] 服务器译文缓存保存失败: {e.Message}"); }

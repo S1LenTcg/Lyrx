@@ -395,6 +395,17 @@ internal sealed class ClassicSettingsWindow : Window
         windowCard.Children.Add(swatchWrap);
         SelectThemeByIndex(currentThemeIdx, notify: false);
 
+        var diagnosticsCard = AddSectionCard(pageGeneral, "开发者模式");
+        var timingDiagnosticsToggle = CreateToggleSwitch(settings.TimingDiagnosticsEnabled, val =>
+        {
+            settings.TimingDiagnosticsEnabled = val;
+            SaveAndNotify();
+        });
+        diagnosticsCard.Children.Add(CreateSettingRow(
+            "导出log",
+            "开启后将歌词与歌曲播放采样写入本地日志文件，用于排查同步偏差",
+            timingDiagnosticsToggle));
+
         // =====================================================================
         // 分页 2：歌词搜索源
         // =====================================================================
@@ -665,6 +676,8 @@ internal sealed class ClassicSettingsWindow : Window
         _syncExternalUi = () =>
         {
             suppressingEvents = true;
+            browserToggle.IsChecked = settings.IncludeBrowsers;
+            timingDiagnosticsToggle.IsChecked = settings.TimingDiagnosticsEnabled;
             showTransToggle.IsChecked = settings.ClassicShowTranslation;
             topmostToggle.IsChecked = settings.ClassicTopmost;
             trackStatusText.Text = getTrackSummary();

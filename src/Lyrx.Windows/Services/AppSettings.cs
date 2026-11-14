@@ -117,6 +117,12 @@ public sealed class AppSettings
     public int SmtcLatencyCompensationMs { get; set; } = 1400;
 
     /// <summary>
+    /// 是否向本地日志写入时间同步诊断样本（<c>[timing]</c>）。
+    /// 开启后会持续记录当前曲目、来源应用与播放位置采样；默认关闭，仅在排查歌词同步问题时开启。
+    /// </summary>
+    public bool TimingDiagnosticsEnabled { get; set; }
+
+    /// <summary>
     /// 歌词行距档位："compact" / "normal" / "loose"。
     /// 英文与韩文的字形比汉字更需要行间留白，所以留一个可调档位，而不是写死一套参数。
     /// </summary>
@@ -189,8 +195,8 @@ public sealed class AppSettings
 
     // ---- 翻译引擎选择 ----
 
-    /// <summary>翻译引擎 id（TranslatorRegistry）。为空时由 EffectiveTranslationEngine 自动决定。</summary>
-    public string? TranslationEngine { get; set; }
+    /// <summary>翻译引擎 id（TranslatorRegistry）。默认 "none"（仅使用歌词源自带翻译）。</summary>
+    public string? TranslationEngine { get; set; } = TranslatorRegistry.None;
 
     /// <summary>LibreTranslate 端点（自托管等）。为空时使用注册表默认值。</summary>
     public string? LibreTranslateEndpoint { get; set; }
@@ -198,9 +204,9 @@ public sealed class AppSettings
     /// <summary>
     /// 是否使用翻译 API（可在托盘即时切换）。关闭后不再发出新的翻译请求，
     /// 只显示已缓存的译文 — 就地切断付费 API（DeepL/Google）用量的开关。
-    /// 引擎·密钥设置会原样保留，因此重新开启即恢复原有行为。默认开启。
+    /// 引擎·密钥设置会原样保留，因此重新开启即恢复原有行为。默认关闭（仅使用歌词源自带翻译）。
     /// </summary>
-    public bool ApiTranslationEnabled { get; set; } = true;
+    public bool ApiTranslationEnabled { get; set; }
 
     /// <summary>
     /// 主翻译引擎（DeepL 等）失败时自动切换到无需密钥的免费引擎（MyMemory）。
@@ -210,16 +216,13 @@ public sealed class AppSettings
 
     /// <summary>
     /// 实效翻译引擎。有显式值时照用；否则有 DeepL 密钥则为 deepl（保留既有用户的行为），
-    /// 有歌词服务器则为关闭 — 服务器会翻译并填充新曲目，因此本机不把歌词发到外部，
-    /// 两者都没有则为无密钥的免费默认（MyMemory — 安装后即可使用）。LibreTranslate 公开实例
-    /// 已改为必须付费密钥，因此从默认无密钥引擎中排除。
+    /// 否则默认关闭在线机器翻译（none — 仅使用歌词源自带翻译）。
     /// </summary>
     [JsonIgnore]
     public string EffectiveTranslationEngine =>
         !string.IsNullOrWhiteSpace(TranslationEngine) ? TranslationEngine!.Trim().ToLowerInvariant()
         : !string.IsNullOrWhiteSpace(DeeplApiKey) ? "deepl"
-        : !string.IsNullOrWhiteSpace(LyricsServerEndpoint) ? TranslatorRegistry.None
-        : TranslatorRegistry.DefaultFreeEngine;
+        : TranslatorRegistry.None;
 
     /// <summary>
     /// 覆盖层·控制面板使用的字体名称。为空则为默认（Segoe UI）。

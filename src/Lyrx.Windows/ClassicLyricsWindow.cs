@@ -1,5 +1,6 @@
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Threading;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
@@ -69,6 +70,12 @@ internal sealed class ClassicLyricsWindow : Window
     private TrackInfo? _track;
     private Lyrics? _lyrics;
     private LyricsStatusKind? _status;
+    private CancellationTokenSource? _coverCts;
+    private long _coverGeneration;
+    private bool _coverInFlight;
+    private bool _coverFromSmtc;
+    private bool _coverTriedArtworkUrl;
+    private long _coverThumbnailVersion = -1;
     private int _activeIndex = -1;
     private Color _subdued = DefaultSubdued;
     private Color _background = DefaultBackground;
@@ -78,6 +85,10 @@ internal sealed class ClassicLyricsWindow : Window
     private long _manualScrollAt;
     private bool _resumeScrollPending;
     private bool _transportPending;
+    private double? _pendingSeekSeconds;
+    private long _pendingSeekDeadlineTick;
+    private bool _seekInFlight;
+    private long _seekGeneration;
     private bool _isFullscreen;
     private Rect _restoreBounds;
     private bool _wasMaximized;
@@ -221,13 +232,8 @@ internal sealed class ClassicLyricsWindow : Window
         buttons.Children.Add(_repeat);
         transport.Children.Add(buttons);
 
-        // 底部进度条：支持鼠标悬停、拖拽与点击跳转播放（或校准时钟）
-        _progress.SeekRequested += async seconds =>
-        {
-            await _player.SeekAsync(TimeSpan.FromSeconds(seconds));
-            ResumeAutoScroll();
-            Refresh();
-        };
+        // 底部进度条：支持鼠标悬停、拖拽、点击与键盘步进跳转播放（或校准时钟）
+        _progress.SeekRequested += seconds => _ = SeekToSecondsAsync(seconds);
         var timeline = new Grid { Margin = new Thickness(0, 2, 0, 0) };
         timeline.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(46) });
         timeline.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
@@ -349,7 +355,7 @@ internal sealed class ClassicLyricsWindow : Window
                 source.AddHook(WndProc);
         };
         Loaded += (_, _) => { UpdatePanelFrame(); ApplyActivePalette(); Refresh(); _timer.Start(); };
-        Closed += (_, _) => { _timer.Stop(); SavePlacement(); };
+        Closed += (_, _) => { _timer.Stop(); _progress.CancelPendingSeek(); CancelCoverLoad(); SavePlacement(); };
         PreviewKeyDown += (_, e) =>
         {
             if (e.Key == Key.F11)
@@ -459,40 +465,50 @@ internal sealed class ClassicLyricsWindow : Window
         AutoSyncIfIdle();
 
         var track = _coordinator.CurrentTrack;
-        var lyrics = _coordinator.CurrentLyrics;
+        // 仅在 CurrentLyricsTrackKey 与当前曲目一致时才读取歌词及其 ArtworkUrl，
+        // 避免切歌瞬间 Dispatcher 尚未清空旧歌词时把上一首歌词的封面 URL 写入新歌封面缓存。
+        var lyrics = _coordinator.LyricsFor(track);
         var status = _coordinator.CurrentStatus?.Kind;
+        var songChanged = !SameTrackIdentity(track, _track);
         var trackChanged = !Equals(track, _track);
-        if (trackChanged)
+
+        if (songChanged)
         {
             _track = track;
             _activeIndex = -1;
+            _seekGeneration++;
+            _seekInFlight = false;
+            _pendingSeekSeconds = null;
+            _pendingSeekDeadlineTick = 0;
+            _progress.CancelPendingSeek();
             CancelScrollAnimation();
+            CancelCoverLoad();
+            _coverInFlight = false;
+            _coverFromSmtc = false;
+            _coverTriedArtworkUrl = false;
+            _coverThumbnailVersion = _player.ThumbnailVersion;
             _title.Text = track?.Title ?? "等待播放";
             _artist.Text = track?.Artist ?? "";
             _cover.Source = null;
-            if (track is not null) _ = LoadCoverAsync(track);
-            else
-            {
-                _coverBackground = DefaultBackground;
-                _coverSubdued = DefaultSubdued;
-                ApplyActivePalette();
-            }
+            if (track is not null) StartCoverLoad(track, lyrics?.Metadata.ArtworkUrl);
+            else ResetCoverPalette();
+        }
+        else if (trackChanged)
+        {
+            // 时长或专辑后补等元数据刷新：保留当前封面、进度条跳转与歌词视图，不重复闪烁或重拉封面。
+            _track = track;
         }
 
-        if (trackChanged || !ReferenceEquals(lyrics, _lyrics) || status != _status || _lines.Children.Count == 0)
+        if (songChanged || !ReferenceEquals(lyrics, _lyrics) || status != _status || _lines.Children.Count == 0)
         {
-            var animateReplacement = !trackChanged
+            var animateReplacement = !songChanged
                 && _settings.ClassicShowTranslation
                 && _waitingForTranslationAnimation
                 && lyrics is not null
                 && HasAnyTranslation(lyrics);
             _lyrics = lyrics;
             _status = status;
-            if (!trackChanged && _cover.Source is null && track is not null)
-            {
-                _ = LoadCoverAsync(track);
-            }
-            if (trackChanged)
+            if (songChanged)
             {
                 _waitingForTranslationAnimation = false;
                 CancelTranslationAnimation();
@@ -503,12 +519,22 @@ internal sealed class ClassicLyricsWindow : Window
                 CancelTranslationAnimation();
                 SetCurrentValue(TranslationProgressProperty, 0d);
             }
-            RenderLyrics(preserveScroll: !trackChanged);
+            RenderLyrics(preserveScroll: !songChanged);
             if (animateReplacement)
             {
                 _waitingForTranslationAnimation = false;
                 _ = Dispatcher.BeginInvoke(DispatcherPriority.Loaded, () => AnimateTranslation(1d));
             }
+        }
+
+        if (!songChanged && track is not null && !_coverInFlight)
+        {
+            var preferOnlineCover = Services.NowPlayingService.IsBrowserOrVideoSource(track.SourceAppId);
+            var delayedArtworkArrived = _cover.Source is null && !_coverTriedArtworkUrl && lyrics?.Metadata.ArtworkUrl is not null;
+            var smtcThumbnailChanged = _player.ThumbnailVersion != _coverThumbnailVersion
+                && (_cover.Source is null || _coverFromSmtc || (!preferOnlineCover && _player.HasThumbnail));
+            if (delayedArtworkArrived || smtcThumbnailChanged)
+                StartCoverLoad(track, lyrics?.Metadata.ArtworkUrl);
         }
 
         var position = track is null ? null : _player.GetEstimatedPosition();
@@ -517,12 +543,24 @@ internal sealed class ClassicLyricsWindow : Window
         var state = _player.GetTransportState();
         UpdateTransport(state);
 
-        // 进度条：反映真实播放位置，支持拖拽与实时时间预览
+        // 进度条：反映真实播放位置，支持拖拽、键盘步进与实时时间预览
         var total = duration is { TotalSeconds: > 0 } known ? known : (TimeSpan?)null;
+        _progress.IsEnabled = track is not null && total is not null;
         _progress.Maximum = total?.TotalSeconds ?? 1;
-        if (!_progress.IsDragging)
+
+        var liveSeconds = Math.Clamp(position?.TotalSeconds ?? 0, 0, _progress.Maximum);
+        if (_pendingSeekSeconds is { } pendingTarget && !_seekInFlight)
         {
-            _progress.Value = Math.Clamp(position?.TotalSeconds ?? 0, 0, _progress.Maximum);
+            if (Environment.TickCount64 >= _pendingSeekDeadlineTick
+                || Math.Abs(liveSeconds - pendingTarget) <= 1.2)
+            {
+                _pendingSeekSeconds = null;
+            }
+        }
+
+        if (!_progress.IsUserSeeking && _pendingSeekSeconds is null)
+        {
+            _progress.Value = liveSeconds;
             _elapsed.Text = position is { } elapsed ? FormatTime(elapsed) : "–:––";
             _remaining.Text = total is { } remainingTotal && position is { } current
                 ? $"−{FormatTime(remainingTotal - current)}"
@@ -530,14 +568,19 @@ internal sealed class ClassicLyricsWindow : Window
         }
         else
         {
-            var cur = TimeSpan.FromSeconds(_progress.Value);
+            var previewSeconds = _progress.IsUserSeeking
+                ? _progress.Value
+                : Math.Clamp(_pendingSeekSeconds ?? _progress.Value, 0, _progress.Maximum);
+            if (!_progress.IsUserSeeking)
+                _progress.Value = previewSeconds;
+            var cur = TimeSpan.FromSeconds(previewSeconds);
             _elapsed.Text = FormatTime(cur);
             _remaining.Text = total is { } remTotal ? $"−{FormatTime(remTotal - cur)}" : "–:––";
         }
 
         if (lyrics is null || position is null) return;
 
-        var adjusted = position.Value.TotalSeconds + lyrics.TimeDelay + _coordinator.ManualOffsetSeconds;
+        var adjusted = position.Value.TotalSeconds + lyrics.TimeDelay + _coordinator.ManualOffsetSeconds + _coordinator.TrackOffsetSeconds;
         var (active, _) = lyrics.LineIndexesAt(adjusted);
         var index = active ?? -1;
         if (_activeIndex != index)
@@ -870,14 +913,12 @@ internal sealed class ClassicLyricsWindow : Window
                 var row = NewLine(mainText, subText, progress);
                 var linePos = line.Position;
                 row.Cursor = Cursors.Hand;
-                row.MouseLeftButtonUp += async (_, e) =>
+                row.MouseLeftButtonUp += (_, e) =>
                 {
-                    var seekSeconds = linePos - lyrics.TimeDelay - _coordinator.ManualOffsetSeconds;
+                    var seekSeconds = linePos - lyrics.TimeDelay - _coordinator.ManualOffsetSeconds - _coordinator.TrackOffsetSeconds;
                     if (seekSeconds < 0) seekSeconds = 0;
-                    await _player.SeekAsync(TimeSpan.FromSeconds(seekSeconds));
-                    ResumeAutoScroll();
-                    Refresh();
                     e.Handled = true;
+                    _ = SeekToSecondsAsync(seekSeconds);
                 };
                 _rows.Add(i, row);
                 _lines.Children.Add(row);
@@ -976,6 +1017,33 @@ internal sealed class ClassicLyricsWindow : Window
         if (_activeIndex >= 0 && !_isAnimatingTranslation) _resumeScrollPending = true;
     }
 
+    private async Task SeekToSecondsAsync(double seconds)
+    {
+        var generation = ++_seekGeneration;
+        var requestedTrack = _track;
+        _seekInFlight = true;
+        _pendingSeekSeconds = seconds;
+        _pendingSeekDeadlineTick = Environment.TickCount64 + 600;
+        var succeeded = false;
+        try
+        {
+            succeeded = await _player.SeekAsync(TimeSpan.FromSeconds(seconds));
+        }
+        finally
+        {
+            if (generation == _seekGeneration)
+            {
+                _seekInFlight = false;
+                if (succeeded && SameTrackIdentity(_track, requestedTrack))
+                    _pendingSeekDeadlineTick = Math.Min(_pendingSeekDeadlineTick, Environment.TickCount64 + 300);
+                else
+                    _pendingSeekSeconds = null;
+            }
+            ResumeAutoScroll();
+            Refresh();
+        }
+    }
+
     private void PauseAutoScroll()
     {
         if (_rows.Count == 0 || _manualScroll) return;
@@ -1049,40 +1117,89 @@ internal sealed class ClassicLyricsWindow : Window
         _scroll.ScrollToVerticalOffset(offset);
     }
 
-    private async Task LoadCoverAsync(TrackInfo track)
+    private static bool SameTrackIdentity(TrackInfo? a, TrackInfo? b)
     {
-        var preferOnlineCover = Services.NowPlayingService.IsBrowserOrVideoSource(track.SourceAppId);
-        byte[]? bytes = null;
+        if (ReferenceEquals(a, b)) return true;
+        if (a is null || b is null) return false;
+        return string.Equals(a.Title, b.Title, StringComparison.Ordinal)
+            && string.Equals(a.Artist, b.Artist, StringComparison.Ordinal)
+            && string.Equals(a.SourceAppId, b.SourceAppId, StringComparison.Ordinal)
+            && (string.IsNullOrEmpty(a.Album) || string.IsNullOrEmpty(b.Album)
+                || string.Equals(a.Album, b.Album, StringComparison.Ordinal));
+    }
 
-        if (preferOnlineCover)
+    private void CancelCoverLoad()
+    {
+        _coverGeneration++;
+        if (_coverCts is not null)
         {
-            // 浏览器与视频站点优先按清洗后的歌名从 QQ 音乐等在线库拉取官方专辑封面
-            bytes = await Services.CoverFetcher.FetchCoverAsync(track.Title, track.Artist, _lyrics?.Metadata.ArtworkUrl);
-            if (!Equals(_track, track) || !Equals(_player.CurrentTrack, track)) return;
+            _coverCts.Cancel();
+            _coverCts.Dispose();
+            _coverCts = null;
         }
+    }
 
-        if (bytes is null)
-        {
-            bytes = await _player.GetThumbnailAsync();
-            if (!Equals(_track, track) || !Equals(_player.CurrentTrack, track)) return;
-        }
+    private void ResetCoverPalette()
+    {
+        _coverBackground = DefaultBackground;
+        _coverSubdued = DefaultSubdued;
+        ApplyActivePalette();
+    }
 
-        // 若本地 SMTC 未提供封面（例如 B 站桌面客户端），自动回退向在线音乐库检索高清专辑封面
-        if (bytes is null && !preferOnlineCover)
-        {
-            bytes = await Services.CoverFetcher.FetchCoverAsync(track.Title, track.Artist, _lyrics?.Metadata.ArtworkUrl);
-            if (!Equals(_track, track) || !Equals(_player.CurrentTrack, track)) return;
-        }
+    private void StartCoverLoad(TrackInfo track, Uri? artworkUrl)
+    {
+        CancelCoverLoad();
+        var generation = _coverGeneration;
+        var cts = new CancellationTokenSource();
+        _coverCts = cts;
+        _coverInFlight = true;
+        _coverThumbnailVersion = _player.ThumbnailVersion;
+        if (artworkUrl is not null) _coverTriedArtworkUrl = true;
 
-        if (bytes is null)
-        {
-            _coverBackground = DefaultBackground;
-            _coverSubdued = DefaultSubdued;
-            ApplyActivePalette();
-            return;
-        }
+        var task = LoadCoverAsync(track, artworkUrl, generation, cts.Token);
+        if (!task.IsCompleted && _cover.Source is null)
+            ResetCoverPalette();
+    }
+
+    private async Task LoadCoverAsync(TrackInfo track, Uri? artworkUrl, long generation, CancellationToken ct)
+    {
         try
         {
+            var preferOnlineCover = Services.NowPlayingService.IsBrowserOrVideoSource(track.SourceAppId);
+            byte[]? bytes = null;
+            var fromSmtc = false;
+            var smtcThumbVersion = _player.ThumbnailVersion;
+
+            if (preferOnlineCover)
+            {
+                // 浏览器与视频站点优先按清洗后的歌名从 QQ 音乐等在线库拉取官方专辑封面
+                bytes = await Services.CoverFetcher.FetchCoverAsync(track.Title, track.Artist, artworkUrl, ct);
+                if (ct.IsCancellationRequested || generation != _coverGeneration || !SameTrackIdentity(_track, track)) return;
+            }
+
+            if (bytes is null)
+            {
+                smtcThumbVersion = _player.ThumbnailVersion;
+                bytes = await _player.GetThumbnailAsync();
+                if (ct.IsCancellationRequested || generation != _coverGeneration || !SameTrackIdentity(_track, track)) return;
+                if (bytes is not null) fromSmtc = true;
+            }
+
+            // 若本地 SMTC 未提供封面（例如 B 站桌面客户端），自动回退向在线音乐库检索高清专辑封面
+            if (bytes is null && !preferOnlineCover)
+            {
+                bytes = await Services.CoverFetcher.FetchCoverAsync(track.Title, track.Artist, artworkUrl, ct);
+                if (ct.IsCancellationRequested || generation != _coverGeneration || !SameTrackIdentity(_track, track)) return;
+            }
+
+            _coverThumbnailVersion = smtcThumbVersion;
+            if (bytes is null)
+            {
+                _coverFromSmtc = false;
+                ResetCoverPalette();
+                return;
+            }
+
             using var stream = new MemoryStream(bytes);
             var cover = new BitmapImage();
             cover.BeginInit();
@@ -1092,15 +1209,24 @@ internal sealed class ClassicLyricsWindow : Window
             cover.EndInit();
             cover.Freeze();
             _cover.Source = cover;
+            _coverFromSmtc = fromSmtc;
 
             (_coverBackground, _coverSubdued) = ClassicLyricsPalette.FromCover(cover);
             ApplyActivePalette();
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // 切歌取消
+        }
         catch (Exception error) when (error is ArgumentException or NotSupportedException or InvalidOperationException or IOException)
         {
-            _coverBackground = DefaultBackground;
-            _coverSubdued = DefaultSubdued;
-            ApplyActivePalette();
+            _coverFromSmtc = false;
+            ResetCoverPalette();
+        }
+        finally
+        {
+            if (generation == _coverGeneration)
+                _coverInFlight = false;
         }
     }
 
@@ -1324,7 +1450,7 @@ internal sealed class ClassicLyricsWindow : Window
     {
         while (source is not null)
         {
-            if (source is ButtonBase) return true;
+            if (source is ButtonBase or RangeBase) return true;
             if (source is LyricRow row && _rows.ContainsValue(row)) return true;
             source = source is Visual or System.Windows.Media.Media3D.Visual3D
                 ? VisualTreeHelper.GetParent(source)

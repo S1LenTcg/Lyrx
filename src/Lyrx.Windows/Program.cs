@@ -58,18 +58,21 @@ internal static class Program
             var settings = AppSettings.Load();
             Loc.Initialize(settings.UiLanguage);
             var nowPlaying = await NowPlayingService.CreateAsync();
-            // 补偿值语义已变：定位改由本机单调时钟主导，这里只剩"传输 + 音频管线"的几十毫秒。
-            // 旧配置里那个 1400ms 是按锯齿均值凑出来的，直接沿用会让歌词整体提前 1.3 秒，故夹取到 0~400ms。
-            // 补偿值按实测手感标定，默认 1400ms；这里只做一个宽区间保护，避免手改配置写出离谱值。
-            var storedCompensationMs = settings.SmtcLatencyCompensationMs;
-            var compensationMs = Math.Clamp(storedCompensationMs, 0, 3000);
-            if (compensationMs != storedCompensationMs)
+            void ApplyLatencySettings()
             {
-                Log.Write($"[smtc] 补偿值 {storedCompensationMs}ms 超出合理区间，已收敛为 {compensationMs}ms");
-                settings.SmtcLatencyCompensationMs = compensationMs;
-                settings.Save();
+                // 补偿值按实测手感标定，默认 1400ms；这里只做一个宽区间保护，避免手改配置写出离谱值。
+                var storedCompensationMs = settings.SmtcLatencyCompensationMs;
+                var compensationMs = Math.Clamp(storedCompensationMs, 0, 3000);
+                if (compensationMs != storedCompensationMs)
+                {
+                    Log.Write($"[smtc] 补偿值 {storedCompensationMs}ms 超出合理区间，已收敛为 {compensationMs}ms");
+                    settings.SmtcLatencyCompensationMs = compensationMs;
+                    settings.Save();
+                }
+                nowPlaying.LatencyCompensation = TimeSpan.FromMilliseconds(compensationMs);
             }
-            nowPlaying.LatencyCompensation = TimeSpan.FromMilliseconds(compensationMs);
+            ApplyLatencySettings();
+            nowPlaying.TimingDiagnostics = settings.TimingDiagnosticsEnabled;
 
             var translationDb = Path.Combine(AppSettings.DataDirectory, "translations.db");
             var lyricsDb = Path.Combine(AppSettings.DataDirectory, "lyrics.db");
@@ -106,6 +109,10 @@ internal static class Program
 
             nowPlaying.SetSource(settings.PlaybackSource, settings.IncludeBrowsers, settings.PreferredSources);
 
+            LyricsEditorWindow? editorWindow = null;
+            ClassicSettingsWindow? settingsWindow = null;
+            ClassicLyricsWindow? lyricsWindow = null;
+
             var trackItem = new MenuItem { Header = Loc.T("status.noTrack"), IsEnabled = false };
             var sourceMenu = new MenuItem { Header = Loc.T("tray.source") };
 
@@ -115,6 +122,7 @@ internal static class Program
                 settings.IncludeBrowsers = includeBrowsers;
                 settings.Save();
                 nowPlaying.SetSource(mode, includeBrowsers, settings.PreferredSources);
+                settingsWindow?.RefreshExternalState();
             }
 
             void RebuildSourceMenu()
@@ -165,10 +173,6 @@ internal static class Program
                     }
                 }
             }
-
-            LyricsEditorWindow? editorWindow = null;
-            ClassicSettingsWindow? settingsWindow = null;
-            ClassicLyricsWindow? lyricsWindow = null;
 
             void OpenSearch() => new SearchWindow(coordinator).Show();
             void OpenLyricsEditor()
@@ -270,6 +274,8 @@ internal static class Program
                     onChanged: () =>
                     {
                         nowPlaying.SetSource(settings.PlaybackSource, settings.IncludeBrowsers, settings.PreferredSources);
+                        ApplyLatencySettings();
+                        nowPlaying.TimingDiagnostics = settings.TimingDiagnosticsEnabled;
                         SyncTranslationEngine();
                         lyricsWindow?.ReloadLyricsDisplay();
                     });
