@@ -4,8 +4,8 @@ using Musebase.Engine;
 namespace Musebase.Windows.Services;
 
 /// <summary>
-/// <see cref="IEngineDispatcher"/>의 WPF 구현.
-/// 콜백·타이머 틱을 UI 스레드(Dispatcher)에서 실행해 오버레이 갱신을 안전하게 한다.
+/// <see cref="IEngineDispatcher"/> 的 WPF 实现。
+/// 在 UI 线程（Dispatcher）上执行回调与定时器 tick，保证覆盖层刷新安全。
 /// </summary>
 public sealed class WpfEngineDispatcher : IEngineDispatcher
 {
@@ -17,7 +17,7 @@ public sealed class WpfEngineDispatcher : IEngineDispatcher
 
     public IEngineTimer CreateTimer(TimeSpan interval, Action tick)
     {
-        var timer = new DispatcherTimer(DispatcherPriority.Background, _dispatcher) { Interval = interval };
+        var timer = new DispatcherTimer(DispatcherPriority.Send, _dispatcher) { Interval = interval };
         timer.Tick += (_, _) => tick();
         return new DispatcherEngineTimer(timer);
     }

@@ -4,9 +4,9 @@ using System.Text.RegularExpressions;
 namespace Musebase.Core;
 
 /// <summary>
-/// 동기화 가사 문서. LyricsKit의 Lyrics 클래스 포팅.
-/// LRC(+확장: 다중 타임태그, 【】번역, [tt]/[tr] 첨부 라인) 파싱/직렬화와
-/// 재생 위치 → 현재/다음 라인 조회를 제공한다.
+/// 同步歌词文档。LyricsKit 的 Lyrics 类移植。
+/// LRC（+扩展：多重时间标签、【】翻译、[tt]/[tr] 附加行）的解析/序列化，
+/// 以及播放位置 → 当前/下一行的查询。
 /// </summary>
 public sealed class Lyrics
 {
@@ -14,7 +14,7 @@ public sealed class Lyrics
     public Dictionary<string, string> IdTags { get; } = new();
     public LyricsMetadata Metadata { get; } = new();
 
-    // 표준 ID 태그 키
+    // 标准 ID 标签键
     public const string TagTitle = "ti";
     public const string TagAlbum = "al";
     public const string TagArtist = "ar";
@@ -34,10 +34,10 @@ public sealed class Lyrics
         }
     }
 
-    /// <summary>LRC 텍스트를 파싱한다. 유효한 가사 라인이 없으면 null.</summary>
+    /// <summary>解析 LRC 文本。没有有效歌词行时返回 null。</summary>
     public static Lyrics? Parse(string text)
     {
-        // .NET 정규식의 ^/$ 멀티라인 앵커는 \n 기준이므로 CRLF/CR을 정규화한다
+        // .NET 正则的 ^/$ 多行锚点以 \n 为基准，因此先把 CRLF/CR 归一化
         text = text.Replace("\r\n", "\n").Replace('\r', '\n');
 
         var lyrics = new Lyrics();
@@ -63,7 +63,9 @@ public sealed class Lyrics
         }
 
         if (lyrics.Lines.Count == 0) return null;
-        lyrics.Lines.Sort((a, b) => a.Position.CompareTo(b.Position));
+        var sorted = lyrics.Lines.OrderBy(l => l.Position).ToList();
+        lyrics.Lines.Clear();
+        lyrics.Lines.AddRange(sorted);
 
         var attachmentTags = new HashSet<string>();
         foreach (Match m in LrcRegex.LineAttachment().Matches(text))
@@ -81,24 +83,162 @@ public sealed class Lyrics
         }
         lyrics.Metadata.AttachmentTags = attachmentTags;
 
+        lyrics.FoldInterleavedTranslations();
+
         return lyrics;
     }
 
-    /// <summary>[offset:] 태그 (밀리초)</summary>
+    /// <summary>
+    /// 折叠交错双语歌词（同时间戳配对，或"一句外文原词紧跟一句纯中文译文"且整曲占比达标的顺序配对）：
+    /// 把译文行并入原词行的默认译文标签，受「文A」开关统一控制。
+    /// </summary>
+    internal void FoldInterleavedTranslations()
+    {
+        var seqPairs = CountPairs(IsSequentialTranslationPair);
+        if (seqPairs >= 4)
+        {
+            var eligibleCount = Lines.Count(l =>
+                !string.IsNullOrWhiteSpace(l.Content)
+                && l.Attachments.Translation() is null
+                && !IsMetadataCreditLine(l.Content));
+            if (eligibleCount > 0 && (2.0 * seqPairs / eligibleCount) >= 0.65)
+            {
+                ApplyFold(IsSequentialTranslationPair);
+                return;
+            }
+        }
+
+        if (CountPairs(IsSameTimePair) >= 3)
+            ApplyFold(IsSameTimePair);
+    }
+
+    private bool IsSameTimePair(int i)
+    {
+        if (i + 1 >= Lines.Count) return false;
+        var a = Lines[i];
+        var b = Lines[i + 1];
+        if (Math.Abs(b.Position - a.Position) >= 0.02) return false;
+        if (string.IsNullOrWhiteSpace(a.Content) || string.IsNullOrWhiteSpace(b.Content)) return false;
+        if (a.Attachments.Translation() is not null || b.Attachments.Translation() is not null) return false;
+        if (string.Equals(a.Content.Trim(), b.Content.Trim(), StringComparison.OrdinalIgnoreCase)) return false;
+        return !(a.Position <= 0.5 && IsIntroColonCredit(a.Content) && IsIntroColonCredit(b.Content));
+    }
+
+    private bool IsSequentialTranslationPair(int i)
+    {
+        if (i + 1 >= Lines.Count) return false;
+        var a = Lines[i];
+        var b = Lines[i + 1];
+        var dt = b.Position - a.Position;
+        if (dt < -0.02 || dt > 15.0) return false;
+        if (string.IsNullOrWhiteSpace(a.Content) || string.IsNullOrWhiteSpace(b.Content)) return false;
+        if (a.Attachments.Translation() is not null || b.Attachments.Translation() is not null) return false;
+        if (IsMetadataCreditLine(a.Content) || IsMetadataCreditLine(b.Content)) return false;
+        return IsForeignSourceLine(a.Content) && IsChineseTranslationLine(b.Content);
+    }
+
+    private int CountPairs(Func<int, bool> matcher)
+    {
+        var pairs = 0;
+        for (var i = 0; i < Lines.Count - 1; i++)
+        {
+            if (!matcher(i)) continue;
+            pairs++;
+            i++;
+        }
+        return pairs;
+    }
+
+    private void ApplyFold(Func<int, bool> matcher)
+    {
+        var folded = new List<LyricsLine>(Lines.Count);
+        var trTag = LineAttachments.TranslationTag();
+        var attached = false;
+        for (var i = 0; i < Lines.Count; i++)
+        {
+            var current = Lines[i];
+            if (matcher(i))
+            {
+                var tr = Lines[i + 1].Content.Trim();
+                if (tr.Length > 0 && tr != "//")
+                {
+                    current.Attachments[trTag] = tr;
+                    attached = true;
+                }
+                i++;
+            }
+            folded.Add(current);
+        }
+        Lines.Clear();
+        Lines.AddRange(folded);
+        if (attached && !Metadata.AttachmentTags.Contains(trTag))
+            Metadata.AttachmentTags = new HashSet<string>(Metadata.AttachmentTags) { trTag };
+    }
+
+    private static bool IsIntroColonCredit(string s) =>
+        s.Contains('：') || s.Contains(':') || IsMetadataCreditLine(s);
+
+    private static bool IsMetadataCreditLine(string s)
+    {
+        var t = s.TrimStart();
+        return t.StartsWith("作词", StringComparison.Ordinal)
+            || t.StartsWith("作曲", StringComparison.Ordinal)
+            || t.StartsWith("编曲", StringComparison.Ordinal)
+            || t.StartsWith("制作", StringComparison.Ordinal)
+            || t.StartsWith("混音", StringComparison.Ordinal)
+            || t.StartsWith("母带", StringComparison.Ordinal)
+            || t.StartsWith("和声", StringComparison.Ordinal)
+            || t.StartsWith("录音", StringComparison.Ordinal)
+            || t.StartsWith("监制", StringComparison.Ordinal)
+            || t.StartsWith("词：", StringComparison.Ordinal) || t.StartsWith("词:", StringComparison.Ordinal)
+            || t.StartsWith("曲：", StringComparison.Ordinal) || t.StartsWith("曲:", StringComparison.Ordinal)
+            || t.StartsWith("翻译", StringComparison.Ordinal)
+            || t.StartsWith("Lyrics by", StringComparison.OrdinalIgnoreCase)
+            || t.StartsWith("Composed by", StringComparison.OrdinalIgnoreCase)
+            || t.StartsWith("Arranged by", StringComparison.OrdinalIgnoreCase)
+            || t.StartsWith("Produced by", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static (int cjk, int kana, int hangul, int latin) ClassifyScript(string s)
+    {
+        int cjk = 0, kana = 0, hangul = 0, latin = 0;
+        foreach (var c in s)
+        {
+            if (c >= '\u4E00' && c <= '\u9FFF') cjk++;
+            else if (c >= '\u3040' && c <= '\u30FF') kana++;
+            else if (c >= '\uAC00' && c <= '\uD7AF') hangul++;
+            else if (char.IsLetter(c)) latin++;
+        }
+        return (cjk, kana, hangul, latin);
+    }
+
+    private static bool IsForeignSourceLine(string s)
+    {
+        var (cjk, kana, hangul, latin) = ClassifyScript(s);
+        return kana > 0 || (cjk == 0 && (hangul > 0 || latin > 0));
+    }
+
+    private static bool IsChineseTranslationLine(string s)
+    {
+        var (cjk, kana, hangul, latin) = ClassifyScript(s);
+        return cjk > 0 && kana == 0 && hangul == 0 && cjk >= latin;
+    }
+
+    /// <summary>[offset:] 标签（毫秒）</summary>
     public int Offset
     {
         get => IdTags.TryGetValue(TagOffset, out var v) && int.TryParse(v, out var i) ? i : 0;
         set => IdTags[TagOffset] = value.ToString(CultureInfo.InvariantCulture);
     }
 
-    /// <summary>Offset의 초 단위 표현</summary>
+    /// <summary>Offset 的秒单位表示</summary>
     public double TimeDelay
     {
         get => Offset / 1000.0;
         set => Offset = (int)(value * 1000);
     }
 
-    /// <summary>[length:] 태그 (초). "mm:ss" 또는 "ss.x" 형식.</summary>
+    /// <summary>[length:] 标签（秒）。"mm:ss" 或 "ss.x" 格式。</summary>
     public double? Length
     {
         get
@@ -113,8 +253,8 @@ public sealed class Lyrics
     }
 
     /// <summary>
-    /// 재생 위치에 해당하는 (현재 라인, 다음 라인) 인덱스.
-    /// 비활성(enabled=false) 라인은 건너뛴다. LyricsKit의 subscript 포팅.
+    /// 播放位置对应的（当前行，下一行）索引。
+    /// 未启用（enabled=false）的行会被跳过。LyricsKit 的 subscript 移植。
     /// </summary>
     public (int? CurrentIndex, int? NextIndex) LineIndexesAt(double position)
     {
@@ -134,21 +274,32 @@ public sealed class Lyrics
         return (current, next);
     }
 
-    /// <summary>이진 탐색: 정확히 일치하면 (true, index), 아니면 (false, 삽입 위치)</summary>
+    /// <summary>二分查找：完全一致则返回 (true, 最后一个匹配下标)，否则返回 (false, 插入位置)</summary>
     internal (bool Found, int Index) FindLineIndex(double position)
     {
         int left = 0, right = Lines.Count - 1;
+        var lastMatch = -1;
         while (left <= right)
         {
             var mid = (left + right) / 2;
-            if (Lines[mid].Position < position) left = mid + 1;
-            else if (position < Lines[mid].Position) right = mid - 1;
-            else return (true, mid);
+            if (Lines[mid].Position < position)
+            {
+                left = mid + 1;
+            }
+            else if (position < Lines[mid].Position)
+            {
+                right = mid - 1;
+            }
+            else
+            {
+                lastMatch = mid;
+                left = mid + 1;
+            }
         }
-        return (false, left);
+        return lastMatch >= 0 ? (true, lastMatch) : (false, left);
     }
 
-    /// <summary>필터 조건에 맞지 않는 라인을 비활성화한다 (광고/크레딧 제거용).</summary>
+    /// <summary>把不符合过滤条件的行设为未启用（用于去除广告/制作名单）。</summary>
     public void Filtrate(Func<LyricsLine, bool> isIncluded)
     {
         foreach (var line in Lines)
@@ -157,7 +308,7 @@ public sealed class Lyrics
         }
     }
 
-    /// <summary>LyricsX 확장 LRC 직렬화 (첨부 라인 포함)</summary>
+    /// <summary>LyricsX 扩展 LRC 序列化（包含附加行）</summary>
     public override string ToString()
     {
         var components = IdTags.Select(kv => $"[{kv.Key}:{kv.Value}]")
@@ -166,9 +317,9 @@ public sealed class Lyrics
     }
 
     /// <summary>
-    /// 표준 LRC 직렬화 (번역은 【】 인라인).
-    /// preferredLang 지정 시 해당 언어 번역(tr:{lang})을 우선하고 없으면 generic(tr)으로 폴백 —
-    /// 화면 표시(기계번역 tr:{target} 우선)와 동일한 우선순위로 내보낸다.
+    /// 标准 LRC 序列化（翻译以 【】 内联）。
+    /// 指定 preferredLang 时优先该语言的翻译（tr:{lang}），没有则回退到 generic（tr）——
+    /// 按与界面显示（优先机器翻译 tr:{target}）相同的优先级导出。
     /// </summary>
     public string ToLegacyString(string? preferredLang = null)
     {
@@ -185,24 +336,24 @@ public sealed class Lyrics
 }
 
 /// <summary>
-/// 파싱 외 부가정보(출처, 검색 품질 등). M1-U4 랭킹에서 확장한다.
+/// 解析之外的附加信息（来源、搜索质量等）。在 M1-U4 排名中扩展。
 /// </summary>
 public sealed class LyricsMetadata
 {
     public IReadOnlySet<string> AttachmentTags { get; internal set; } = new HashSet<string>();
 
-    /// <summary>제공자 식별자 (예: "LRCLIB", "NetEase")</summary>
+    /// <summary>提供方标识符（例如 "LRCLIB"、"NetEase"）</summary>
     public string? ServiceName { get; set; }
 
-    /// <summary>제공자 내부 곡 식별 토큰 (재취득/캐시 키용)</summary>
+    /// <summary>提供方内部的曲目标识令牌（用于重新获取/缓存键）</summary>
     public string? ServiceToken { get; set; }
 
-    /// <summary>앨범아트 URL</summary>
+    /// <summary>专辑封面 URL</summary>
     public Uri? ArtworkUrl { get; set; }
 
-    /// <summary>검색 당시 요청 — 랭킹 계산에 사용</summary>
+    /// <summary>搜索当时的请求 —— 用于排名计算</summary>
     public Search.LyricsSearchRequest? Request { get; set; }
 
-    /// <summary>품질 점수 캐시 (LyricsQuality.Quality가 채운다)</summary>
+    /// <summary>质量分缓存（由 LyricsQuality.Quality 填充）</summary>
     public double? Quality { get; internal set; }
 }

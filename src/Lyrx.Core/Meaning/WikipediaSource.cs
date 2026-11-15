@@ -6,13 +6,13 @@ using Musebase.Core.Search;
 namespace Musebase.Core.Meaning;
 
 /// <summary>
-/// Wikipedia(MediaWiki API)에서 곡 문서의 도입부를 가져온다. **키가 필요 없다.**
-/// 유명 곡은 "Composition"·"Lyrics and interpretation" 같은 절이 통째로 있어 가장 밀도가 높다.
+/// 从 Wikipedia(MediaWiki API) 抓取歌曲条目的导言。**不需要密钥。**
+/// 知名歌曲会有"Composition"、"Lyrics and interpretation"之类的整节内容，密度最高。
 ///
-/// 검색은 <c>list=search</c>로 하되 **"(song)" 문서를 우선**한다 — 같은 제목의 앨범·영화
-/// 문서가 먼저 잡히는 일이 흔하다. 본문은 <c>prop=extracts&amp;exintro&amp;explaintext</c>로 받는다.
+/// 搜索用 <c>list=search</c>，但**优先 "(song)" 条目** — 同名专辑、电影条目
+/// 被先抓到的情况很常见。正文用 <c>prop=extracts&amp;exintro&amp;explaintext</c> 取。
 ///
-/// 문서 본문은 <b>CC BY-SA</b>다 — 출처와 라이선스를 화면에 함께 표기해야 한다(호출자 책임).
+/// 条目正文是 <b>CC BY-SA</b> — 必须在界面上同时标注出处与许可（由调用方负责）。
 /// </summary>
 public sealed partial class WikipediaSource : ISongMeaningSource
 {
@@ -22,8 +22,8 @@ public sealed partial class WikipediaSource : ISongMeaningSource
 
     private static readonly JsonSerializerOptions Json = new() { PropertyNameCaseInsensitive = true };
 
-    /// <param name="language">위키 언어 코드. 기본 영어 — 곡 해설은 영어판이 압도적으로 두껍다.</param>
-    /// <param name="timeoutMs">검색 + 본문 두 호출 전체의 예산(<see cref="GeniusSource"/> 참고).</param>
+    /// <param name="language">维基语言代码。默认英语 — 歌曲解说英文版压倒性地更厚实。</param>
+    /// <param name="timeoutMs">搜索 + 正文两次调用整体的预算（参见 <see cref="GeniusSource"/>）。</param>
     public WikipediaSource(string language = "en", HttpClient? http = null, int timeoutMs = 6000)
     {
         _endpoint = $"https://{language}.wikipedia.org/w/api.php";
@@ -56,19 +56,19 @@ public sealed partial class WikipediaSource : ISongMeaningSource
         }
         catch (Exception)
         {
-            return null; // 조용한 강등
+            return null; // 静默降级
         }
     }
 
     /// <summary>
-    /// 검색 결과 중 <b>이 곡의</b> 문서를 고른다. 확신이 없으면 <b>포기한다</b>(null) —
-    /// 여기서 고른 문서가 그대로 LLM의 근거가 되므로, 엉뚱한 문서를 넘기면 그럴듯하고 완전히
-    /// 틀린 "의미"가 만들어진다. 자료가 없는 것보다 나쁘다.
+    /// 从搜索结果里挑出<b>这首歌的</b>条目。没把握就<b>放弃</b>（null）—
+    /// 这里挑出的条目会直接成为 LLM 的依据，传错条目就会造出看似像样却完全
+    /// 错误的"含义"。那比没有资料更糟。
     ///
-    /// 실측으로 걸린 함정: "(song)"이 붙은 제목을 무조건 우선하면 <c>Kids / MGMT</c> 검색에서
-    /// 정답인 <c>Kids (MGMT song)</c>("(song)"이 아니라 "(MGMT song)"이다)를 제치고
-    /// 상위에 섞여 있던 <c>Pursuit of Happiness (song)</c>가 뽑혔다. 그래서 제목 일치를 먼저 보고
-    /// 아티스트 확인을 요구한다.
+    /// 实测踩到的坑：只要无条件优先带 "(song)" 的标题，搜索 <c>Kids / MGMT</c> 时
+    /// 就会放过正确答案 <c>Kids (MGMT song)</c>（不是 "(song)"，而是 "(MGMT song)"），
+    /// 反而挑中混在上位的 <c>Pursuit of Happiness (song)</c>。所以先看标题是否匹配，
+    /// 再要求确认艺术家。
     /// </summary>
     private async Task<string?> FindPageAsync(string title, string artist, CancellationToken ct)
     {
@@ -77,8 +77,8 @@ public sealed partial class WikipediaSource : ISongMeaningSource
         var t = clean?.Title ?? title;
         var a = clean?.Artist ?? artist;
 
-        // 검색어에는 **대표 이름 하나만** 넣는다 — 앨범 꼬리표나 공동 아티스트가 그대로 들어가면
-        // 검색이 흐려진다("little freak harry styles — harry's house song").
+        // 搜索词里只放**一个代表名** — 若把专辑后缀或合作艺术家一并塞进去，
+        // 搜索就会被搅浑（"little freak harry styles — harry's house song"）。
         var primary = ArtistNames.Primary(a);
         var query = string.IsNullOrWhiteSpace(primary) ? $"{t} song" : $"{t} {primary} song";
         var url = $"{_endpoint}?action=query&format=json&formatversion=2&list=search&srlimit=5"
@@ -91,8 +91,8 @@ public sealed partial class WikipediaSource : ISongMeaningSource
     }
 
     /// <summary>
-    /// 후보 중 가장 그럴듯한 곡 문서를 고른다(순수 함수 — 테스트 대상).
-    /// 조건을 못 채우면 null. 점수가 아니라 <b>필수 조건</b>으로 거른다.
+    /// 从候选中挑出最像这首歌的条目（纯函数 — 测试对象）。
+    /// 条件不满足则为 null。不是按分数筛，而是按<b>必要条件</b>筛。
     /// </summary>
     internal static string? PickPage(IReadOnlyList<SearchHit> hits, string title, string artist)
     {
@@ -107,25 +107,25 @@ public sealed partial class WikipediaSource : ISongMeaningSource
         {
             if (hit.Title is not { Length: > 0 } pageTitle) continue;
 
-            // 필수 ①: 문서 제목이 곡 제목을 담아야 한다.
+            // 必需 ①：条目标题必须包含歌曲标题。
             var normalizedPage = Normalize(pageTitle);
             if (!normalizedPage.Contains(wantedTitle, StringComparison.Ordinal)) continue;
 
-            // 이름 **하나라도** 걸리면 이 곡의 문서로 본다. 합작곡의 문서 제목은
-            // "Shallow (Lady Gaga and Bradley Cooper song)"처럼 우리가 받은 표기와 다르게 적히므로,
-            // 전원 일치를 요구하면 아무것도 통과하지 못한다.
+            // 只要命中**任一个**名字，就视为这首歌的条目。合作曲的条目标题会被写成
+            // "Shallow (Lady Gaga and Bradley Cooper song)"这种与我们收到的写法不同的形式，
+            // 若要求全员一致，反而什么都过不了。
             var normalizedSnippet = Normalize(hit.Snippet ?? "");
             var titleHasArtist = wantedArtists.Any(n => normalizedPage.Contains(n, StringComparison.Ordinal));
             var snippetHasArtist = wantedArtists.Any(n => normalizedSnippet.Contains(n, StringComparison.Ordinal));
 
-            // 필수 ②: 아티스트를 아는데 제목에도 스니펫에도 없으면 동명이곡일 수 있다 — 버린다.
+            // 必需 ②：知道艺术家，而标题和摘要里都没有，就可能是同名别的歌 — 丢弃。
             if (wantedArtists.Count > 0 && !titleHasArtist && !snippetHasArtist) continue;
 
             var score =
                   (titleHasArtist ? 4 : 0)                                                    // "Kids (MGMT song)"
-                + (pageTitle.Contains("song", StringComparison.OrdinalIgnoreCase) ? 2 : 0)     // 곡 문서 표식
+                + (pageTitle.Contains("song", StringComparison.OrdinalIgnoreCase) ? 2 : 0)     // 歌曲条目标记
                 + (snippetHasArtist ? 1 : 0)
-                + (normalizedPage == wantedTitle ? 1 : 0);                                    // 제목이 정확히 일치
+                + (normalizedPage == wantedTitle ? 1 : 0);                                    // 标题完全一致
 
             if (score > bestScore) (best, bestScore) = (hit, score);
         }
@@ -134,8 +134,8 @@ public sealed partial class WikipediaSource : ISongMeaningSource
     }
 
     /// <summary>
-    /// 비교에 쓸 아티스트 이름들. 너무 짧은 조각(<c>AC/DC</c> → "ac","dc")은 아무 데나 걸리므로
-    /// 버리고, 그렇게 다 버려지면 원본 전체로 되돌린다 — 확인 자체를 포기하는 것보다 낫다.
+    /// 用于比较的艺术家名字。过短的片段（<c>AC/DC</c> → "ac","dc"）会到处误命中，所以
+    /// 丢掉；若全被丢光就退回原始整体 — 这比放弃确认本身要好。
     /// </summary>
     private static IReadOnlyList<string> ArtistCandidates(string artist)
     {
@@ -157,12 +157,12 @@ public sealed partial class WikipediaSource : ISongMeaningSource
     [GeneratedRegex(@"\s+")]
     private static partial Regex WhitespaceRegex();
 
-    // ---- 응답 모델(필요한 필드만) ----
+    // ---- 响应模型（只保留需要的字段） ----
 
     private sealed record SearchEnvelope(SearchQuery? Query);
     private sealed record SearchQuery(SearchHit[]? Search);
 
-    /// <summary>검색 결과 한 건. <see cref="PickPage"/> 테스트를 위해 internal이다.</summary>
+    /// <summary>一条搜索结果。为了 <see cref="PickPage"/> 的测试而设为 internal。</summary>
     internal sealed record SearchHit(string? Title, string? Snippet);
 
     private sealed record QueryEnvelope(PageQuery? Query);

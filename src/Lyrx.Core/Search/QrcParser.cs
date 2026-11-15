@@ -5,8 +5,8 @@ using System.Text.RegularExpressions;
 namespace Musebase.Core.Search;
 
 /// <summary>
-/// QQ 音乐 QRC 본문 파서. LyricsKit의 QQMusicQrcParser.swift 포팅.
-/// [startMs,durationMs]본문 라인과 글자단위 fragment(absStartMs,durationMs) 인라인 태그를 해석한다.
+/// QQ 音乐 QRC 正文解析器。LyricsKit 的 QQMusicQrcParser.swift 移植。
+/// 解析 [startMs,durationMs]正文行与逐字 fragment(absStartMs,durationMs) 内联标签。
 /// </summary>
 internal static class QrcParser
 {
@@ -52,6 +52,7 @@ internal static class QrcParser
 
         foreach (var (k, v) in idTags) lyrics.IdTags[k] = v;
         lyrics.Metadata.AttachmentTags = new HashSet<string> { LineAttachments.TagTimeTag };
+        lyrics.FoldInterleavedTranslations();
         return lyrics;
     }
 }

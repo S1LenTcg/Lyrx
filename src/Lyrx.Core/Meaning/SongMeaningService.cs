@@ -1,10 +1,10 @@
 namespace Musebase.Core.Meaning;
 
-/// <summary>한 곡에 대한 의미 생성 결과.</summary>
+/// <summary>对一首歌生成含义的结果。</summary>
 /// <param name="Status">`ok` | `no-source` | `insufficient` | `failed` | `retry` | `config`.</param>
-/// <param name="Summary">생성된 대상 언어 문단. `ok`가 아니면 null.</param>
-/// <param name="Sources">근거로 쓴 원문들(출처 표기·재생성 판단용).</param>
-/// <param name="Detail">만들지 못했을 때 공급자가 준 이유(상태코드 포함). 로그·관리 화면용.</param>
+/// <param name="Summary">生成出的目标语言段落。不是 `ok` 时为 null。</param>
+/// <param name="Sources">作为依据的原文(用于标注来源、判断是否重新生成)。</param>
+/// <param name="Detail">生成失败时提供方给出的原因(含状态码)。用于日志与管理界面。</param>
 public sealed record SongMeaning(
     string Status,
     string? Summary,
@@ -14,31 +14,31 @@ public sealed record SongMeaning(
     string? Detail = null)
 {
     public const string Ok = "ok";
-    /// <summary>어느 소스에도 자료가 없었다 — LLM은 부르지 않았다.</summary>
+    /// <summary>任何来源都没有资料 —— 没有调用 LLM。</summary>
     public const string NoSource = "no-source";
-    /// <summary>자료는 있었지만 생성이 영구적으로 실패했다(키가 틀렸다, 응답이 비었다).</summary>
+    /// <summary>资料存在，但生成永久性失败(密钥错误、响应为空)。</summary>
     public const string Failed = "failed";
 
     /// <summary>
-    /// 일시적 실패(쿼타·서버·네트워크) — **저장하지 않는다.** 저장하면 쿼타가 풀린 뒤에도
-    /// 백필이 이 곡을 영영 건너뛴다. 이 상태는 DB에 들어가지 않는 값이다.
+    /// 暂时性失败(配额、服务器、网络) —— **不保存。** 若保存，配额恢复后
+    /// 回填也会永远跳过这首歌。该状态是不写入数据库的值。
     /// </summary>
     public const string Retry = "retry";
 
     /// <summary>
-    /// 엔진 설정(결제 잔액·키·모델 이름·계정 정책)을 사람이 고쳐야 한다 — **저장하지 않는다.**
-    /// 곡의 문제가 아니므로 행으로 남기면 백필이 멀쩡한 곡을 영영 건너뛴다. `retry`와 달리
-    /// 기다려도 풀리지 않으므로 화면에 이유를 그대로 보여 줘야 한다. DB에 들어가지 않는 값이다.
+    /// 引擎配置(结算余额、密钥、模型名称、账户策略)需要人工修正 —— **不保存。**
+    /// 这不是歌曲本身的问题，若留下记录，回填会永远跳过本来正常的歌曲。与 `retry` 不同，
+    /// 等待也解不开，因此必须在界面上如实显示原因。该状态是不写入数据库的值。
     /// </summary>
     public const string Config = "config";
 
-    /// <summary>저장하지 않는 상태인가(<see cref="Retry"/>·<see cref="Config"/>).</summary>
+    /// <summary>是否属于不保存的状态(<see cref="Retry"/>·<see cref="Config"/>)。</summary>
     public static bool IsUnsaved(string status) => status is Retry or Config;
 
     /// <summary>
-    /// 자료는 찾았지만 그것만으로는 곡의 의미를 말할 수 없었다. 문단은 남기되(사람이 판단할 수
-    /// 있게) **"의미 있음"으로 세지 않는다** — 글자가 있다는 이유로 세면 통계가 부풀고,
-    /// 앱에는 "파악하기 어렵다"는 문장이 곡 해설이라며 뜬다.
+    /// 找到了资料，但仅凭这些还不能说明歌曲的含义。段落保留(便于人工判断)，
+    /// 但 **不计入"有意义"** —— 只要有字就算，统计会虚高，
+    /// 应用里还会冒出"难以把握"这样的句子并当作歌曲解读。
     /// </summary>
     public const string Insufficient = "insufficient";
 
@@ -47,12 +47,12 @@ public sealed record SongMeaning(
 }
 
 /// <summary>
-/// 소스 수집 → 요약을 한 번에 수행한다.
+/// 一次性完成：收集来源 → 生成摘要。
 ///
-/// 두 가지가 설계의 핵심이다.
-/// 1. **소스는 병렬로, 실패는 무시.** 하나가 죽어도 나머지가 채운다.
-/// 2. **자료가 하나도 없으면 LLM을 부르지 않는다.** 곡 해설은 그럴듯한 창작이 특히 쉬운
-///    영역이라, 근거 없이 부르면 모델이 지어낸다. 토큰 낭비이기도 하다.
+/// 设计上有两个核心点。
+/// 1. **来源并行获取，失败直接忽略。** 一个挂掉，其余的照样补齐。
+/// 2. **一条资料都没有时不调用 LLM。** 歌曲解读恰恰是最容易
+///    被写成似是而非的领域，无依据地调用，模型就会编造。同时也是在浪费 token。
 /// </summary>
 public sealed class SongMeaningService
 {
@@ -65,10 +65,10 @@ public sealed class SongMeaningService
         _writer = writer;
     }
 
-    /// <summary>소스도 엔진도 구성되지 않았으면 이 기능은 꺼진 것이다.</summary>
+    /// <summary>来源与引擎都未配置，则该功能处于关闭状态。</summary>
     public bool IsEnabled => _writer is not null && _sources.Count > 0;
 
-    /// <summary>켜져 있는 소스 이름들 — 무엇에 근거해 만들어지는지 화면에 보여 주기 위한 것.</summary>
+    /// <summary>已启用的来源名称 —— 用于在界面上展示依据了哪些来源。</summary>
     public IReadOnlyList<string> SourceNames => _sources.Select(s => s.Name).ToList();
 
     public async Task<SongMeaning> BuildAsync(
@@ -84,7 +84,7 @@ public sealed class SongMeaningService
         var written = await _writer.WriteAsync(title, artist, collected, targetLang, ct).ConfigureAwait(false);
         if (written.Text is not null)
         {
-            // "자료가 부족하다"는 답도 정상 동작이지만 의미는 아니다 — 갈라서 기록한다.
+            // "资料不足"的答复也是正常行为，但不算有含义 —— 分开记录。
             var verdict = MeaningVerdict.IsInsufficient(written.Text)
                 ? SongMeaning.Insufficient
                 : SongMeaning.Ok;
@@ -93,7 +93,7 @@ public sealed class SongMeaningService
                 written.Engine ?? _writer.EngineId, written.Model ?? _writer.Model);
         }
 
-        // 쿼타·네트워크처럼 시간이 풀어 줄 실패와 설정 문제는 `failed`로 굳히지 않는다.
+        // 配额、网络这类靠时间能解决的失败与配置问题，不固化为 `failed`。
         var status = written.NeedsSetup ? SongMeaning.Config
             : written.Retryable ? SongMeaning.Retry
             : SongMeaning.Failed;
@@ -101,7 +101,7 @@ public sealed class SongMeaningService
             written.Engine ?? _writer.EngineId, written.Model ?? _writer.Model, DetailOf(written));
     }
 
-    /// <summary>"HTTP 402 · 잔액이 부족합니다"처럼 상태코드와 이유를 한 줄로.</summary>
+    /// <summary>把状态码与原因合成一行，如 "HTTP 402 · 余额不足"。</summary>
     private static string? DetailOf(MeaningWriteResult written) =>
         (written.StatusCode, written.Reason) switch
         {
@@ -111,7 +111,7 @@ public sealed class SongMeaningService
             _ => null,
         };
 
-    /// <summary>모든 소스를 동시에 부르고 성공한 것만 모은다(레지스트리 등록 순서 유지).</summary>
+    /// <summary>同时调用所有来源，只收集成功的结果(保持注册表注册顺序)。</summary>
     public async Task<IReadOnlyList<MeaningSource>> CollectAsync(
         string title, string artist, CancellationToken ct = default)
     {

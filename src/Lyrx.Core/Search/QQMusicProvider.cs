@@ -7,10 +7,10 @@ using System.Text.RegularExpressions;
 namespace Musebase.Core.Search;
 
 /// <summary>
-/// QQ 音乐(QQMusic) 제공자. LyricsKit의 QQMusic.swift 포팅.
-/// 검색은 smartbox(GET) + musicu(POST) 두 엔드포인트를 병합하고,
-/// lyric_download.fcg 응답 XML의 &lt;content&gt;/&lt;contentts&gt;를 QRC(3중 DES) 복호해 파싱한다.
-/// 네트워크·XML 스키마는 오프라인 검증이 불가하여 방어적으로 처리한다(실패 시 후보 건너뜀).
+/// QQ 音乐(QQMusic) 提供者。LyricsKit 的 QQMusic.swift 移植版。
+/// 搜索合并 smartbox(GET) + musicu(POST) 两个端点，
+/// 并对 lyric_download.fcg 响应 XML 中的 &lt;content&gt;/&lt;contentts&gt; 做 QRC(三重 DES) 解密后解析。
+/// 网络与 XML 结构无法离线验证，因此按防御式处理（失败时跳过该候选）。
 /// </summary>
 public sealed partial class QQMusicProvider : LyricsProviderBase<QQMusicProvider.SongToken>
 {
@@ -120,12 +120,12 @@ public sealed partial class QQMusicProvider : LyricsProviderBase<QQMusicProvider
         return lyrics;
     }
 
-    // ---- QRC/XML 복호 (QQMusicXMLDecoder.swift 상당, 경량화) ----
+    // ---- QRC/XML 解密（对应 QQMusicXMLDecoder.swift，已精简） ----
 
     /// <summary>
-    /// &lt;name ...속성...&gt;내용&lt;/name&gt; 요소의 내부 텍스트 추출(첫 매치).
-    /// 실제 QQ 응답은 `&lt;content type="file" ...&gt;&lt;![CDATA[HEX]]&gt;` 형태라
-    /// 속성을 허용하고 CDATA 래퍼를 벗긴다.
+    /// &lt;name ...属性...&gt;内容&lt;/name&gt; 元素的内部文本提取（首个匹配）。
+    /// 实际 QQ 响应形如 `&lt;content type="file" ...&gt;&lt;![CDATA[HEX]]&gt;`，
+    /// 因此允许属性并剥掉 CDATA 外壳。
     /// </summary>
     private static string? ExtractElement(string xml, string name)
     {
@@ -138,7 +138,7 @@ public sealed partial class QQMusicProvider : LyricsProviderBase<QQMusicProvider
     }
 
     /// <summary>
-    /// hex(QRC)면 3중 DES 복호, 아니면 원문. 중첩 XML(LyricContent 속성)이면 실제 가사만 추출한다.
+    /// 是 hex(QRC) 则做三重 DES 解密，否则取原文。若是嵌套 XML(LyricContent 属性) 则只提取真正的歌词。
     /// </summary>
     internal static string? DecodeSingleLyricText(string text)
     {
@@ -183,7 +183,7 @@ public sealed partial class QQMusicProvider : LyricsProviderBase<QQMusicProvider
     [GeneratedRegex(@"\s+")]
     private static partial Regex WhitespaceRegex();
 
-    // ---- 검색 토큰 & 응답 모델 ----
+    // ---- 搜索令牌与响应模型 ----
 
     public sealed record SongToken(string Id, string Mid, string Name, IReadOnlyList<string> Singers);
 

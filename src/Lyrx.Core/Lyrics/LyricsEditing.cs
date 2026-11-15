@@ -3,12 +3,12 @@ using System.Text;
 namespace Musebase.Core;
 
 /// <summary>
-/// 가사 편집 창의 "간편 보기" 지원. 특정 번역 언어만 [시간]원문【번역】으로 직렬화하고,
-/// 편집 결과를 원본 모델에 병합한다(위치가 일치하는 줄의 글자단위 태그·타 언어 번역은 보존).
+/// 歌词编辑窗口的“简洁视图”支持。只把指定翻译语言序列化为 [时间]原文【译文】，
+/// 并把编辑结果合并回原始模型（保留位置相同行的字符级标签与其他语言的翻译）。
 /// </summary>
 public static class LyricsEditing
 {
-    /// <summary>가사에 존재하는 번역 태그 목록(항상 generic "tr" 포함). 예: ["tr", "tr:ja", "tr:ko"].</summary>
+    /// <summary>歌词中存在的翻译标签列表（始终包含 generic "tr"）。例如：["tr", "tr:ja", "tr:ko"]。</summary>
     public static IReadOnlyList<string> TranslationTags(Lyrics lyrics)
     {
         var set = new SortedSet<string>(StringComparer.Ordinal) { LineAttachments.TagTranslationPrefix };
@@ -23,7 +23,7 @@ public static class LyricsEditing
         key == LineAttachments.TagTranslationPrefix
         || key.StartsWith(LineAttachments.TagTranslationPrefix + ":", StringComparison.Ordinal);
 
-    /// <summary>선택 언어(tag)만 인라인 번역으로 담은 간편 텍스트: [시간]원문【번역】.</summary>
+    /// <summary>只包含所选语言（tag）内联翻译的简洁文本：[时间]原文【译文】。</summary>
     public static string ToSimpleText(Lyrics lyrics, string tag)
     {
         var sb = new StringBuilder();
@@ -38,9 +38,9 @@ public static class LyricsEditing
     }
 
     /// <summary>
-    /// 간편 텍스트 편집 결과를 원본에 병합한다. 원본의 ID 태그를 유지하고,
-    /// 위치가 일치하는 줄에서는 글자단위 태그(tt)와 편집 대상이 아닌 언어의 번역을 보존한다.
-    /// 파싱 실패 시 null.
+    /// 把简洁文本的编辑结果合并回原始数据。保留原始数据中的 ID 标签，
+    /// 对位置相同的行保留字符级标签（tt）以及非编辑对象的语言翻译。
+    /// 解析失败时返回 null。
     /// </summary>
     public static Lyrics? ApplySimpleEdit(Lyrics original, string simpleText, string tag)
     {
@@ -55,13 +55,13 @@ public static class LyricsEditing
         foreach (var parsedLine in parsed.Lines)
         {
             var att = new LineAttachments();
-            // 위치가 같은 원본 줄에서 tt·타 언어 번역 복원(편집 대상 태그는 제외)
+            // 从位置相同的原始行恢复 tt 与其他语言的翻译（排除编辑对象的标签）
             if (byPos.TryGetValue(PosKey(parsedLine.Position), out var orig))
                 foreach (var (key, value) in orig.Attachments.Content)
                     if (key != tag)
                         att[key] = value;
 
-            // 편집된 번역(간편 텍스트의 【】는 generic "tr"로 파싱됨)을 선택 태그로 설정
+            // 把编辑后的翻译（简洁文本中的【】会被解析为 generic "tr"）设置为所选标签
             var editedTranslation = parsedLine.Attachments.Translation();
             if (!string.IsNullOrEmpty(editedTranslation))
                 att[tag] = editedTranslation;

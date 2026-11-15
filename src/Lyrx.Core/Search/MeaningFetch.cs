@@ -1,24 +1,24 @@
 namespace Musebase.Core.Search;
 
-/// <summary>의미 조회 한 번의 결과 — 글(있으면), 그리고 서버가 지금 만드는 중인가.</summary>
+/// <summary>一次含义查询的结果 —— 文本(如果有)，以及服务器当前是否正在生成。</summary>
 public sealed record MeaningLookup(SongMeaningView? Meaning, bool Pending, int RetryAfterMs)
 {
     public static readonly MeaningLookup None = new(null, false, 0);
 }
 
 /// <summary>
-/// "서버가 만드는 중이면 잠시 기다렸다 받는다" — 가사의 서버 번역 받기와 같은 흐름을 의미에도 쓴다.
+/// "服务器正在生成就稍等再取" —— 与获取歌词服务器翻译相同的流程，也用于含义。
 ///
-/// 새로 올라온 곡은 서버가 의미를 자동으로 만든다(수 초). 앱이 그 사이에 물으면 404에 <c>pending</c>이
-/// 오고, 여기서 <c>retryAfterMs</c> 간격으로 다시 묻는다. 서버가 힌트를 주지 않으면(없음·자료없음으로
-/// 끝난 곡·구버전 서버) 한 번 묻고 끝난다 — 기다려도 소용없는 곡에 요청을 쌓지 않는다.
+/// 新上传的歌曲由服务器自动生成含义(数秒)。若应用在此期间询问，会返回 404 并带上 <c>pending</c>，
+/// 这里按 <c>retryAfterMs</c> 间隔再次询问。服务器没有给出提示时(歌曲以无结果·资料不足
+/// 结束、旧版服务器)，问一次就结束 —— 不给"等也没用"的歌曲堆积请求。
 ///
-/// <b>await에 ConfigureAwait(false)를 쓰지 않는다</b> — <paramref name="onPending"/>이 화면을 고치므로
-/// UI 스레드에서 불러야 한다(WPF·Android 모두).
+/// <b>await 上不使用 ConfigureAwait(false)</b> —— <paramref name="onPending"/> 会修改界面，
+/// 因此必须在 UI 线程调用(WPF 与 Android 皆然)。
 /// </summary>
 public static class MeaningFetch
 {
-    /// <summary>기다리는 상한(ms). 서버 생성은 보통 2~5초라 넉넉하다.</summary>
+    /// <summary>等待上限(ms)。服务器生成通常 2~5 秒，这个余量足够。</summary>
     public const int DefaultMaxWaitMs = 20_000;
 
     public static async Task<SongMeaningView?> AwaitAsync(

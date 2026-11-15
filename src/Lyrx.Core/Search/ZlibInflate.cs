@@ -4,9 +4,9 @@ using System.Text;
 namespace Musebase.Core.Search;
 
 /// <summary>
-/// KRC/QRC 페이로드 압축 해제. 원본(LyricsKit)은 Apple Compression의 .zlib(=raw DEFLATE)로
-/// "앞 2바이트 제거 후" 해제하지만, 실제 데이터가 zlib 래핑인지 raw DEFLATE인지 확정할 수 없어
-/// 두 해석을 순서대로 시도한다: (1) 전체 버퍼를 zlib(RFC1950)로, 실패 시 (2) 앞 2바이트를 건너뛴 raw DEFLATE.
+/// KRC/QRC 载荷的解压。原始实现（LyricsKit）用 Apple Compression 的 .zlib（即 raw DEFLATE），
+/// 以"去掉前 2 个字节后"解压；但无法确定实际数据是 zlib 封装还是 raw DEFLATE，
+/// 于是按顺序尝试两种解释：(1) 把整个缓冲区当 zlib(RFC1950)，失败时 (2) 跳过前 2 字节按 raw DEFLATE。
 /// </summary>
 internal static class ZlibInflate
 {

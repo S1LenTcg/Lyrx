@@ -7,10 +7,10 @@ using Musebase.Core;
 namespace Musebase.Windows;
 
 /// <summary>
-/// 현재 가사 편집 창.
-/// - 전체 보기: 확장 LRC(무손실). tt·모든 언어 번역까지 그대로.
-/// - 간편 보기: 선택 언어만 [시간]원문【번역】으로 표시(언어 콤보 제공). 저장 시 원본에 병합.
-/// 저장 시 파싱 검증 후 onSaved 콜백으로 넘긴다.
+/// 当前歌词编辑窗口。
+/// - 完整视图：扩展 LRC（无损）。tt 与所有语言的译文都原样保留。
+/// - 简易视图：只显示所选语言，格式为 [时间]原文【译文】（提供语言下拉框）。保存时合并回原文。
+/// 保存时先做解析校验，再通过 onSaved 回调交出结果。
 /// </summary>
 public sealed class LyricsEditorWindow : Window
 {
@@ -22,9 +22,9 @@ public sealed class LyricsEditorWindow : Window
     private readonly ComboBox _langCombo;
     private readonly Action<Lyrics> _onSaved;
 
-    private Lyrics _working;         // 편집 대상 모델
+    private Lyrics _working;         // 编辑目标模型
     private string _selectedTag = LineAttachments.TagTranslationPrefix;
-    private bool _suppress;          // 프로그램적 변경 시 이벤트 무시
+    private bool _suppress;          // 程序性改动时忽略事件
 
     public LyricsEditorWindow(string trackLabel, Lyrics lyrics, Action<Lyrics> onSaved)
     {
@@ -77,7 +77,7 @@ public sealed class LyricsEditorWindow : Window
         var save = new Button { Content = Loc.T("common.save"), Width = 90, IsDefault = true, Margin = new Thickness(0, 8, 8, 0) };
         var cancel = new Button { Content = Loc.T("common.cancel"), Width = 90, IsCancel = true, Margin = new Thickness(0, 8, 0, 0) };
 
-        // ---- 이벤트 ----
+        // ---- 事件 ----
         _simpleToggle.Checked += (_, _) => SwitchView(simple: true, langLabel);
         _simpleToggle.Unchecked += (_, _) => SwitchView(simple: false, langLabel);
         _langCombo.SelectionChanged += (_, _) =>
@@ -97,11 +97,11 @@ public sealed class LyricsEditorWindow : Window
         _simpleToggle.Checked += (_, _) => UpdateHint();
         _simpleToggle.Unchecked += (_, _) => UpdateHint();
 
-        // 초기: 전체 보기
+        // 初始：完整视图
         _editor.Text = _working.ToString();
         UpdateHint();
 
-        // ---- 레이아웃 ----
+        // ---- 布局 ----
         var topBar = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 4) };
         topBar.Children.Add(_simpleToggle);
         topBar.Children.Add(langLabel);
@@ -124,7 +124,7 @@ public sealed class LyricsEditorWindow : Window
         Content = root;
     }
 
-    /// <summary>현재 편집기 텍스트를 모델(_working)에 반영. 실패 시 상태 표시 후 false.</summary>
+    /// <summary>把当前编辑器文本写回模型（_working）。失败时在状态栏提示并返回 false。</summary>
     private bool CaptureEdits()
     {
         _status.Text = "";
@@ -155,10 +155,10 @@ public sealed class LyricsEditorWindow : Window
     {
         if (_suppress) return;
 
-        // 전환 전에 현재 편집 내용을 모델에 반영
+        // 切换前先把当前的编辑内容写回模型
         if (!CaptureEdits())
         {
-            // 실패하면 토글 되돌림
+            // 失败则把开关拨回去
             _suppress = true;
             _simpleToggle.IsChecked = !simple;
             _suppress = false;

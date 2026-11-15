@@ -5,11 +5,11 @@ using System.Windows.Interop;
 namespace Musebase.Windows.Services;
 
 /// <summary>
-/// 창이 놓인 <b>그 모니터</b>의 작업영역(작업표시줄 제외).
+/// 窗口所在<b>那块显示器</b>的工作区（不含任务栏）。
 ///
-/// <see cref="SystemParameters.WorkArea"/>는 <b>주 모니터만</b> 돌려준다. 듀얼 모니터에서
-/// 보조 화면에 둔 창을 그 값으로 보정하면 창이 주 모니터로 끌려온다 — 그래서 네이티브로 묻는다.
-/// 핸들이 아직 없거나 조회가 실패하면 주 모니터 작업영역으로 물러난다(예전 동작).
+/// <see cref="SystemParameters.WorkArea"/> 只返回<b>主显示器</b>的数值。在多显示器环境下，
+/// 若用它来校正放在副屏上的窗口，窗口会被拉到主显示器上 —— 所以改为直接向系统原生查询。
+/// 若句柄尚不存在或查询失败，则退回到主显示器的工作区（旧行为）。
 /// </summary>
 public static class MonitorWorkArea
 {
@@ -36,7 +36,7 @@ public static class MonitorWorkArea
             if (!GetMonitorInfoW(monitor, ref info)) return fallback;
 
             var rect = fullMonitor ? info.rcMonitor : info.rcWork;
-            // 물리 픽셀을 WPF 좌표(DIP)로 바꾼다.
+            // 把物理像素换算成 WPF 坐标（DIP）。
             var source = PresentationSource.FromVisual(window);
             var m = source?.CompositionTarget?.TransformFromDevice;
             var topLeft = new Point(rect.Left, rect.Top);
@@ -51,7 +51,7 @@ public static class MonitorWorkArea
         }
         catch (Exception)
         {
-            return fallback;   // 조용한 강등 — 위치 보정이 창을 못 띄우면 안 된다
+            return fallback;   // 静默降级 —— 位置校正绝不能导致窗口无法显示
         }
     }
 

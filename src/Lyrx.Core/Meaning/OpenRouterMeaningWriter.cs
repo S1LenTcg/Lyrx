@@ -7,14 +7,14 @@ using Musebase.Core.Search;
 namespace Musebase.Core.Meaning;
 
 /// <summary>
-/// OpenRouter로 의미를 쓴다 — **모델을 갈아끼우기 위한 엔진**이다.
+/// 通过 OpenRouter 写含义 — 这是一个**用于更换模型的引擎**。
 ///
-/// 엔드포인트가 OpenAI 호환(<c>/api/v1/chat/completions</c>)이라 키 하나로 Claude·Gemini·GPT·Llama를
-/// 모두 부를 수 있고, 바꾸는 것은 <c>model</c> 문자열 하나뿐이다(예: <c>anthropic/claude-opus-5</c>,
-/// <c>google/gemini-2.5-flash</c>). 같은 곡을 여러 모델로 만들어 문장 품질을 비교할 때 쓴다.
+/// 端点兼容 OpenAI（<c>/api/v1/chat/completions</c>），所以用一个密钥就能调用 Claude·Gemini·GPT·Llama，
+/// 要换的只是 <c>model</c> 字符串本身（例如 <c>anthropic/claude-opus-5</c>、
+/// <c>google/gemini-2.5-flash</c>）。在把同一首歌交给多个模型生成、比较句子质量时使用。
 ///
-/// 대가로 플랫폼 수수료가 붙으므로, 대량 백필의 기본값은 무료 티어가 있는
-/// <see cref="GeminiMeaningWriter"/> 쪽이 낫다.
+/// 代价是要付平台手续费，所以大批量回填的默认值更适合选、
+/// 有免费额度的 <see cref="GeminiMeaningWriter"/>。
 /// </summary>
 public sealed class OpenRouterMeaningWriter : IMeaningWriter
 {
@@ -72,14 +72,14 @@ public sealed class OpenRouterMeaningWriter : IMeaningWriter
                 Content = JsonContent.Create(payload, options: Json),
             };
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _apiKey);
-            // OpenRouter가 순위·통계에 쓰는 선택 헤더. 넣어 두면 대시보드에서 어떤 앱인지 보인다.
+            // OpenRouter 用于排序·统计的可选头。带上它，仪表盘里就能看出是哪个应用。
             request.Headers.Add("X-Title", "Musebase");
             request.Headers.Add("HTTP-Referer", "https://github.com/countnine/musebase");
 
             using var response = await _http.SendAsync(request, cts.Token).ConfigureAwait(false);
             if (!response.IsSuccessStatusCode)
             {
-                // 본문을 버리지 않는다 — "잔액 부족"·"모델 없음" 같은 진짜 이유가 여기에만 있다.
+                // 不丢弃响应正文 — 像"余额不足"·"模型不存在"这样的真实原因只存在于这里。
                 var error = await response.Content.ReadAsStringAsync(cts.Token).ConfigureAwait(false);
                 return MeaningWriteResult.FromStatus(response.StatusCode, error);
             }
@@ -87,24 +87,24 @@ public sealed class OpenRouterMeaningWriter : IMeaningWriter
             var body = await response.Content.ReadFromJsonAsync<ChatResponse>(Json, cts.Token).ConfigureAwait(false);
             var text = body?.Choices?.FirstOrDefault()?.Message?.Content;
             return string.IsNullOrWhiteSpace(text)
-                ? MeaningWriteResult.Failed with { Reason = "응답 본문이 비어 있음" }
+                ? MeaningWriteResult.Failed with { Reason = "响应正文为空" }
                 : MeaningWriteResult.Written(text!.Trim());
         }
         catch (OperationCanceledException)
         {
-            return MeaningWriteResult.Transient with { Reason = "응답 시간 초과" }; // 타임아웃·취소 — 결과를 모른다
+            return MeaningWriteResult.Transient with { Reason = "响应超时" }; // 超时·取消 — 结果未知
         }
         catch (HttpRequestException ex)
         {
-            return MeaningWriteResult.Transient with { Reason = MeaningWriteResult.ReasonOf(ex.Message) }; // 네트워크는 다음에 될 수 있다
+            return MeaningWriteResult.Transient with { Reason = MeaningWriteResult.ReasonOf(ex.Message) }; // 网络问题下次可能就好了
         }
         catch (Exception ex)
         {
-            return MeaningWriteResult.Failed with { Reason = ex.GetType().Name }; // 조용한 강등
+            return MeaningWriteResult.Failed with { Reason = ex.GetType().Name }; // 静默降级
         }
     }
 
-    // ---- 요청/응답 모델(OpenAI 호환, 필요한 필드만) ----
+    // ---- 请求/响应模型（兼容 OpenAI，只保留需要的字段） ----
 
     private sealed record ChatRequest
     {
@@ -112,9 +112,9 @@ public sealed class OpenRouterMeaningWriter : IMeaningWriter
         public ChatMessage[] Messages { get; init; } = [];
 
         /// <summary>
-        /// 반드시 보낸다. 비워 두면 OpenRouter가 모델 최대치(실측 65,535)를 예약하려 들고,
-        /// 잔액이 그만큼을 감당 못 하면 <b>402</b>로 거절한다 — 정작 우리가 쓰는 건 몇백 토큰이다.
-        /// 상한을 두면 폭주 비용도 함께 막힌다.
+        /// 必须发送。留空的话 OpenRouter 会试图预留模型的最大值（实测 65,535），
+        /// 而余额撑不住那么多就会被 <b>402</b> 拒绝 — 可我们实际只写几百个 token。
+        /// 设个上限也一并挡住了失控的开销。
         /// </summary>
         [property: JsonPropertyName("max_tokens")]
         public int MaxTokens { get; init; } = MeaningPrompt.MaxOutputTokens;

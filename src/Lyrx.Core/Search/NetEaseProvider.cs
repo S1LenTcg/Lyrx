@@ -6,9 +6,9 @@ using System.Text.RegularExpressions;
 namespace Musebase.Core.Search;
 
 /// <summary>
-/// NetEase 클라우드 뮤직. LyricsKit의 NetEase.swift 포팅.
-/// 검색은 공개 API(2-pass 쿠키), 가사는 EAPI(AES-ECB) 사용.
-/// yrc/klyric(글자 단위) 형식은 P1 — 현재는 lrc + tlyric 번역 병합만.
+/// NetEase 云音乐。LyricsKit 的 NetEase.swift 移植。
+/// 搜索使用公开 API（两段式 Cookie），歌词使用 EAPI（AES-ECB）。
+/// yrc/klyric（逐字）格式为 P1 —— 当前只做 lrc + tlyric 翻译合并。
 /// </summary>
 public sealed partial class NetEaseProvider : LyricsProviderBase<NetEaseProvider.Song>
 {
@@ -43,7 +43,7 @@ public sealed partial class NetEaseProvider : LyricsProviderBase<NetEaseProvider
             return req;
         }
 
-        // 1차 요청에서 Set-Cookie 추출 후 2차 요청 (원본 로직 유지)
+        // 首次请求提取 Set-Cookie 后再发第二次请求（保持原有逻辑）
         string? cookie = null;
         using (var first = await _http.SendAsync(BuildRequest(null), ct).ConfigureAwait(false))
         {
@@ -82,7 +82,7 @@ public sealed partial class NetEaseProvider : LyricsProviderBase<NetEaseProvider
         var response = JsonSerializer.Deserialize<LyricsResponse>(raw, JsonOptions);
         if (response is null) return null;
 
-        // 글자 단위(yrc 신형 → klyric 구형) 우선, 없으면 라인 단위 lrc
+        // 优先逐字格式（yrc 新式 → klyric 旧式），没有则用行级 lrc
         var lyrics = ParseWordLevel(response) ?? ParseFixed(response.Lrc?.Lyric);
         if (lyrics is null) return null;
 
@@ -103,11 +103,11 @@ public sealed partial class NetEaseProvider : LyricsProviderBase<NetEaseProvider
         return lyrics;
     }
 
-    /// <summary>NetEase 특유의 [mm:ss:xx] 타임태그를 [mm:ss.xx]로 교정 후 파싱</summary>
+    /// <summary>先把 NetEase 特有的 [mm:ss:xx] 时间标签修正为 [mm:ss.xx]，再解析</summary>
     private static Lyrics? ParseFixed(string? lrc) =>
         string.IsNullOrEmpty(lrc) ? null : Lyrics.Parse(TimeTagFixer().Replace(lrc, "$1.$2"));
 
-    /// <summary>글자 단위 가사(yrc/klyric) 파싱. 유효 라인이 없으면 null.</summary>
+    /// <summary>解析逐字歌词（yrc/klyric）。无有效行时返回 null。</summary>
     private static Lyrics? ParseWordLevel(LyricsResponse response)
     {
         if (!string.IsNullOrEmpty(response.Yrc?.Lyric) &&
@@ -124,7 +124,7 @@ public sealed partial class NetEaseProvider : LyricsProviderBase<NetEaseProvider
     [GeneratedRegex(@"(\[\d+:\d+):(\d+\])")]
     private static partial Regex TimeTagFixer();
 
-    // ---- 응답 모델 ----
+    // ---- 响应模型 ----
 
     internal sealed record SearchResponse([property: JsonPropertyName("result")] SearchResult? Result);
 

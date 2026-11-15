@@ -8,41 +8,41 @@ using Musebase.Core.Search;
 namespace Musebase.Core.Translation;
 
 /// <summary>
-/// OpenRouter(OpenAI 호환 <c>/chat/completions</c>)로 가사를 번역한다 —
-/// <b>모델을 갈아끼우기 위한 엔진</b>이다. 키 하나로 Claude·Gemini·GPT·Llama를 부를 수 있고
-/// 바꾸는 것은 <c>model</c> 문자열뿐이다.
+/// 通过 OpenRouter(兼容 OpenAI 的 <c>/chat/completions</c>)翻译歌词 ——
+/// 它是<b>用来替换模型的引擎</b>。一个密钥就能调用 Claude、Gemini、GPT、Llama，
+/// 而切换的只是 <c>model</c> 字符串本身。
 ///
-/// 기계 번역기와 성격이 다르다. DeepL·Google은 한 줄을 넣으면 한 줄이 나오지만 LLM은
-/// <b>줄 수를 지키지 않을 수 있다</b> — 두 줄을 한 문장으로 합치거나 설명을 덧붙인다. 가사는 줄이
-/// 곧 타이밍이라 하나만 밀려도 화면 전체가 어긋나므로, 받은 줄 수가 다르면 <b>그 묶음을 통째로
-/// 버린다</b>(전부 null = 번역 없음). 반쯤 맞은 번역보다 번역이 없는 편이 낫다.
+/// 它的性质与机器翻译不同。DeepL、Google 是一行进、一行出，LLM 却
+/// <b>可能不守住行数</b> —— 它会把两行合成一句，或额外添上说明。歌词的行
+/// 就是时间轴，只要错开一行，整屏都会错位，所以收到的行数不一致时，<b>就把整块
+/// 丢弃</b>(全部为 null = 视为没有翻译)。比起翻了一半的译文，没有译文更好。
 ///
-/// <b>묶음 크기가 줄 수 정확도를 좌우한다</b>(2026-09 실측, 백로그 10곡 806줄): 40줄 묶음에서는
-/// 어느 모델도 계약을 못 지켰고(24묶음 중 2~4개 폐기), 20줄로 줄이자 <c>gemini-2.5-flash-lite</c>가
-/// 44묶음 전부를 지켰다. 번역 <b>전용</b> 모델(Tencent HY-MT2)은 오히려 더 나빴다 — 우리가 요구하는
-/// 것은 번역 품질이 아니라 지시 따르기이기 때문이다.
+/// <b>块的大小决定行数准确率</b>(2026-09 实测，积压 10 首歌 806 行)：在 40 行一块时，
+/// 任何模型都守不住契约(24 块中有 2~4 块被丢弃)，缩到 20 行后 <c>gemini-2.5-flash-lite</c>
+/// 守住了全部 44 块。翻译<b>专用</b>模型(Tencent HY-MT2)反而更差 —— 因为我们要
+/// 求的不是翻译质量，而是指令遵循。
 ///
-/// 대가로 플랫폼 수수료가 붙는다. 곡을 많이 도는 용도라면 무료 티어가 있는 쪽이 낫다 —
-/// 이 엔진은 "이 곡을 이 모델이 어떻게 옮기나" 보려고 두는 것이다.
+/// 代价是要付平台手续费。如果只是大量刷歌的用途，有免费额度的方案更好 ——
+/// 这个引擎留着是为了看「这首歌由这个模型会怎么转写」。
 /// </summary>
 public sealed class OpenRouterTranslator : ITranslator
 {
     private const string Endpoint = "https://openrouter.ai/api/v1/chat/completions";
 
-    /// <summary>모델을 안 고르면 이것 — 의미 생성 쪽과 같은 기본값(싸고 빠르다).</summary>
+    /// <summary>不选模型时就用它 —— 与意义生成侧相同的默认值(便宜又快)。</summary>
     public const string DefaultModel = "google/gemini-2.5-flash";
 
     /// <summary>
-    /// 한 번에 보낼 줄 수. <b>이 값이 줄 수 정확도를 좌우한다.</b> 2026-09 실측(백로그 10곡 806줄):
-    /// 40줄 묶음에서는 어느 모델도 계약을 못 지켰고(24묶음 중 2~4개 폐기), <b>20줄로 줄이자
-    /// <c>gemini-2.5-flash-lite</c>가 44묶음 전부를 지켰다</b>. 길면 모델이 중간을 빼먹는다.
+    /// 一次发送的行数。<b>这个值决定行数准确率。</b>2026-09 实测(积压 10 首歌 806 行)：
+    /// 在 40 行一块时任何模型都守不住契约(24 块中有 2~4 块被丢弃)，<b>缩到 20 行后
+    /// <c>gemini-2.5-flash-lite</c>守住了全部 44 块</b>。太长模型会漏掉中间部分。
     /// </summary>
     public const int DefaultMaxLinesPerRequest = 20;
 
-    /// <summary>한 번에 보낼 누적 글자 수 — 긴 줄이 섞여도 요청이 비대해지지 않게.</summary>
+    /// <summary>一次发送的累计字符数 —— 即使混入长行，请求也不会变得臃肿。</summary>
     public const int DefaultMaxCharsPerRequest = 1800;
 
-    /// <summary>출력 토큰 상한의 천장. 모델마다 더 낮을 수 있어 생성자로 좁힐 수 있다.</summary>
+    /// <summary>输出 token 上限的封顶值。各模型可能更低，可用构造函数收窄。</summary>
     public const int DefaultMaxOutputTokens = 8000;
 
     private static readonly JsonSerializerOptions Json = new()
@@ -59,9 +59,9 @@ public sealed class OpenRouterTranslator : ITranslator
     private readonly int _maxChars;
 
     /// <param name="maxOutputTokens">
-    /// 이 모델이 받아 주는 출력 토큰 상한(비우면 <see cref="DefaultMaxOutputTokens"/>).
-    /// <b>묶음 크기가 여기서 파생된다</b> — 두 값을 따로 두면 "상한은 4096인데 8000을 요청하는"
-    /// 조합이 생기고, 그러면 응답이 잘려 묶음이 통째로 버려진다. 사람이 상한 하나만 적으면 된다.
+    /// 该模型接受的输出 token 上限(留空则用 <see cref="DefaultMaxOutputTokens"/>)。
+    /// <b>块的大小由此派生</b> —— 两个值分开放，就会出现「上限是 4096，却请求 8000」的
+    /// 组合，那样响应会被截断，整块被丢弃。人只需要填一个上限即可。
     /// </param>
     public OpenRouterTranslator(
         string apiKey, string? model = null, HttpClient? http = null, int timeoutMs = 60_000,
@@ -73,7 +73,7 @@ public sealed class OpenRouterTranslator : ITranslator
         _timeout = TimeSpan.FromMilliseconds(Math.Clamp(timeoutMs, 1000, 180_000));
         _maxOutputTokens = Math.Clamp(maxOutputTokens ?? DefaultMaxOutputTokens, 512, 32_000);
 
-        // 출력 상한에서 묶음을 역산한다. max_tokens = 입력길이*2 + 256 이므로 그 역이다.
+        // 从输出上限反推块大小。因为 max_tokens = 输入长度*2 + 256，所以这里取它的逆运算。
         _maxChars = Math.Clamp((_maxOutputTokens - 256) / 2, 200, DefaultMaxCharsPerRequest);
         _maxLines = DefaultMaxLinesPerRequest;
     }
@@ -103,7 +103,7 @@ public sealed class OpenRouterTranslator : ITranslator
         return results;
     }
 
-    /// <summary>한 묶음. 줄 수가 어긋나거나 실패하면 <c>null</c> — 호출자는 그 묶음을 비워 둔다.</summary>
+    /// <summary>一个块。行数不一致或失败时为 <c>null</c> —— 调用方就把这一块留空。</summary>
     private async Task<IReadOnlyList<string?>?> TranslateChunkAsync(
         IReadOnlyList<string> lines, string language, CancellationToken ct)
     {
@@ -115,7 +115,7 @@ public sealed class OpenRouterTranslator : ITranslator
             var payload = new ChatRequest
             {
                 Model = Model,
-                // 창의성은 필요 없다 — 같은 줄은 같게 나오는 편이 캐시에도 좋다.
+                // 不需要创造性 —— 同样的行得到同样的结果，对缓存也更友好。
                 Temperature = 0,
                 MaxTokens = Math.Clamp((lines.Sum(l => l.Length) * 2) + 256, 256, _maxOutputTokens),
                 Messages = [new ChatMessage { Role = "user", Content = Prompt(lines, language) }],
@@ -126,25 +126,25 @@ public sealed class OpenRouterTranslator : ITranslator
                 Content = JsonContent.Create(payload, options: Json),
             };
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _apiKey);
-            // OpenRouter 대시보드에서 어떤 앱인지 보이게 하는 선택 헤더.
+            // 用于在 OpenRouter 面板上显示是哪个应用的可选请求头。
             request.Headers.Add("X-Title", "Musebase");
             request.Headers.Add("HTTP-Referer", "https://github.com/countnine/musebase");
 
             using var response = await _http.SendAsync(request, cts.Token).ConfigureAwait(false);
-            // 상태 코드를 실어 올린다 — 폴백 체인이 456(한도)·401(키)을 구분해야 하는데,
-            // 여기서 null로 삼키면 그 정보가 통째로 사라져 "아무 일도 안 일어난 것"과 같아진다.
+            // 把状态码原样带上去 —— 回退链需要区分 456(额度)和 401(密钥)，
+            // 如果在这里吞成 null，这些信息就整个消失，等同于「什么都没发生」。
             response.EnsureSuccessStatusCode();
 
             var body = await response.Content.ReadFromJsonAsync<ChatResponse>(Json, cts.Token).ConfigureAwait(false);
             var text = body?.Choices?.FirstOrDefault()?.Message?.Content;
-            // 줄 수 불일치·JSON 파싱 실패는 **엔진이 죽은 게 아니라 그 묶음의 내용 문제**다 —
-            // 그대로 null로 두어 폴백이 그 줄만 다음 엔진으로 넘기게 한다.
+            // 行数不一致、JSON 解析失败是**那块内容的问题，不是引擎死了** ——
+            // 就那样留成 null，让回退只把这几行交给下一个引擎。
             return text is null ? null : ParseLines(text, lines.Count);
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
-            // 우리가 건 타임아웃이다(바깥 취소가 아니다) → 실패로 올린다.
-            throw new TimeoutException($"OpenRouter 응답이 {_timeout.TotalSeconds:0}초 안에 오지 않았습니다.");
+            // 这是我们自己设的超时(不是外层取消) → 上报为失败。
+            throw new TimeoutException($"OpenRouter 响应未在 {_timeout.TotalSeconds:0} 秒内返回。");
         }
     }
 
@@ -160,14 +160,14 @@ public sealed class OpenRouterTranslator : ITranslator
           .Append("- Keep it natural and singable; do not explain or annotate.\n\n")
           .Append("Lines:\n");
 
-        // JSON 배열로 넣는다 — 줄 안에 따옴표가 있어도 경계가 흔들리지 않는다.
+        // 以 JSON 数组形式放入 —— 即使行内有引号，边界也不会被弄乱。
         sb.Append(JsonSerializer.Serialize(lines));
         return sb.ToString();
     }
 
     /// <summary>
-    /// 응답을 줄 목록으로. <b>줄 수가 다르면 null</b> — 하나만 밀려도 가사 전체가 어긋난다.
-    /// 코드펜스를 두르는 모델이 흔해 먼저 벗긴다.
+    /// 把响应变成行列表。<b>行数不同就返回 null</b> —— 只要错开一行，整篇歌词就会错位。
+    /// 喜欢套代码围栏的模型很常见，所以先剥掉。
     /// </summary>
     internal static IReadOnlyList<string?>? ParseLines(string content, int expected)
     {
@@ -218,8 +218,8 @@ public sealed class OpenRouterTranslator : ITranslator
     }
 
     /// <summary>
-    /// 코드 대신 <b>언어 이름</b>을 준다 — LLM은 <c>ZH-HANT</c>보다 "Traditional Chinese"를 잘 알아듣는다.
-    /// 모르는 코드는 그대로 넘긴다(모델이 알아보는 경우가 많고, 틀려도 줄 수 검사가 막아 준다).
+    /// 给出的不是代码而是<b>语言名称</b> —— LLM 对 "Traditional Chinese" 的理解比 <c>ZH-HANT</c> 更好。
+    /// 不认识的代码原样传过去(模型多半能看懂，即使猜错也有行数校验兜着)。
     /// </summary>
     internal static string LanguageName(string? targetLang)
     {
@@ -252,7 +252,7 @@ public sealed class OpenRouterTranslator : ITranslator
         };
     }
 
-    // ---- 요청/응답 모델(OpenAI 호환, 필요한 필드만) ----
+    // ---- 请求/响应模型(兼容 OpenAI，只保留必要字段) ----
 
     private sealed record ChatRequest
     {
@@ -261,8 +261,8 @@ public sealed class OpenRouterTranslator : ITranslator
         public double Temperature { get; init; }
 
         /// <summary>
-        /// 반드시 보낸다. 비워 두면 OpenRouter가 모델 최대치를 예약하려 들고, 잔액이 그만큼을
-        /// 감당 못 하면 <b>402</b>로 거절한다(의미 생성 쪽에서 실측한 함정).
+        /// 必须发送。留空的话 OpenRouter 会想把模型最大值预约下来，
+        /// 余额承受不住就返回 <b>402</b> 拒绝(意义生成侧实测到的坑)。
         /// </summary>
         [property: JsonPropertyName("max_tokens")]
         public int MaxTokens { get; init; } = 2000;

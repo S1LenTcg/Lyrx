@@ -7,14 +7,14 @@ using Musebase.Core.Search;
 namespace Musebase.Core.Meaning;
 
 /// <summary>
-/// Genius 공식 API로 곡의 "About"(<c>description</c>)을 가져온다.
+/// 通过 Genius 官方 API 获取歌曲的 "About"（<c>description</c>）。
 ///
-/// 무료 Client Access Token만 있으면 되고 OAuth 사용자 플로우가 필요 없다
-/// (<see href="https://genius.com/api-clients"/>에서 발급). 두 번 호출한다:
-/// <c>GET /search?q=</c>로 곡 id를 찾고 → <c>GET /songs/{id}?text_format=plain</c>에서
-/// <c>description</c>과 정확한 곡 페이지 <c>url</c>을 읽는다.
+/// 只要有免费 Client Access Token 就够，不需要 OAuth 用户流程
+/// （在 <see href="https://genius.com/api-clients"/> 签发）。调用两次：
+/// 用 <c>GET /search?q=</c> 找到歌曲 id → 再从 <c>GET /songs/{id}?text_format=plain</c> 读取
+/// <c>description</c> 与准确的歌曲页 <c>url</c>。
 ///
-/// **가사 본문은 이 API로 오지 않는다**(그건 스크래핑 영역) — 우리는 이미 가지고 있으므로 상관없다.
+/// **歌词正文不会通过这个 API 返回**（那属于抓取范畴）—— 我们已经有了，所以无所谓。
 /// </summary>
 public sealed class GeniusSource : ISongMeaningSource
 {
@@ -30,10 +30,10 @@ public sealed class GeniusSource : ISongMeaningSource
     private readonly TimeSpan _timeout;
 
     /// <param name="timeoutMs">
-    /// **두 번의 순차 호출 전체**에 대한 예산이라 넉넉해야 한다. 실측에서 유명 곡일수록
-    /// 설명이 길어 느렸다 — <c>Lady Gaga / Shallow</c>는 검색 0.96초 + 상세 2.0초로 2.95초였고,
-    /// 예전 기본값 2.5초에서는 **정확히 그런 곡들만 조용히 잘려 나갔다**(자료가 가장 좋은 곡들이다).
-    /// 가사 검색과 달리 여기서는 사람이 버튼을 누르고 기다리므로 지연보다 누락이 훨씬 나쁘다.
+    /// **两次顺序调用整体**的预算，所以要给足。实测越有名的歌
+    /// 说明越长越慢 —— <c>Lady Gaga / Shallow</c> 是搜索 0.96 秒 + 详情 2.0 秒共 2.95 秒，
+    /// 在旧的默认值 2.5 秒之下**恰恰是这类歌被悄悄截掉了**（而这正是资料最好的歌）。
+    /// 与歌词搜索不同，这里是用户按下按钮在等，所以漏掉远比延迟糟糕。
     /// </param>
     public GeniusSource(string token, HttpClient? http = null, int timeoutMs = 8000)
     {
@@ -60,7 +60,7 @@ public sealed class GeniusSource : ISongMeaningSource
             var description = song?.Response?.Song?.Description?.Plain;
             var url = song?.Response?.Song?.Url ?? hit.Url;
 
-            // 설명이 비어 있는 곡이 많다(대부분의 곡에 About이 없다). 그때는 소스가 없는 것으로 본다.
+            // 很多歌的说明是空的（大部分歌没有 About）。那时就当作没有该来源。
             if (string.IsNullOrWhiteSpace(description) || description!.Trim().Length < 40)
                 return null;
 
@@ -68,13 +68,13 @@ public sealed class GeniusSource : ISongMeaningSource
         }
         catch (Exception)
         {
-            return null; // 조용한 강등 — 다른 소스가 채운다
+            return null; // 静默降级 —— 由其他来源填充
         }
     }
 
     /// <summary>
-    /// 원본 표기와 정제 표기를 순서대로 시도한다. 스트리밍 메타데이터의 잡음
-    /// (피처링·리마스터 표기, "• 스마트셔플 추천" 같은 꼬리표)은 Genius 검색을 그냥 실패시킨다.
+    /// 依次尝试原始写法和净化写法。流媒体元数据里的噪声
+    /// （feat.、remaster 标注，"• 智能随机播放推荐"这类尾巴）会直接让 Genius 搜索失败。
     /// </summary>
     private async Task<GeniusHit?> SearchAsync(string title, string artist, CancellationToken ct)
     {
@@ -96,8 +96,8 @@ public sealed class GeniusSource : ISongMeaningSource
     }
 
     /// <summary>
-    /// 이 검색 결과가 정말 그 곡인지 확인한다. 판정 기준은 검색 기반 소스가 모두 공유한다
-    /// (<see cref="MeaningMatch.IsSameSong"/> — 그쪽에 이유를 적어 뒀다).
+    /// 确认这条搜索结果确实就是那首歌。判定标准由所有基于搜索的来源共享
+    /// （<see cref="MeaningMatch.IsSameSong"/> —— 理由写在那一边）。
     /// </summary>
     internal static bool Matches(string? hitTitle, string? hitArtists, string title, string artist) =>
         MeaningMatch.IsSameSong(hitTitle, hitArtists, title, artist);
@@ -126,7 +126,7 @@ public sealed class GeniusSource : ISongMeaningSource
         return await response.Content.ReadFromJsonAsync<T>(Json, ct).ConfigureAwait(false);
     }
 
-    // ---- 응답 모델(필요한 필드만) ----
+    // ---- 响应模型（只保留需要的字段）----
 
     private sealed record GeniusSearchEnvelope(GeniusSearchResponse? Response);
     private sealed record GeniusSearchResponse(GeniusHitWrapper[]? Hits);
@@ -141,6 +141,6 @@ public sealed class GeniusSource : ISongMeaningSource
     private sealed record GeniusSongResponse(GeniusSong? Song);
     private sealed record GeniusSong(string? Url, GeniusDescription? Description);
 
-    /// <summary><c>text_format=plain</c>이면 설명이 <c>{"plain": "..."}</c>로 온다.</summary>
+    /// <summary>当 <c>text_format=plain</c> 时，说明以 <c>{"plain": "..."}</c> 的形式返回。</summary>
     private sealed record GeniusDescription([property: JsonPropertyName("plain")] string? Plain);
 }

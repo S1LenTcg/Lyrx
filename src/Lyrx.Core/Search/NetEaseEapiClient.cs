@@ -5,8 +5,8 @@ using System.Text.Json;
 namespace Musebase.Core.Search;
 
 /// <summary>
-/// NetEase EAPI 클라이언트. LyricsKit의 NetEaseEapiClient.swift 포팅.
-/// 요청 파라미터를 md5 서명 후 AES-ECB(PKCS7)로 암호화해 params 필드로 전송한다.
+/// NetEase EAPI 客户端。LyricsKit 中 NetEaseEapiClient.swift 的移植。
+/// 把请求参数做 md5 签名后用 AES-ECB(PKCS7) 加密，作为 params 字段发送。
 /// </summary>
 internal sealed class NetEaseEapiClient
 {
@@ -61,7 +61,7 @@ internal sealed class NetEaseEapiClient
         };
     }
 
-    /// <summary>eapi 서명·암호화: hex(AES-ECB("{path}-36cd479b6b5-{json}-36cd479b6b5-{md5}"))</summary>
+    /// <summary>eapi 签名·加密：hex(AES-ECB("{path}-36cd479b6b5-{json}-36cd479b6b5-{md5}"))</summary>
     internal static string BuildEapiParams(string url, Dictionary<string, string> payload)
     {
         var path = url

@@ -4,27 +4,27 @@ using System.Text.Json;
 namespace Musebase.Core.Meaning;
 
 /// <summary>
-/// 의미 생성 한 번의 결과.
+/// 意义生成一次的结果。
 ///
-/// 성공/실패 두 갈래로는 부족해서 실패를 셋으로 나눈다. 갈래마다 <b>저장할지</b>와
-/// <b>사람에게 무엇을 하라고 할지</b>가 다르기 때문이다.
+/// 只有成功/失败两条路不够用，所以把失败分成三支。因为每一支的<b>是否保存</b>和
+/// <b>要让人做什么</b>都不一样。
 ///
-/// | 갈래 | 예 | 저장 | 사람이 할 일 |
+/// | 分支 | 例 | 保存 | 人要做的 |
 /// |---|---|---|---|
-/// | <see cref="Retryable"/> | 429, 5xx, 타임아웃 | 안 함 | 잠시 후 다시 |
-/// | <see cref="NeedsSetup"/> | 402 잔액, 401/403 키, 404 모델 | 안 함 | 결제·키·모델을 고친다 |
-/// | 그 밖(<see cref="Failed"/>) | 200인데 본문이 빔 | 함 | 없음(그 곡의 문제) |
+/// | <see cref="Retryable"/> | 429, 5xx, 超时 | 否 | 稍后重试 |
+/// | <see cref="NeedsSetup"/> | 402 余额, 401/403 密钥, 404 模型 | 否 | 处理付款、密钥、模型 |
+/// | 其他(<see cref="Failed"/>) | 200 但正文为空 | 是 | 无(那首歌的问题) |
 ///
-/// **엔진 설정 문제를 저장하면 안 된다.** 백필은 행이 있는 곡을 건너뛰므로, 잔액이 떨어진 채
-/// 돌리면 남은 곡이 전부 "실패"로 박제된다. 반대로 "잠시 후 다시"라고만 하면 사람은 저절로 안
-/// 풀리는 문제를 기다린다 — 실제로 402(잔액)와 404(무료 모델 정책)가 그렇게 숨었다.
-/// 그래서 공급자가 준 이유(<see cref="Reason"/>)를 버리지 않고 끝까지 싣는다.
+/// **引擎配置问题不能保存。** 回填会跳过已有行的歌，所以在余额耗尽的情况下
+/// 继续跑，剩下的歌全都会被钉成「失败」。反过来只说「稍后重试」，人就会一直等一个
+/// 自己不会好的问题 —— 实际上 402(余额)和 404(免费模型策略)就是这样被藏起来的。
+/// 所以提供方给的原因(<see cref="Reason"/>)不丢弃，一路带到底。
 /// </summary>
-/// <param name="Text">생성된 문단. null이면 실패다.</param>
-/// <param name="Retryable">시간이 지나면 풀릴 실패인가 — 그렇다면 저장하지 않는다.</param>
-/// <param name="NeedsSetup">엔진 설정(결제·키·모델)을 사람이 고쳐야 하는 실패 — 저장하지 않는다.</param>
-/// <param name="StatusCode">공급자가 준 HTTP 상태. 응답을 못 받았으면 null.</param>
-/// <param name="Reason">공급자가 준 오류 문장(짧게 자른 것). 로그와 관리 화면에 그대로 보인다.</param>
+/// <param name="Text">生成的段落。为 null 即失败。</param>
+/// <param name="Retryable">是否是过一段时间就会解的失败 —— 是的话就不保存。</param>
+/// <param name="NeedsSetup">需要人去修引擎配置(付款、密钥、模型)的失败 —— 不保存。</param>
+/// <param name="StatusCode">提供方给的 HTTP 状态。没收到响应时为 null。</param>
+/// <param name="Reason">提供方给的错误语句(截短后的)。会原样显示在日志和管理界面上。</param>
 public sealed record MeaningWriteResult(
     string? Text,
     bool Retryable,
@@ -33,34 +33,34 @@ public sealed record MeaningWriteResult(
     string? Reason = null)
 {
     /// <summary>
-    /// 실제로 쓴 엔진·모델. 체인(<see cref="CompositeMeaningWriter"/>)에서는 앞 엔진이 실패하고
-    /// 뒤 엔진이 쓸 수 있어서, 라이터의 대표 id로는 누가 썼는지 알 수 없다. 비면 라이터의 값을 쓴다.
+    /// 实际使用的引擎、模型。在链式写入器(<see cref="CompositeMeaningWriter"/>)里，前面的引擎可能失败而
+    /// 由后面的引擎来写，所以光看写入器的代表 id 不知道是谁写的。为空时就用写入器自己的值。
     /// </summary>
     public string? Engine { get; init; }
 
     /// <inheritdoc cref="Engine"/>
     public string? Model { get; init; }
 
-    /// <summary>사유 문장은 이 길이에서 자른다 — 로그 한 줄·화면 한 줄에 들어가야 한다.</summary>
+    /// <summary>原因语句按这个长度截断 —— 必须能塞进一行日志、一行界面。</summary>
     public const int MaxReasonLength = 200;
 
-    /// <summary>영구 실패(응답이 비었다 등 그 곡의 문제) — 저장해 두고 넘어간다.</summary>
+    /// <summary>永久失败(响应为空等那首歌自身的问题) —— 保存下来然后跳过。</summary>
     public static readonly MeaningWriteResult Failed = new(null, false);
 
-    /// <summary>일시적 실패(쿼타·서버·네트워크·타임아웃) — 저장하지 않는다.</summary>
+    /// <summary>暂时性失败(配额、服务器、网络、超时) —— 不保存。</summary>
     public static readonly MeaningWriteResult Transient = new(null, true);
 
     public static MeaningWriteResult Written(string text) => new(text, false);
 
-    /// <summary>키가 비어 있다 — 부를 것도 없이 설정 문제다.</summary>
-    public static MeaningWriteResult MissingKey() => new(null, false, NeedsSetup: true, Reason: "API 키가 비어 있습니다");
+    /// <summary>密钥为空 —— 连调用都无从发起，就是配置问题。</summary>
+    public static MeaningWriteResult MissingKey() => new(null, false, NeedsSetup: true, Reason: "API 密钥为空");
 
     /// <summary>
-    /// 응답을 받았지만 실패한 경우. 기준은 "다시 부르면 달라지나"와 "곡 탓인가"다.
-    /// - 429·5xx: 기다리면 풀린다 → <see cref="Retryable"/>.
-    /// - 그 밖의 4xx: 같은 설정으로는 어느 곡을 불러도 같다 → <see cref="NeedsSetup"/>.
-    ///   402(잔액)는 충전해야, 401/403은 키를, 404는 모델 이름·계정 정책을 고쳐야 풀린다.
-    ///   400도 여기다 — 잘못된 모델 id나 키 형식이 400으로 온다(Gemini `API_KEY_INVALID`).
+    /// 收到了响应但仍然失败的情况。判断标准是「再调一次会不会不一样」和「是不是这首歌的问题」。
+    /// - 429·5xx: 等一会儿就会恢复 → <see cref="Retryable"/>。
+    /// - 其余的 4xx: 同样的配置下换哪首歌结果都一样 → <see cref="NeedsSetup"/>。
+    ///   402(余额)要充值，401/403 要换密钥，404 要改模型名·账户策略才能解决。
+    ///   400 也属于这里 —— 错误的模型 id 或密钥格式会以 400 返回(Gemini `API_KEY_INVALID`)。
     /// </summary>
     public static MeaningWriteResult FromStatus(HttpStatusCode code, string? body = null)
     {
@@ -71,7 +71,7 @@ public sealed record MeaningWriteResult(
             : new(null, false, NeedsSetup: status is >= 400 and < 500, StatusCode: status, Reason: reason);
     }
 
-    /// <summary>응답 본문에서 사람이 읽을 한 문장을 뽑는다. OpenRouter·Gemini 모두 <c>{"error":{"message"}}</c>다.</summary>
+    /// <summary>从响应正文里抽出人能读懂的一句话。OpenRouter·Gemini 都是 <c>{"error":{"message"}}</c>。</summary>
     public static string? ReasonOf(string? body)
     {
         if (string.IsNullOrWhiteSpace(body)) return null;
@@ -93,7 +93,7 @@ public sealed record MeaningWriteResult(
         }
         catch (JsonException)
         {
-            // JSON이 아니면 본문을 그대로 쓴다(프록시 오류 페이지 등).
+            // 不是 JSON 就原样使用正文(代理错误页面等)。
         }
 
         var oneLine = string.Join(' ', text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));

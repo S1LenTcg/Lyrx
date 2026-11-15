@@ -5,18 +5,18 @@ using Musebase.Engine;
 namespace Musebase.Windows.Services;
 
 /// <summary>
-/// 로컬 비밀값(예: DeepL API 키) 보호. Windows DPAPI(CurrentUser)로 암호화한다.
-/// - 같은 Windows 사용자·같은 PC에서만 복호화 가능(파일 열람·백업·타 PC 이동 시 복호 불가).
-/// - 한계: 동일 사용자로 실행되는 코드는 복호 가능(로컬 앱 비밀의 본질적 한계).
-/// <see cref="ISecretStore"/>의 Windows 구현 — Android/macOS는 각 플랫폼 저장소로 교체한다.
+/// 本地机密值（例如 DeepL API 密钥）保护。用 Windows DPAPI(CurrentUser) 加密。
+/// - 只有同一 Windows 用户·同一台 PC 才能解密（文件被查看·备份·搬到别的 PC 后无法解密）。
+/// - 局限：以同一用户身份运行的代码都能解密（本地应用机密的本质局限）。
+/// <see cref="ISecretStore"/> 的 Windows 实现 — Android/macOS 各自替换为对应平台的存储。
 /// </summary>
 internal sealed class DpapiSecretStore : ISecretStore
 {
-    // 앱 전용 엔트로피(추가 솔트) — 다른 앱의 DPAPI 데이터와 섞이지 않도록.
-    // 주의: 개명(→Musebase) 후에도 기존 암호문 복호를 위해 entropy 문자열은 절대 바꾸지 않는다.
+    // 应用专属熵（额外盐） — 避免与其他应用的 DPAPI 数据混淆。
+    // 注意：即使改名（→Musebase）之后，为了能解密已有的密文，entropy 字符串也绝不能改。
     private static readonly byte[] Entropy = Encoding.UTF8.GetBytes("LyricsX.DeepL.v1");
 
-    /// <summary>평문 → base64 DPAPI 암호문. 실패/빈 값이면 null.</summary>
+    /// <summary>明文 → base64 DPAPI 密文。失败/空值则返回 null。</summary>
     public string? Protect(string? plain)
     {
         if (string.IsNullOrEmpty(plain)) return null;
@@ -32,7 +32,7 @@ internal sealed class DpapiSecretStore : ISecretStore
         }
     }
 
-    /// <summary>base64 DPAPI 암호문 → 평문. 복호 실패(타 사용자/PC 등)면 null.</summary>
+    /// <summary>base64 DPAPI 密文 → 明文。解密失败（其他用户/PC 等）则返回 null。</summary>
     public string? Unprotect(string? cipherBase64)
     {
         if (string.IsNullOrEmpty(cipherBase64)) return null;

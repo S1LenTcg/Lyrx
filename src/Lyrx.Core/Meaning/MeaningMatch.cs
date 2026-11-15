@@ -1,20 +1,20 @@
 namespace Musebase.Core.Meaning;
 
 /// <summary>
-/// 검색 결과가 정말 그 곡인지 판정한다.
+/// 判定搜索结果是否真的是那首歌。
 ///
-/// Genius도 Musixmatch도 **무엇을 넣든 무언가를 돌려준다.** 실측에서 음악이 아닌 유튜브 제목
-/// ("해외에서 화제라는 한국의 지하철 문화")으로 검색했더니 전혀 무관한 곡이 첫 히트로 나왔고,
-/// 확인 없이 받았으면 그 곡의 해설이 이 트랙의 "의미"로 붙었을 것이다.
-/// <b>엉뚱한 근거는 자료가 없는 것보다 나쁘다</b> — 그럴듯하고 완전히 틀린 글이 만들어지기 때문이다.
+/// Genius 和 Musixmatch 都**是无论你输入什么都会返回点什么**。实测中用非音乐的 YouTube 标题
+/// （"海外热议的韩国地铁文化"）去搜索时，第一个命中结果是一首毫无关系的歌；
+/// 若不核对就接收，那首歌的解说就会被当成这条音轨的"意义"挂上去。
+/// <b>错误的依据比没有资料更糟</b> —— 因为会生成看起来可信、实则完全错误的文字。
 ///
-/// 그래서 검색 기반 소스는 전부 이 하나의 기준을 통과해야 한다.
+/// 所以所有基于搜索的来源都必须通过这同一个标准。
 /// </summary>
 public static class MeaningMatch
 {
     /// <summary>
-    /// 제목 일치는 필수, 아티스트는 아는 경우에만 확인을 요구한다.
-    /// 제목은 어느 쪽이 담아도 인정한다 — "(Remix)"·"(Live)" 같은 꼬리표가 흔하다.
+    /// 标题必须匹配；艺术家只在已知时才要求核对。
+    /// 标题只要任一方包含另一方即可认可 —— "(Remix)"、"(Live)" 之类的后缀很常见。
     /// </summary>
     public static bool IsSameSong(string? hitTitle, string? hitArtists, string title, string artist)
     {
@@ -29,7 +29,7 @@ public static class MeaningMatch
             .Select(MeaningText.Normalize)
             .Where(n => n.Length >= 3)
             .ToList();
-        if (names.Count == 0) return true; // 아티스트를 모르면 제목만으로 받아들인다
+        if (names.Count == 0) return true; // 不知道艺术家时，仅凭标题就接受
 
         var haystack = MeaningText.Normalize(hitArtists ?? "");
         return names.Any(n => haystack.Contains(n, StringComparison.Ordinal));

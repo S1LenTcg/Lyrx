@@ -29,14 +29,11 @@ external/
 appsettings.Development.json
 secrets.json
 
-# Velopack 릴리스 산출물
 Releases/
 
-# 로컬 테스트 빌드 산출물
 publish-test/
 publish-singlefile/
 publish-server/
 .wrangler/
 .claude/worktrees/
-# 이 기기에서만 쓰는 Claude Code 권한·설정 — 사람마다 다르고 커밋 대상이 아니다.
 .claude/settings.local.json

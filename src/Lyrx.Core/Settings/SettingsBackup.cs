@@ -6,25 +6,25 @@ using System.Text.Json.Serialization;
 namespace Musebase.Core.Settings;
 
 /// <summary>
-/// 설정을 다른 PC로 옮기기 위한 봉투(envelope) 만들기·풀기.
+/// 为把设置迁移到另一台 PC 而生成 / 打开信封(envelope).
 ///
-/// <b>설정 파일을 그냥 복사해서는 안 된다.</b> API 키·토큰은 DPAPI(<c>CurrentUser</c>)로 잠겨 있어
-/// 다른 PC·계정에서는 조용히 null이 된다 — 사용자에게는 키가 그냥 사라진 것으로 보인다.
-/// 그래서 내보낼 때 <b>플랫폼 잠금을 풀고 사람이 정한 비밀번호로 다시 봉인</b>하고,
-/// 가져올 때 풀어서 그 PC의 잠금으로 다시 잠근다.
+/// <b>不能直接复制设置文件。</b>API 密钥与令牌由 DPAPI(<c>CurrentUser</c>)锁定，
+/// 在另一台 PC、另一个账户上会静默变成 null —— 在用户看来就是密钥凭空消失了。
+/// 因此导出时 <b>先解开平台锁，再用人工设定的密码重新封装</b>，
+/// 导入时解开，并用那台 PC 的锁重新锁定。
 ///
-/// 봉인은 PBKDF2(SHA-256, 210,000회) + AES-GCM이다. 반복 횟수는 서버 관리자 비밀번호와 같은 값을
-/// 쓴다(<c>pbkdf2$210000$…</c>) — 한 저장소 안에서 세기를 두 가지로 두면 어느 쪽이 기준인지 흐려진다.
+/// 封装使用 PBKDF2(SHA-256, 210,000 次) + AES-GCM.迭代次数与服务器管理员密码取同一个值
+/// (<c>pbkdf2$210000$…</c>) —— 同一个存储里放两种强度，会让人分不清以哪个为准。
 ///
-/// 이 클래스는 <b>플랫폼 설정 타입을 모른다.</b> 설정은 JSON 조각으로 받고 비밀값만 따로 받는다 —
-/// 그래야 Windows WPF에 묶이지 않고 시험할 수 있다(플랫폼 쪽은 얇은 연결만 한다).
+/// 本类 <b>不感知平台设置类型。</b>设置以 JSON 片段传入，只有密钥值单独传入 ——
+/// 这样才能不被 Windows WPF 绑定、可以进行测试(平台一侧只做很薄的连接).
 ///
-/// ⚠ 내보낸 파일은 <b>비밀번호만 알면 어느 PC에서나 풀린다.</b> 그게 목적이지만, 클라우드에 두면
-/// 그만큼 위험도 함께 옮겨 간다.
+/// ⚠ 导出的文件 <b>只要知道密码，在任何 PC 上都能解开。</b>这正是目的，但放到云上时
+/// 也就等于把相应风险一起搬了过去。
 /// </summary>
 public static class SettingsBackup
 {
-    /// <summary>파일 형식 번호. 나중에 모양이 바뀌면 이걸 보고 가른다.</summary>
+    /// <summary>文件格式编号。日后结构变化时据此区分。</summary>
     public const int FormatVersion = 1;
 
     private const string AppTag = "musebase";
@@ -32,7 +32,7 @@ public static class SettingsBackup
 
     private const int Iterations = 210_000;
     private const int SaltBytes = 16;
-    private const int NonceBytes = 12;   // AES-GCM 표준
+    private const int NonceBytes = 12;   // AES-GCM 标准
     private const int TagBytes = 16;
     private const int KeyBytes = 32;     // AES-256
 
@@ -44,8 +44,8 @@ public static class SettingsBackup
     };
 
     /// <summary>
-    /// 옮길 비밀값. 이름은 설정의 평문 프로퍼티와 같게 둔다 — 어느 칸이 어디로 가는지
-    /// 한눈에 보여야 나중에 항목이 늘 때 빠뜨리지 않는다.
+    /// 要迁移的密钥值。名称与设置中的明文字段保持一致 —— 哪个字段去哪儿
+    /// 必须一眼看清，这样日后新增条目时才不会遗漏。
     /// </summary>
     public sealed record Secrets(
         string? DeeplApiKey = null,
@@ -60,19 +60,19 @@ public static class SettingsBackup
             || !string.IsNullOrEmpty(LyricsServerToken);
     }
 
-    /// <summary>가져오기 결과 — 평문 설정과, 비밀번호로 풀어낸 비밀값(없으면 null).</summary>
+    /// <summary>导入结果 —— 明文设置，以及用密码解出的密钥值(没有则为 null)。</summary>
     public readonly record struct Opened(JsonElement Settings, Secrets? Secrets);
 
     /// <summary>
-    /// 봉투를 만든다. <paramref name="password"/>가 비면 비밀값을 <b>아예 담지 않는다</b> —
-    /// 잠그지 않은 키를 파일에 흘리는 것보다 빼고 내보내는 편이 낫다.
+    /// 生成信封。当 <paramref name="password"/> 为空时 <b>完全不装入密钥值</b> ——
+    /// 与其把未加密的密钥漏进文件，不如干脆不带、直接导出。
     /// </summary>
-    /// <param name="settingsJson">비밀값을 뺀 설정 전체(플랫폼이 직렬화해 넘긴다).</param>
+    /// <param name="settingsJson">去掉密钥值后的完整设置(由平台序列化后传入)。</param>
     public static string Export(string settingsJson, Secrets secrets, string? password)
     {
         using var document = JsonDocument.Parse(settingsJson);
 
-        // 플랫폼 잠금으로 봉인된 필드(*Enc)는 다른 PC에서 풀 수 없다 — 담아 봐야 오해만 만든다.
+        // 用平台锁封装的字段(*Enc)在另一台 PC 上解不开 —— 装进去只会造成误解。
         var settings = WithoutEncryptedFields(document.RootElement);
 
         SealedSecrets? locked = null;
@@ -87,32 +87,32 @@ public static class SettingsBackup
     }
 
     /// <summary>
-    /// 봉투를 푼다. <b>전부 되거나 아무것도 안 되거나</b>다 — 비밀번호가 틀렸는데 평문 설정만
-    /// 넘겨주면 호출자가 어중간한 상태를 만들게 된다. 그래서 비밀값을 먼저 풀고 실패하면 던진다.
+    /// 打开信封。<b>要么全部成功，要么什么都不做</b> —— 密码错误却把明文设置交出去，
+    /// 会让调用方陷入半成品状态。所以先解出密钥值，失败就抛出。
     /// </summary>
     public static Opened Import(string backupJson, string? password)
     {
         var envelope = Parse(backupJson);
 
         if (envelope.App != AppTag)
-            throw new InvalidDataException("Musebase 백업 파일이 아닙니다.");
+            throw new InvalidDataException("这不是 Musebase 备份文件。");
         if (envelope.Version > FormatVersion)
-            throw new InvalidDataException("더 새 버전에서 만든 백업입니다. 앱을 먼저 업데이트하세요.");
+            throw new InvalidDataException("该备份由更新的版本创建，请先更新应用。");
         if (envelope.Settings.ValueKind != JsonValueKind.Object)
-            throw new InvalidDataException("백업에 설정이 들어 있지 않습니다.");
+            throw new InvalidDataException("备份中没有包含设置。");
 
         Secrets? secrets = null;
         if (envelope.Secrets is { } locked)
         {
             if (string.IsNullOrEmpty(password))
-                throw new InvalidDataException("이 백업에는 비밀번호가 필요합니다.");
+                throw new InvalidDataException("该备份需要密码。");
             secrets = Open(locked, password!);
         }
 
         return new Opened(envelope.Settings, secrets);
     }
 
-    /// <summary>이 백업이 비밀번호를 요구하는가(가져오기 화면이 미리 물어보려고).</summary>
+    /// <summary>该备份是否需要密码(供导入界面提前询问)。</summary>
     public static bool NeedsPassword(string backupJson)
     {
         try
@@ -130,15 +130,15 @@ public static class SettingsBackup
         try
         {
             return JsonSerializer.Deserialize<Envelope>(backupJson, Json)
-                ?? throw new InvalidDataException("백업 파일을 읽지 못했습니다.");
+                ?? throw new InvalidDataException("读取备份文件失败。");
         }
         catch (JsonException)
         {
-            throw new InvalidDataException("백업 파일을 읽지 못했습니다.");
+            throw new InvalidDataException("读取备份文件失败。");
         }
     }
 
-    // ---- 봉인 ----
+    // ---- 封装 ----
 
     private static SealedSecrets Seal(Secrets secrets, string password)
     {
@@ -153,7 +153,7 @@ public static class SettingsBackup
         using (var aes = new AesGcm(key, TagBytes))
             aes.Encrypt(nonce, plain, cipher, tag);
 
-        // 태그를 암호문 뒤에 붙여 한 덩어리로 둔다 — 필드를 하나 더 두면 한쪽만 옮기는 사고가 난다.
+        // 把标签接在密文之后当作一整块 —— 多设一个字段反而容易出现只搬一半的事故。
         var payload = new byte[cipher.Length + tag.Length];
         cipher.CopyTo(payload, 0);
         tag.CopyTo(payload, cipher.Length);
@@ -164,7 +164,7 @@ public static class SettingsBackup
 
     private static Secrets Open(SealedSecrets locked, string password)
     {
-        if (locked.Kdf != KdfTag) throw new InvalidDataException("모르는 잠금 방식입니다.");
+        if (locked.Kdf != KdfTag) throw new InvalidDataException("未知的加锁方式。");
 
         byte[] salt, nonce, payload;
         try
@@ -175,11 +175,11 @@ public static class SettingsBackup
         }
         catch (FormatException)
         {
-            throw new InvalidDataException("백업이 손상됐습니다.");
+            throw new InvalidDataException("备份已损坏。");
         }
 
         if (payload.Length < TagBytes || nonce.Length != NonceBytes)
-            throw new InvalidDataException("백업이 손상됐습니다.");
+            throw new InvalidDataException("备份已损坏。");
 
         var key = DeriveKey(password, salt, locked.Iterations);
         var cipher = payload.AsSpan(0, payload.Length - TagBytes);
@@ -193,18 +193,18 @@ public static class SettingsBackup
         }
         catch (CryptographicException)
         {
-            // AES-GCM은 비밀번호가 틀리면 인증에서 걸린다 — 손상과 구별할 길이 없고, 구별할 이유도 없다.
-            throw new InvalidDataException("비밀번호가 맞지 않습니다.");
+            // AES-GCM 在密码错误时会在认证阶段失败 —— 与数据损坏无从区分，也没有区分的必要。
+            throw new InvalidDataException("密码不正确。");
         }
 
         try
         {
             return JsonSerializer.Deserialize<Secrets>(plain, Json)
-                ?? throw new InvalidDataException("백업이 손상됐습니다.");
+                ?? throw new InvalidDataException("备份已损坏。");
         }
         catch (JsonException)
         {
-            throw new InvalidDataException("백업이 손상됐습니다.");
+            throw new InvalidDataException("备份已损坏。");
         }
     }
 
@@ -213,7 +213,7 @@ public static class SettingsBackup
             Encoding.UTF8.GetBytes(password), salt,
             Math.Clamp(iterations, 10_000, 1_000_000), HashAlgorithmName.SHA256, KeyBytes);
 
-    /// <summary>`*Enc`(플랫폼 잠금 암호문) 필드를 뺀 사본 — 다른 PC에서는 풀 수 없다.</summary>
+    /// <summary>去掉 `*Enc`(平台锁密文)字段后的副本 —— 在另一台 PC 上解不开。</summary>
     private static JsonElement WithoutEncryptedFields(JsonElement settings)
     {
         using var buffer = new MemoryStream();
@@ -231,7 +231,7 @@ public static class SettingsBackup
         return JsonDocument.Parse(buffer.ToArray()).RootElement.Clone();
     }
 
-    // ---- 파일에 실제로 쓰이는 모양 ----
+    // ---- 实际写入文件的结构 ----
 
     private sealed record Envelope
     {

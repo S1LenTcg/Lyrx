@@ -5,7 +5,7 @@ using System.Text.Json.Serialization;
 namespace Musebase.Core.Search;
 
 /// <summary>
-/// LRCLIB (lrclib.net) — 무인증 공개 가사 API. LyricsKit의 LRCLIB.swift 포팅.
+/// LRCLIB (lrclib.net) — 免认证的公开歌词 API。LyricsKit 的 LRCLIB.swift 移植。
 /// </summary>
 public sealed class LrclibProvider : LyricsProviderBase<LrclibProvider.Record>
 {
@@ -30,7 +30,7 @@ public sealed class LrclibProvider : LyricsProviderBase<LrclibProvider.Record>
     {
         if (ParseRecord(token) is { } lyrics) return lyrics;
 
-        // 검색 응답에 syncedLyrics가 없으면 상세 조회
+        // 搜索响应里没有 syncedLyrics 时查详情
         var fetched = await _http.GetFromJsonAsync<Record>(
             $"https://lrclib.net/api/get/{token.Id}", ct).ConfigureAwait(false);
         return fetched is null ? null : ParseRecord(fetched);

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <style name="LyrxTheme" parent="@android:style/Theme.Material.NoActionBar">
+    <item name="android:windowBackground">#121212</item>
+    <item name="android:windowDrawsSystemBarBackgrounds">true</item>
+    <item name="android:statusBarColor">@android:color/transparent</item>
+    <item name="android:navigationBarColor">#121212</item>
+  </style>
+  <style name="AudioOutputPopupAnim">
+    <item name="android:windowEnterAnimation">@anim/audio_output_popup_enter</item>
+    <item name="android:windowExitAnimation">@anim/audio_output_popup_exit</item>
+  </style>
+</resources>

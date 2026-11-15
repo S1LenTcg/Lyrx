@@ -1,6 +1,6 @@
 namespace Musebase.Core.Translation;
 
-/// <summary>번역기 생성에 필요한 옵션(엔진별로 필요한 것만 사용).</summary>
+/// <summary>创建翻译器所需的选项(按引擎各取所需)。</summary>
 public sealed record TranslatorOptions(
     string? DeeplApiKey = null,
     string? LibreEndpoint = null,
@@ -8,30 +8,30 @@ public sealed record TranslatorOptions(
     string? MyMemoryEmail = null,
     string? GoogleApiKey = null,
     string? OpenRouterApiKey = null,
-    /// <summary>비우면 <see cref="OpenRouterTranslator.DefaultModel"/>. 예: <c>anthropic/claude-opus-5</c>.</summary>
+    /// <summary>留空则用 <see cref="OpenRouterTranslator.DefaultModel"/>。例如：<c>anthropic/claude-opus-5</c>。</summary>
     string? OpenRouterModel = null,
     /// <summary>
-    /// 번역기가 쓸 <see cref="HttpClient"/>. 비우면 각 번역기의 기본값
-    /// (<c>LyricsHttp.Client</c> — 타임아웃 15초)이라 <b>앱 동작은 그대로다</b>.
+    /// 翻译器要用的 <see cref="HttpClient"/>。留空则用各翻译器的默认值
+    /// (<c>LyricsHttp.Client</c> —— 超时 15 秒)，因此 <b>应用行为保持不变</b>。
     ///
-    /// 서버의 일괄 번역처럼 <b>오래 걸려도 되는</b> 호출에는 여유 있는 클라이언트를 넣는다.
-    /// 15초는 재생 중 화면 응답성에 맞춰 둔 값이라 LLM 번역의 예산(OpenRouter는 기본 60초,
-    /// 최대 180초)을 몰래 자른다 — 의미 생성 쪽이 같은 이유로 전용 클라이언트를 따로 둔다
+    /// 服务器端批量翻译这类 <b>允许耗时较长</b> 的调用，则传入更宽松的客户端。
+    /// 15 秒是按播放中界面的响应性定的，会悄悄削掉 LLM 翻译的预算(OpenRouter 默认 60 秒、
+    /// 最大 180 秒) —— 含义生成一侧出于同样的原因单独准备了专用客户端
     /// (<c>MeaningHttp</c>).
     /// </summary>
     HttpClient? Http = null,
     /// <summary>
-    /// OpenRouter 모델이 받아 주는 출력 토큰 상한. 비우면 번역기 기본값(8000).
-    /// 모델마다 다르고(예: Tencent HY-MT2 계열은 4096) 넘기면 응답이 잘려 그 묶음이 통째로
-    /// 버려지므로, 아는 값이 있으면 넣는다 — 묶음 크기가 여기서 자동으로 파생된다.
+    /// OpenRouter 模型能接受的输出 token 上限。留空则用翻译器默认值(8000)。
+    /// 各模型不同(例如 Tencent HY-MT2 系列是 4096)，超限时响应会被截断，导致整批
+    /// 被丢弃，所以知道具体值就填上 —— 批次大小会据此自动推导。
     /// </summary>
     int? OpenRouterMaxOutputTokens = null);
 
 /// <summary>
-/// 번역 엔진 설명자. 키 필요 여부·무료 여부(UI/기본값 판단)와 생성 팩토리.
-/// <c>RequiresApiKey</c>=키가 없으면 동작 불가(팩토리가 null),
-/// <c>AcceptsApiKey</c>=키 없이도 되지만 넣으면 사용(예: LibreTranslate 공개 인스턴스),
-/// <c>ShortName</c>="{engine} API 키" 같은 UI 문구에 넣을 짧은 이름(비면 DisplayName).
+/// 翻译引擎描述符。是否需要密钥、是否免费(供 UI/默认值判断)与创建工厂。
+/// <c>RequiresApiKey</c>=没有密钥就不能工作(工厂返回 null)，
+/// <c>AcceptsApiKey</c>=没有密钥也能用，填了就用(例如 LibreTranslate 公共实例)，
+/// <c>ShortName</c>=用于"{engine} API 密钥"这类 UI 文案的短名称(留空则用 DisplayName)。
 /// </summary>
 public sealed record TranslatorDescriptor(
     string Id,
@@ -42,36 +42,36 @@ public sealed record TranslatorDescriptor(
     bool AcceptsApiKey = false,
     string? ShortName = null)
 {
-    /// <summary>API 키 입력을 노출할 엔진인지(필수 또는 선택).</summary>
+    /// <summary>是否是需要暴露 API 密钥输入的引擎(必需或可选)。</summary>
     public bool UsesApiKey => RequiresApiKey || AcceptsApiKey;
 
-    /// <summary>문구 삽입용 짧은 이름(괄호 수식 없는 제품명).</summary>
+    /// <summary>用于文案插入的短名称(不带括号说明的产品名)。</summary>
     public string Name => string.IsNullOrWhiteSpace(ShortName) ? DisplayName : ShortName!;
 }
 
 /// <summary>
-/// 번역 엔진 레지스트리. 새 엔진은 <see cref="All"/>에 한 줄 추가로 편입된다.
-/// 설정(<c>TranslationEngine</c>)으로 선택하고 <see cref="TranslatorOptions"/>로 키/엔드포인트를 주입한다.
-/// 키 부족/미지원이면 팩토리가 null을 반환 → 번역 비활성(제공자 번역만).
+/// 翻译引擎注册表。新引擎只要在 <see cref="All"/> 里加一行即可纳入。
+/// 通过设置(<c>TranslationEngine</c>)选择，并用 <see cref="TranslatorOptions"/> 注入密钥/端点。
+/// 密钥不足/不支持时工厂返回 null → 翻译不可用(仅使用提供方自带翻译)。
 /// </summary>
 public static class TranslatorRegistry
 {
-    /// <summary>번역 비활성 식별자.</summary>
+    /// <summary>翻译关闭的标识符。</summary>
     public const string None = "none";
 
-    /// <summary>무키 무료 기본 엔진(설치 직후 바로 동작). LibreTranslate 공개 인스턴스가
-    /// 유료 키 필수로 바뀌어(2026) MyMemory를 기본 무키 엔진으로 사용한다.</summary>
+    /// <summary>无需密钥的免费默认引擎(安装后即可使用)。LibreTranslate 公共实例已改为
+    /// 必须付费密钥(2026)，因此用 MyMemory 作为默认的无密钥引擎。</summary>
     public const string DefaultFreeEngine = "mymemory";
 
-    /// <summary>LibreTranslate 기본 엔드포인트(설정으로 자체호스팅 인스턴스로 교체 가능).</summary>
+    /// <summary>LibreTranslate 默认端点(可通过设置换成自托管实例)。</summary>
     public const string DefaultLibreEndpoint = "https://libretranslate.com";
 
     public static IReadOnlyList<TranslatorDescriptor> All { get; } = new TranslatorDescriptor[]
     {
-        new("mymemory", "MyMemory (무료·무키)", RequiresApiKey: false, IsFree: true,
+        new("mymemory", "MyMemory (免费·无需密钥)", RequiresApiKey: false, IsFree: true,
             o => new MyMemoryTranslator(o.MyMemoryEmail, o.Http),
             ShortName: "MyMemory"),
-        new("libretranslate", "LibreTranslate (자체호스팅/키)", RequiresApiKey: false, IsFree: true,
+        new("libretranslate", "LibreTranslate (自托管/密钥)", RequiresApiKey: false, IsFree: true,
             o => new LibreTranslateTranslator(
                 string.IsNullOrWhiteSpace(o.LibreEndpoint) ? DefaultLibreEndpoint : o.LibreEndpoint!,
                 o.LibreApiKey, o.Http),
@@ -79,12 +79,12 @@ public static class TranslatorRegistry
         new("deepl", "DeepL", RequiresApiKey: true, IsFree: false,
             o => string.IsNullOrWhiteSpace(o.DeeplApiKey) ? null : new DeeplTranslator(o.DeeplApiKey!, o.Http),
             ShortName: "DeepL"),
-        new("google", "Google Cloud Translation (API 키)", RequiresApiKey: true, IsFree: false,
+        new("google", "Google Cloud Translation (API 密钥)", RequiresApiKey: true, IsFree: false,
             o => string.IsNullOrWhiteSpace(o.GoogleApiKey)
                 ? null
                 : new GoogleTranslateTranslator(o.GoogleApiKey!, o.Http),
             ShortName: "Google Cloud Translation"),
-        new("openrouter", "OpenRouter (LLM·모델 자유 선택)", RequiresApiKey: true, IsFree: false,
+        new("openrouter", "OpenRouter (LLM·自由选择模型)", RequiresApiKey: true, IsFree: false,
             o => string.IsNullOrWhiteSpace(o.OpenRouterApiKey)
                 ? null
                 : new OpenRouterTranslator(
@@ -96,7 +96,7 @@ public static class TranslatorRegistry
     public static TranslatorDescriptor? Find(string id) =>
         All.FirstOrDefault(d => string.Equals(d.Id, id, StringComparison.OrdinalIgnoreCase));
 
-    /// <summary>선택된 엔진의 번역기를 만든다. "none"/미지원/키 부족이면 null.</summary>
+    /// <summary>创建所选引擎的翻译器。"none"/不支持/密钥不足时为 null。</summary>
     public static ITranslator? Build(string id, TranslatorOptions options)
     {
         if (string.IsNullOrWhiteSpace(id) || string.Equals(id, None, StringComparison.OrdinalIgnoreCase))

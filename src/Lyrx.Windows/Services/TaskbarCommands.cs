@@ -63,7 +63,7 @@ public static class TaskbarCommands
                 }
                 catch (Exception e)
                 {
-                    Log.Write($"[ipc] 명령 수신 실패: {e.Message}");
+                    Log.Write($"[ipc] 命令接收失败: {e.Message}");
                     await Task.Delay(1000);
                 }
             }

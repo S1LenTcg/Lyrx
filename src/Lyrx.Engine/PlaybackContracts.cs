@@ -1,49 +1,52 @@
 namespace Musebase.Engine;
 
-/// <summary>현재 재생 곡 정보(플랫폼 무관 입력 계약).</summary>
+/// <summary>当前播放歌曲信息(与平台无关的输入契约)。</summary>
 public sealed record TrackInfo(string Title, string Artist, string Album, TimeSpan? Duration, string SourceAppId)
 {
     public override string ToString() =>
         string.IsNullOrEmpty(Artist) ? Title : $"{Artist} - {Title}";
 }
 
-/// <summary>재생 소스가 지원하는 컨트롤 가용 여부(버튼 활성화 판단용).</summary>
+/// <summary>播放源支持的控件可用性(用于判断按钮是否可用)。</summary>
 public sealed record PlaybackControls(bool CanPrevious, bool CanPlayPause, bool CanNext)
 {
     public static readonly PlaybackControls None = new(false, false, false);
 }
 
 /// <summary>
-/// "현재 재생 중" 정보 제공자의 플랫폼 무관 계약.
-/// Windows=SMTC, Android=MediaSessionManager, macOS=MediaRemote 등이 각각 구현한다.
-/// 이벤트는 임의 스레드에서 발생할 수 있으므로 구독자(엔진)가 마샬링을 책임진다.
+/// "当前正在播放"信息提供者的与平台无关契约。
+/// Windows=SMTC、Android=MediaSessionManager、macOS=MediaRemote 等各自实现。
+/// 事件可能在任意线程上触发，因此订阅方(引擎)自己负责线程封送。
 /// </summary>
 public interface INowPlayingSource
 {
-    /// <summary>현재 곡. 없으면 null.</summary>
+    /// <summary>当前歌曲。没有则为 null。</summary>
     TrackInfo? CurrentTrack { get; }
 
-    /// <summary>재생 중 여부.</summary>
+    /// <summary>是否正在播放。</summary>
     bool IsPlaying { get; }
 
-    /// <summary>트랙 변경(메타 변화). null = 곡 없음.</summary>
+    /// <summary>曲目变更(元数据变化)。null = 没有歌曲。</summary>
     event Action<TrackInfo?>? TrackChanged;
 
-    /// <summary>재생/일시정지 상태 변경.</summary>
+    /// <summary>播放/暂停状态变化。</summary>
     event Action<bool>? IsPlayingChanged;
 
-    /// <summary>보간된 현재 재생 위치. 취득 불가 시 null.</summary>
+    /// <summary>插值后的当前播放位置。无法获取时为 null。</summary>
     TimeSpan? GetEstimatedPosition();
 
-    /// <summary>현재 세션의 컨트롤 가용 여부.</summary>
+    /// <summary>当前会话的控件可用性。</summary>
     PlaybackControls GetControls();
 
-    /// <summary>재생/일시정지 토글.</summary>
+    /// <summary>切换播放/暂停。</summary>
     Task<bool> TogglePlayPauseAsync();
 
-    /// <summary>다음 곡.</summary>
+    /// <summary>下一首。</summary>
     Task<bool> SkipNextAsync();
 
-    /// <summary>이전 곡.</summary>
+    /// <summary>上一首。</summary>
     Task<bool> SkipPreviousAsync();
+
+    /// <summary>跳转播放进度。若播放源支持则调整播放进度并返回 true。</summary>
+    Task<bool> SeekAsync(TimeSpan position);
 }
