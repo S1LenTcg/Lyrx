@@ -35,6 +35,7 @@ public sealed class LyricsEditorWindow : Window
         Width = 560;
         Height = 640;
         WindowStartupLocation = WindowStartupLocation.CenterScreen;
+        FontFamily = ClassicLyricsFonts.Body;
 
         _simpleToggle = new CheckBox { Content = Loc.T("editor.simpleToggle"), VerticalAlignment = VerticalAlignment.Center };
         _langCombo = new ComboBox

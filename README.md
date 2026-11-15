@@ -1,6 +1,6 @@
 # Lyrx
 
-**Lyrx** 是一款面向 Windows 的独立沉浸式双语歌词伴侣窗口，基于系统 SMTC（System Media Transport Controls）协议适配任意桌面与网页音乐播放器。
+**Lyrx** 是一款面向 Windows/Android 的独立沉浸式双语歌词伴侣窗口，基于系统 SMTC（System Media Transport Controls）协议适配任意桌面与网页音乐播放器。
 
 ## 核心特性
 

@@ -68,6 +68,14 @@ internal sealed class ClassicLyricsWindow : Window
     private readonly Action _onToggleTranslation;
     private readonly WindowChrome _chrome;
     private readonly Dictionary<int, LyricRow> _rows = new();
+    private WindowsAudioOutputMonitor _audioMonitor = null!;
+    private bool _audioMonitorOwned = true;
+    private readonly Button _audioOutputBtn = null!;
+    private readonly ClassicTransportGlyph _audioOutputIcon = null!;
+    private readonly TextBlock _audioOutputLabel = null!;
+    private readonly AudioOutputPopupController _audioPopup = null!;
+    private bool _lastAudioPlaying;
+    private bool _audioMonitorStarted;
     private TrackInfo? _track;
     private Lyrics? _lyrics;
     private LyricsStatusKind? _status;
@@ -141,6 +149,7 @@ internal sealed class ClassicLyricsWindow : Window
         FontFamily = ClassicLyricsFonts.Body;
 
         var layout = new DockPanel();
+        var lyricsView = new Grid();
         var footer = new Grid { Margin = new Thickness(12, 0, 12, 0), UseLayoutRounding = true };
         footer.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         footer.ColumnDefinitions.Add(new ColumnDefinition());
@@ -185,12 +194,42 @@ internal sealed class ClassicLyricsWindow : Window
             VerticalAlignment = VerticalAlignment.Center,
             Margin = new Thickness(8, 0, 0, 0),
         };
+        _audioMonitor = new WindowsAudioOutputMonitor();
+        (_audioOutputBtn, _audioOutputIcon, _audioOutputLabel) = CreateAudioOutputTriggerButton();
+        _audioPopup = new AudioOutputPopupController(
+            this,
+            _audioMonitor,
+            footer,
+            _audioOutputBtn,
+            lyricsView,
+            onOpened: () =>
+            {
+                _offsetPopup.IsOpen = false;
+                _audioOutputBtn.IsHitTestVisible = false;
+            },
+            onClosed: () =>
+            {
+                Dispatcher.BeginInvoke(
+                    System.Windows.Threading.DispatcherPriority.Background,
+                    () => _audioOutputBtn.IsHitTestVisible = true);
+            });
+        SubscribeAudioMonitorEvents(_audioMonitor);
+        _audioOutputBtn.Click += (_, _) =>
+        {
+            if (_offsetPopup.IsOpen) _offsetPopup.IsOpen = false;
+            RefreshAudioPopupOutputs();
+            _audioPopup.Toggle();
+        };
+        _adjustScopePerTrack = _settings.ClassicOffsetPerTrack;
+        _offsetScopeWasPerTrack = _adjustScopePerTrack;
         _offsetBtn = CreateOffsetTriggerButton();
         _offsetPopup = CreateOffsetPopup();
+        _offsetPopup.Opened += (_, _) => _audioPopup.Close();
         UpdateOffsetButton();
         _translate = ChromeButton(ClassicTransportIcon.Translate, "切换双语歌词", ToggleTranslation);
         UpdateTranslateButton();
         var settingsBtn = ChromeButton(ClassicTransportIcon.Settings, "设置", openSettings);
+        windowControls.Children.Add(_audioOutputBtn);
         windowControls.Children.Add(_offsetBtn);
         windowControls.Children.Add(_translate);
         windowControls.Children.Add(settingsBtn);
@@ -217,33 +256,6 @@ internal sealed class ClassicLyricsWindow : Window
         };
         Panel.SetZIndex(_captionBar, 20);
 
-        void LayoutFooter(double width)
-        {
-            var compact = width < 600;
-            footer.Margin = compact ? new Thickness(8, 2, 8, 10) : new Thickness(12, 0, 12, 0);
-            var coverSize = compact ? 44 : 56;
-            coverFrame.Width = coverSize;
-            coverFrame.Height = coverSize;
-            coverContent.Clip = new RectangleGeometry(new Rect(0, 0, coverSize, coverSize), 4, 4);
-            footer.Height = compact ? 120 : 78;
-            footer.RowDefinitions[0].Height = compact ? new GridLength(56) : new GridLength(1, GridUnitType.Star);
-            footer.RowDefinitions[1].Height = compact ? new GridLength(1, GridUnitType.Star) : new GridLength(0);
-            footer.ColumnDefinitions[1].Width = compact
-                ? new GridLength(0)
-                : new GridLength(Math.Clamp(width * 0.44, 280, 722));
-            footer.ColumnDefinitions[2].MinWidth = compact ? 0 : 156;
-            footer.ColumnDefinitions[2].Width = compact
-                ? GridLength.Auto
-                : new GridLength(1, GridUnitType.Star);
-            trackInfo.HorizontalAlignment = HorizontalAlignment.Stretch;
-            trackInfo.Margin = new Thickness(0, 0, 12, 0);
-            trackInfo.MaxWidth = double.PositiveInfinity;
-            Grid.SetRow(transport, compact ? 1 : 0);
-            Grid.SetColumn(transport, compact ? 0 : 1);
-            Grid.SetColumnSpan(transport, compact ? 3 : 1);
-        }
-        LayoutFooter(Width - footer.Margin.Left - footer.Margin.Right);
-        footer.SizeChanged += (_, e) => { if (e.WidthChanged) LayoutFooter(e.NewSize.Width); };
         var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Center };
         _shuffle = TransportButton(ClassicTransportIcon.Shuffle, "随机播放", _player.ToggleShuffleAsync);
         _previous = TransportButton(ClassicTransportIcon.Previous, "上一首", _player.SkipPreviousAsync);
@@ -255,11 +267,12 @@ internal sealed class ClassicLyricsWindow : Window
         buttons.Children.Add(_play);
         buttons.Children.Add(_next);
         buttons.Children.Add(_repeat);
+
         transport.Children.Add(buttons);
 
         // 底部进度条：支持鼠标悬停、拖拽、点击与键盘步进跳转播放（或校准时钟）
         _progress.SeekRequested += seconds => _ = SeekToSecondsAsync(seconds);
-        var timeline = new Grid { Margin = new Thickness(0, 2, 0, 0) };
+        var timeline = new Grid { Margin = new Thickness(0, 4, 0, 0) };
         timeline.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(46) });
         timeline.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         timeline.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(46) });
@@ -270,6 +283,63 @@ internal sealed class ClassicLyricsWindow : Window
         timeline.Children.Add(_progress);
         transport.Children.Add(timeline);
 
+        void LayoutFooter(double width)
+        {
+            var compact = width < 600;
+            footer.Margin = compact ? new Thickness(8, 2, 8, 8) : new Thickness(12, 0, 12, 0);
+            var coverSize = compact ? 44 : 56;
+            coverFrame.Width = coverSize;
+            coverFrame.Height = coverSize;
+            coverContent.Clip = new RectangleGeometry(new Rect(0, 0, coverSize, coverSize), 4, 4);
+            var transportWidth = compact ? 0 : Math.Clamp(width * 0.44, 280, 722);
+            footer.Height = compact ? 118 : 78;
+            footer.RowDefinitions[0].Height = compact ? new GridLength(56) : new GridLength(1, GridUnitType.Star);
+            footer.RowDefinitions[1].Height = compact ? new GridLength(1, GridUnitType.Star) : new GridLength(0);
+            footer.ColumnDefinitions[1].Width = compact
+                ? new GridLength(0)
+                : new GridLength(transportWidth);
+            footer.ColumnDefinitions[2].MinWidth = compact ? 0 : 176;
+            footer.ColumnDefinitions[2].Width = compact
+                ? GridLength.Auto
+                : new GridLength(1, GridUnitType.Star);
+            trackInfo.HorizontalAlignment = HorizontalAlignment.Stretch;
+            trackInfo.Margin = new Thickness(0, 0, 12, 0);
+            trackInfo.MaxWidth = double.PositiveInfinity;
+            Grid.SetRow(transport, compact ? 1 : 0);
+            Grid.SetColumn(transport, compact ? 0 : 1);
+            Grid.SetColumnSpan(transport, compact ? 3 : 1);
+
+            var col2Est = Math.Max(176.0, (width - 24 - transportWidth) / 2.0);
+            var availForLabel = col2Est - 8 - 138 - 38;
+            var showLabel = !compact && width >= 820 && availForLabel >= 56;
+            _audioOutputBtn.HorizontalAlignment = HorizontalAlignment.Center;
+            _audioOutputBtn.VerticalAlignment = VerticalAlignment.Center;
+            _audioOutputBtn.Height = 36;
+            _audioOutputBtn.MinWidth = 32;
+            _audioOutputBtn.Margin = new Thickness(1, 0, 1, 0);
+            if (showLabel)
+            {
+                _audioOutputBtn.Width = double.NaN;
+                _audioOutputBtn.Padding = new Thickness(6, 0, 6, 0);
+                _audioOutputLabel.Visibility = Visibility.Visible;
+                _audioOutputLabel.MaxWidth = Math.Clamp(availForLabel, 56, 175);
+            }
+            else
+            {
+                _audioOutputBtn.Width = 32;
+                _audioOutputBtn.Padding = new Thickness(0);
+                _audioOutputLabel.Visibility = Visibility.Collapsed;
+            }
+            UpdateAudioOutputTriggerIcon();
+
+            if (_audioPopup.IsOpen)
+            {
+                _audioPopup.SyncPopupBoundsAndPlacement();
+            }
+        }
+        LayoutFooter(Width - footer.Margin.Left - footer.Margin.Right);
+        footer.SizeChanged += (_, e) => { if (e.WidthChanged) LayoutFooter(e.NewSize.Width); };
+
         _scroll = new ScrollViewer
         {
             Content = _lines,
@@ -277,7 +347,6 @@ internal sealed class ClassicLyricsWindow : Window
             HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
             PanningMode = PanningMode.VerticalOnly,
         };
-        var lyricsView = new Grid();
         lyricsView.Children.Add(_scroll);
         _resume = new Button
         {
@@ -305,7 +374,7 @@ internal sealed class ClassicLyricsWindow : Window
         resumeContent.Children.Add(new TextBlock { Text = "同步", VerticalAlignment = VerticalAlignment.Center });
         _resume.Content = resumeContent;
         AutomationProperties.SetName(_resume, "同步歌词");
-        var syncMenu = new ContextMenu();
+        var syncMenu = new ContextMenu { FontFamily = ClassicLyricsFonts.Body };
         var globalGroup = new MenuItem { Header = "所有歌曲" };
         foreach (var (label, offset) in new (string, double?)[]
         {
@@ -389,12 +458,28 @@ internal sealed class ClassicLyricsWindow : Window
             if (PresentationSource.FromVisual(this) is HwndSource source)
                 source.AddHook(WndProc);
         };
-        Loaded += (_, _) => { UpdatePanelFrame(); ApplyActivePalette(); Refresh(); _timer.Start(); };
-        Closed += (_, _) => { _timer.Stop(); _progress.CancelPendingSeek(); CancelCoverLoad(); SavePlacement(); };
+        Loaded += (_, _) => { UpdatePanelFrame(); ApplyActivePalette(); StartAudioMonitorIfNeeded(); Refresh(); _timer.Start(); };
+        Closed += (_, _) =>
+        {
+            _timer.Stop();
+            _progress.CancelPendingSeek();
+            CancelCoverLoad();
+            _audioPopup.Close();
+            UnsubscribeAudioMonitorEvents(_audioMonitor);
+            if (_audioMonitorOwned) _audioMonitor.Dispose();
+            SavePlacement();
+        };
         PreviewKeyDown += (_, e) =>
         {
             if (HandleOffsetKeyDown(e)) return;
             var key = e.Key == Key.System ? e.SystemKey : e.Key;
+            if (key == Key.Escape && _audioPopup.IsOpen)
+            {
+                _audioPopup.Close();
+                _audioOutputBtn.Focus();
+                e.Handled = true;
+                return;
+            }
             if (key == Key.F11)
             {
                 ToggleFullscreen();
@@ -623,6 +708,7 @@ internal sealed class ClassicLyricsWindow : Window
             _remaining.Text = total is { } remTotal ? $"−{FormatTime(remTotal - cur)}" : "–:––";
         }
 
+        SyncAudioTrackMetadata();
         if (lyrics is null || position is null) return;
 
         var adjusted = position.Value.TotalSeconds + lyrics.TimeDelay + _coordinator.ManualOffsetSeconds + _coordinator.TrackOffsetSeconds;
@@ -695,6 +781,8 @@ internal sealed class ClassicLyricsWindow : Window
             MediaPlaybackAutoRepeatMode.None => "开启单曲循环",
             _ => "当前播放器未提供循环控制",
         });
+        _lastAudioPlaying = state.IsPlaying;
+        SyncAudioTrackMetadata();
     }
 
     private static void SetButtonLabel(Button button, string text)
@@ -702,6 +790,204 @@ internal sealed class ClassicLyricsWindow : Window
         if (Equals(button.ToolTip, text)) return;
         button.ToolTip = text;
         AutomationProperties.SetName(button, text);
+    }
+
+    internal Button AudioOutputButtonForTest => _audioOutputBtn;
+    internal AudioOutputPopupController AudioPopupForTest => _audioPopup;
+    internal WindowsAudioOutputMonitor AudioMonitorForTest => _audioMonitor;
+
+    internal void AttachAudioMonitorForTest(WindowsAudioOutputMonitor monitor, bool owned = false)
+    {
+        if (ReferenceEquals(_audioMonitor, monitor))
+        {
+            _audioMonitorOwned = owned;
+            return;
+        }
+
+        UnsubscribeAudioMonitorEvents(_audioMonitor);
+        if (_audioMonitorOwned)
+        {
+            _audioMonitor.Dispose();
+        }
+
+        _audioMonitor = monitor;
+        _audioMonitorOwned = owned;
+        _audioPopup.SetMonitor(monitor);
+        SubscribeAudioMonitorEvents(monitor);
+        _audioMonitorStarted = true;
+        monitor.Start();
+        SyncAudioOutputTrigger();
+    }
+
+    private (Button Button, ClassicTransportGlyph Icon, TextBlock Label) CreateAudioOutputTriggerButton()
+    {
+        var borderFactory = new FrameworkElementFactory(typeof(Border));
+        borderFactory.Name = "AudioBtnBg";
+        borderFactory.SetValue(Border.CornerRadiusProperty, new CornerRadius(16));
+        borderFactory.SetValue(Border.BackgroundProperty, Brushes.Transparent);
+        var presenter = new FrameworkElementFactory(typeof(ContentPresenter));
+        presenter.SetValue(FrameworkElement.HorizontalAlignmentProperty, HorizontalAlignment.Center);
+        presenter.SetValue(FrameworkElement.VerticalAlignmentProperty, VerticalAlignment.Center);
+        borderFactory.AppendChild(presenter);
+
+        var template = new ControlTemplate(typeof(Button)) { VisualTree = borderFactory };
+
+        var idleFg = AudioOutputVisualHelper.CreateFrozenBrush(Color.FromRgb(0xE6, 0xE6, 0xE6));
+
+        var style = new Style(typeof(Button));
+        style.Setters.Add(new Setter(Control.ForegroundProperty, idleFg));
+        var styleHover = new Trigger { Property = UIElement.IsMouseOverProperty, Value = true };
+        styleHover.Setters.Add(new Setter(Control.ForegroundProperty, Brushes.White));
+        style.Triggers.Add(styleHover);
+        var stylePress = new Trigger { Property = ButtonBase.IsPressedProperty, Value = true };
+        stylePress.Setters.Add(new Setter(Control.ForegroundProperty, Brushes.White));
+        style.Triggers.Add(stylePress);
+
+        var icon = new ClassicTransportGlyph(ClassicTransportIcon.Speaker)
+        {
+            Width = 17,
+            Height = 17,
+            VerticalAlignment = VerticalAlignment.Center,
+            IsHitTestVisible = false,
+        };
+
+        var label = new TextBlock
+        {
+            Text = "扬声器",
+            FontSize = 12,
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            TextWrapping = TextWrapping.NoWrap,
+            Margin = new Thickness(6, 0, 0, 0),
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+
+        var stack = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            VerticalAlignment = VerticalAlignment.Center,
+            HorizontalAlignment = HorizontalAlignment.Center,
+        };
+        stack.Children.Add(icon);
+        stack.Children.Add(label);
+
+        var button = new Button
+        {
+            Height = 32,
+            MinWidth = 32,
+            Cursor = Cursors.Hand,
+            Focusable = true,
+            FocusVisualStyle = null,
+            BorderThickness = new Thickness(0),
+            Padding = new Thickness(8, 0, 8, 0),
+            Background = Brushes.Transparent,
+            Style = style,
+            Template = template,
+            Content = stack,
+        };
+        icon.SetBinding(ClassicTransportGlyph.TintProperty, new System.Windows.Data.Binding(nameof(Control.Foreground)) { Source = button });
+        return (button, icon, label);
+    }
+
+    private void StartAudioMonitorIfNeeded()
+    {
+        if (!_audioMonitorStarted)
+        {
+            _audioMonitorStarted = true;
+            _audioMonitor.Start();
+        }
+        SyncAudioOutputTrigger();
+    }
+
+    private void SubscribeAudioMonitorEvents(WindowsAudioOutputMonitor monitor)
+    {
+        monitor.OutputStateChanged += OnAudioMonitorOutputChanged;
+        monitor.VolumeStateChanged += OnAudioMonitorVolumeChanged;
+    }
+
+    private void UnsubscribeAudioMonitorEvents(WindowsAudioOutputMonitor monitor)
+    {
+        monitor.OutputStateChanged -= OnAudioMonitorOutputChanged;
+        monitor.VolumeStateChanged -= OnAudioMonitorVolumeChanged;
+    }
+
+    private void OnAudioMonitorOutputChanged()
+    {
+        if (Dispatcher.CheckAccess())
+        {
+            SyncAudioOutputTrigger();
+            return;
+        }
+        _ = Dispatcher.BeginInvoke(SyncAudioOutputTrigger);
+    }
+
+    private void OnAudioMonitorVolumeChanged(AudioVolumeState volume)
+    {
+        if (Dispatcher.CheckAccess())
+        {
+            ApplyAudioMonitorVolume(volume);
+            return;
+        }
+        _ = Dispatcher.BeginInvoke(() => ApplyAudioMonitorVolume(volume));
+    }
+
+    private void SyncAudioOutputTrigger()
+    {
+        var active = _audioMonitor.GetCurrentActiveOutput();
+        var vol = _audioMonitor.GetVolumeState();
+        UpdateAudioOutputTriggerIcon(active, vol);
+        if (!string.Equals(_audioOutputLabel.Text, active.Name, StringComparison.Ordinal))
+        {
+            _audioOutputLabel.Text = active.Name;
+        }
+        SetButtonLabel(_audioOutputBtn, $"音频输出：{active.Name}（{vol.Percent}%{(vol.IsMuted ? "，已静音" : "")}）");
+
+        if (_audioPopup.IsOpen)
+        {
+            RefreshAudioPopupOutputs();
+        }
+    }
+
+    private void ApplyAudioMonitorVolume(AudioVolumeState volume)
+    {
+        var active = _audioMonitor.GetCurrentActiveOutput();
+        UpdateAudioOutputTriggerIcon(active, volume);
+        SetButtonLabel(_audioOutputBtn, $"音频输出：{active.Name}（{volume.Percent}%{(volume.IsMuted ? "，已静音" : "")}）");
+        if (_audioPopup.IsOpen)
+        {
+            _audioPopup.UpdateVolume(volume);
+        }
+    }
+
+    private void UpdateAudioOutputTriggerIcon(AudioOutputDevice? active = null, AudioVolumeState? volume = null)
+    {
+        var resolvedVolume = volume ?? _audioMonitor.GetVolumeState();
+        if (_audioOutputLabel.Visibility != Visibility.Visible)
+        {
+            _audioOutputIcon.SetState(resolvedVolume.IsMuted
+                ? ClassicTransportIcon.MutedSpeaker
+                : ClassicTransportIcon.Speaker);
+            return;
+        }
+
+        var resolvedActive = active ?? _audioMonitor.GetCurrentActiveOutput();
+        _audioOutputIcon.SetState(AudioOutputVisualHelper.ResolveIcon(
+            resolvedActive.Kind,
+            resolvedVolume.IsMuted && resolvedActive.Kind == AudioOutputKind.Speaker));
+    }
+
+    private void RefreshAudioPopupOutputs()
+    {
+        SyncAudioTrackMetadata();
+        _audioPopup.UpdatePalette(_background);
+        _audioPopup.UpdateOutputs(
+            _audioMonitor.GetCurrentActiveOutput(),
+            _audioMonitor.GetAvailableOutputs(),
+            _audioMonitor.GetVolumeState());
+    }
+
+    private void SyncAudioTrackMetadata()
+    {
+        _audioPopup.UpdateTrack(_title.Text, _artist.Text, _cover.Source, _lastAudioPlaying);
     }
 
     public void ReloadLyricsDisplay()
@@ -1301,6 +1587,7 @@ internal sealed class ClassicLyricsWindow : Window
     private void ApplyPalette(Color background, Color subdued)
     {
         _background = background;
+        _audioPopup.UpdatePalette(background);
         _subdued = subdued;
         var brush = (SolidColorBrush)_panel.Background;
         brush.BeginAnimation(SolidColorBrush.ColorProperty, null);
@@ -1604,6 +1891,7 @@ internal sealed class ClassicLyricsWindow : Window
             },
         };
         card.PreviewKeyDown += (_, e) => HandleOffsetKeyDown(e);
+        System.Windows.Documents.TextElement.SetFontFamily(card, ClassicLyricsFonts.Body);
 
         var popup = new System.Windows.Controls.Primitives.Popup
         {
@@ -1622,6 +1910,7 @@ internal sealed class ClassicLyricsWindow : Window
         };
         popup.Closed += (_, _) =>
             Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Background, () => _offsetBtn.IsHitTestVisible = true);
+        UpdateOffsetPopupState(animate: false);
         return popup;
     }
 
@@ -1655,6 +1944,11 @@ internal sealed class ClassicLyricsWindow : Window
         btn.Click += (_, _) =>
         {
             _adjustScopePerTrack = perTrack;
+            if (_settings.ClassicOffsetPerTrack != perTrack)
+            {
+                _settings.ClassicOffsetPerTrack = perTrack;
+                _settings.Save();
+            }
             UpdateOffsetPopupState(animate: true);
         };
         return btn;
@@ -1746,7 +2040,8 @@ internal sealed class ClassicLyricsWindow : Window
     {
         _adjustOffset(delta);
         var normalized = NormalizeOffset(_coordinator.ManualOffsetSeconds);
-        if (Math.Abs(normalized - _coordinator.ManualOffsetSeconds) > 1e-6)
+        if (Math.Abs(normalized - _coordinator.ManualOffsetSeconds) > 1e-6
+            || Math.Abs(normalized - _settings.ManualOffsetSeconds) > 1e-6)
         {
             _coordinator.ManualOffsetSeconds = normalized;
             _settings.ManualOffsetSeconds = normalized;

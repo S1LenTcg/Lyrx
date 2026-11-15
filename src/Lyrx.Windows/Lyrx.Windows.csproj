@@ -30,6 +30,7 @@
 
   <ItemGroup>
     <Resource Include="assets\app.ico" />
+    <Resource Include="assets\fonts\*.ttf" />
     <EmbeddedResource Include="i18n\*.json" />
   </ItemGroup>
 
