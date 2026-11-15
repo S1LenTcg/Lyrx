@@ -86,3 +86,44 @@ if ($javaSdk) {
 if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
+
+function Get-CsprojProperty([xml]$Xml, [string]$Name) {
+    $node = $Xml.SelectSingleNode("//PropertyGroup/$Name")
+    if ($null -eq $node -or [string]::IsNullOrWhiteSpace($node.InnerText)) {
+        return $null
+    }
+    return $node.InnerText.Trim()
+}
+
+if ($Configuration -eq "Release") {
+    $csprojPath = Join-Path $PSScriptRoot "Lyrx.Android\Lyrx.Android.csproj"
+    [xml]$csprojXml = Get-Content $csprojPath -Raw -Encoding UTF8
+    $appTitle = Get-CsprojProperty $csprojXml "ApplicationTitle"
+    $appVersion = Get-CsprojProperty $csprojXml "ApplicationDisplayVersion"
+    $appId = Get-CsprojProperty $csprojXml "ApplicationId"
+
+    if ($appTitle -and $appVersion -and $appId) {
+        $outDir = Join-Path $PSScriptRoot "Lyrx.Android\bin\$Configuration\net10.0-android"
+        $namedApk = Join-Path $outDir "$appTitle V$appVersion.apk"
+        $signedRawApk = Join-Path $outDir "$appId-Signed.apk"
+
+        if (Test-Path $signedRawApk) {
+            Copy-Item -Path $signedRawApk -Destination $namedApk -Force
+        }
+
+        # 仅保留带签名的正式版本输出，清理中间未签名及临时签名包
+        foreach ($staleFile in @(
+            (Join-Path $outDir "$appId.apk"),
+            $signedRawApk,
+            "$signedRawApk.idsig"
+        )) {
+            if (Test-Path $staleFile) {
+                Remove-Item -Path $staleFile -Force
+            }
+        }
+
+        if (Test-Path $namedApk) {
+            Write-Host "[Lyrx.Android] Output APK : $namedApk" -ForegroundColor Green
+        }
+    }
+}

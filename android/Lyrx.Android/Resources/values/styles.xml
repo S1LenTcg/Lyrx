@@ -6,4 +6,8 @@
     <item name="android:statusBarColor">@android:color/transparent</item>
     <item name="android:navigationBarColor">#121212</item>
   </style>
+  <style name="AudioOutputPopupAnim">
+    <item name="android:windowEnterAnimation">@anim/audio_output_popup_enter</item>
+    <item name="android:windowExitAnimation">@anim/audio_output_popup_exit</item>
+  </style>
 </resources>

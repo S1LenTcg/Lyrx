@@ -44,6 +44,7 @@ internal static class OffsetSheetDialog
 
         var dm = activity.Resources?.DisplayMetrics;
         var screenW = dm?.WidthPixels ?? 1080;
+        var screenH = dm?.HeightPixels ?? 2200;
         var popupWidth = Math.Min(UiHelpers.Dp(activity, 278), (int)(screenW * 0.90));
 
         var card = new LinearLayout(activity)
@@ -152,6 +153,12 @@ internal static class OffsetSheetDialog
 
         void RefreshReadout()
         {
+            var currentTrack = app.NowPlaying.CurrentTrack;
+            hasTrack = currentTrack is not null;
+            if (!hasTrack && perTrack)
+                perTrack = false;
+            app.EnsureTrackOffsetSynced(currentTrack);
+
             var val = perTrack ? app.Coordinator.TrackOffsetSeconds : app.Settings.ManualOffsetSeconds;
             var isZero = Math.Abs(val) < 0.005;
             valueView.Text = isZero ? "0.0s" : $"{val:+0.0;-0.0;0.0}s";
@@ -170,8 +177,11 @@ internal static class OffsetSheetDialog
 
         void ApplyDelta(double? delta)
         {
-            if (perTrack) app.AdjustTrackOffsetDelta(app.NowPlaying.CurrentTrack, delta);
-            else app.AdjustGlobalOffsetDelta(delta);
+            var currentTrack = app.NowPlaying.CurrentTrack;
+            if (perTrack && currentTrack is not null)
+                app.AdjustTrackOffsetDelta(currentTrack, delta);
+            else
+                app.AdjustGlobalOffsetDelta(delta);
             RefreshReadout();
             onChanged();
         }
@@ -262,7 +272,10 @@ internal static class OffsetSheetDialog
                 loc[0] + anchor.Width + UiHelpers.Dp(activity, 64) - popupWidth,
                 margin,
                 Math.Max(margin, screenW - popupWidth - margin));
-            var y = Math.Max(margin, loc[1] - popupHeight - UiHelpers.Dp(activity, 10));
+            var y = Math.Clamp(
+                loc[1] - popupHeight - UiHelpers.Dp(activity, 10),
+                margin,
+                Math.Max(margin, screenH - popupHeight - margin));
             popup.ShowAtLocation(anchor, GravityFlags.Top | GravityFlags.Start, x, y);
         }
         else

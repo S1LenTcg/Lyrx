@@ -1,10 +1,14 @@
+using System.Diagnostics.CodeAnalysis;
+using System.Runtime.CompilerServices;
 using Android.Animation;
 using Android.App;
 using Android.Content;
 using Android.Content.PM;
+using Android.Content.Res;
 using Android.Graphics;
 using Android.Graphics.Drawables;
 using Android.OS;
+using Android.Runtime;
 using Android.Text;
 using Android.Text.Style;
 using Android.Util;
@@ -45,32 +49,94 @@ public sealed class MainActivity : Activity
         public ValueAnimator? ColorAnimator { get; set; }
     }
 
-    private sealed class InsetsListener(MainActivity owner) : Java.Lang.Object, View.IOnApplyWindowInsetsListener
+    private sealed class InsetsListener : Java.Lang.Object, View.IOnApplyWindowInsetsListener
     {
+        private readonly WeakReference<MainActivity>? _owner;
+
+        [DynamicDependency(DynamicallyAccessedMemberTypes.PublicConstructors, typeof(InsetsListener))]
+        public InsetsListener()
+        {
+        }
+
+        public InsetsListener(IntPtr javaReference, JniHandleOwnership transfer) : base(javaReference, transfer)
+        {
+        }
+
+        public InsetsListener(MainActivity owner) =>
+            _owner = new WeakReference<MainActivity>(owner);
+
         public WindowInsets OnApplyWindowInsets(View? v, WindowInsets? insets)
         {
-            if (insets is not null)
+            if (insets is not null && _owner is not null && _owner.TryGetTarget(out var owner))
             {
                 if (OperatingSystem.IsAndroidVersionAtLeast(30))
                 {
-                    var bars = insets.GetInsets(WindowInsets.Type.SystemBars() | WindowInsets.Type.DisplayCutout());
-                    owner.ApplySystemBarInsets(bars.Left, bars.Top, bars.Right, bars.Bottom);
+                    ApplyInsetsApi30(owner, insets);
                 }
                 else
                 {
 #pragma warning disable CS0618
-                    var cutoutTop = OperatingSystem.IsAndroidVersionAtLeast(28)
-                        ? (insets.DisplayCutout?.SafeInsetTop ?? 0)
-                        : 0;
-                    owner.ApplySystemBarInsets(
-                        insets.SystemWindowInsetLeft,
-                        Math.Max(insets.SystemWindowInsetTop, cutoutTop),
-                        insets.SystemWindowInsetRight,
-                        insets.SystemWindowInsetBottom);
+                    var left = insets.SystemWindowInsetLeft;
+                    var top = insets.SystemWindowInsetTop;
+                    var right = insets.SystemWindowInsetRight;
+                    var bottom = insets.SystemWindowInsetBottom;
 #pragma warning restore CS0618
+                    if (OperatingSystem.IsAndroidVersionAtLeast(28))
+                        MergeCutoutInsetsApi28(insets, ref left, ref top, ref right, ref bottom);
+                    owner.ApplySystemBarInsets(left, top, right, bottom);
                 }
             }
             return insets!;
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        [global::System.Runtime.Versioning.SupportedOSPlatform("android30.0")]
+        private static void ApplyInsetsApi30(MainActivity owner, WindowInsets insets)
+        {
+            var bars = insets.GetInsets(WindowInsets.Type.SystemBars() | WindowInsets.Type.DisplayCutout());
+            owner.ApplySystemBarInsets(bars.Left, bars.Top, bars.Right, bars.Bottom);
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        [global::System.Runtime.Versioning.SupportedOSPlatform("android28.0")]
+        private static void MergeCutoutInsetsApi28(
+            WindowInsets insets,
+            ref int left,
+            ref int top,
+            ref int right,
+            ref int bottom)
+        {
+            if (insets.DisplayCutout is not { } cutout) return;
+            left = Math.Max(left, cutout.SafeInsetLeft);
+            top = Math.Max(top, cutout.SafeInsetTop);
+            right = Math.Max(right, cutout.SafeInsetRight);
+            bottom = Math.Max(bottom, cutout.SafeInsetBottom);
+        }
+    }
+
+    private sealed class DeviceOrientationWatcher : OrientationEventListener
+    {
+        private readonly WeakReference<MainActivity>? _owner;
+
+        [DynamicDependency(DynamicallyAccessedMemberTypes.PublicConstructors, typeof(DeviceOrientationWatcher))]
+        public DeviceOrientationWatcher(IntPtr javaReference, JniHandleOwnership transfer) : base(javaReference, transfer)
+        {
+        }
+
+        public DeviceOrientationWatcher(MainActivity owner) : base(owner) =>
+            _owner = new WeakReference<MainActivity>(owner);
+
+        public override void OnOrientationChanged(int orientation)
+        {
+            try
+            {
+                if (_owner is not null && _owner.TryGetTarget(out var owner))
+                    owner.HandleSensorOrientation(orientation);
+            }
+            catch
+            {
+                // 忽略传感器回调异常
+            }
         }
     }
 
@@ -100,6 +166,15 @@ public sealed class MainActivity : Activity
     private long _pendingSeekDeadlineMs;
     private bool _disposed;
     private bool _isResumed;
+    private bool _isLandscapeLayout;
+    private ScreenOrientation? _sessionOrientationOverride;
+    private bool? _waitSensorExitFromSideways;
+    private bool? _pendingSensorSideways;
+    private long _pendingSensorSinceMs;
+    private bool _promptedForCurrentPhysicalPose;
+    private bool? _lastPromptPoseSideways;
+    private DeviceOrientationWatcher? _orientationWatcher;
+    private Action? _hideRotateHintRunnable;
 
     private Color _coverBackground = LyricsPalette.DefaultBackground;
     private Color _coverSubdued = LyricsPalette.DefaultSubdued;
@@ -116,29 +191,40 @@ public sealed class MainActivity : Activity
     private GradientDrawable _topFadeDrawable = null!;
     private GradientDrawable _bottomFadeDrawable = null!;
     private View _topFadeView = null!;
+    private View _bottomFadeView = null!;
+    private View _landscapeDivider = null!;
     private LinearLayout _footerView = null!;
     private ScrollView _lyricsScrollView = null!;
     private LinearLayout _lyricsContainer = null!;
     private TextView _emptyHintView = null!;
     private LinearLayout _resumePill = null!;
+    private LinearLayout _rotateHintPill = null!;
+    private TextView _rotateHintLabel = null!;
 
     private int _insetLeft;
     private int _insetTop;
     private int _insetRight;
     private int _insetBottom;
 
+    private FrameLayout _coverFrame = null!;
     private ImageView _coverView = null!;
+    private LinearLayout _trackText = null!;
     private TextView _titleView = null!;
     private TextView _artistView = null!;
+    private LinearLayout _actionsRow = null!;
     private LinearLayout _offsetHost = null!;
     private TextView _offsetBadge = null!;
     private VectorIconView _offsetIcon = null!;
+    private FrameLayout _translateHost = null!;
     private VectorIconView _translateIcon = null!;
+    private FrameLayout _settingsHost = null!;
     private VectorIconView _settingsIcon = null!;
 
+    private LinearLayout _timelineRow = null!;
     private TextView _elapsedView = null!;
     private ClassicSeekBar _seekBar = null!;
     private TextView _durationView = null!;
+    private LinearLayout _transportRow = null!;
     private FrameLayout _prevBtnHost = null!;
     private VectorIconView _prevIcon = null!;
     private FrameLayout _playBtnHost = null!;
@@ -155,14 +241,18 @@ public sealed class MainActivity : Activity
     {
         base.OnCreate(savedInstanceState);
 
+        _orientationWatcher = new DeviceOrientationWatcher(this);
+
         BuildLayout();
         SetContentView(_rootLayout);
+        ApplyOrientationPolicy(fromSettingsChange: false);
+        ApplyKeepScreenOnFlag();
         ApplyChromeSystemBars();
 
         ApplyActivePalette(animate: false);
         BindEngineEvents();
         StartUiLoopIfNeeded();
-        RefreshAll(forceTrackCheck: true);
+        RefreshAll();
         RefreshBluetoothOutput();
     }
 
@@ -170,13 +260,31 @@ public sealed class MainActivity : Activity
     {
         base.OnResume();
         _isResumed = true;
+        TryEnableOrientationWatcher(true);
+        ApplyOrientationPolicy(fromSettingsChange: false);
+        ApplyKeepScreenOnFlag();
         ApplyChromeSystemBars();
         App.EnsureNowPlayingStarted();
         App.BluetoothAudio.Refresh();
         RefreshPermissionBanner();
-        RefreshAll(forceTrackCheck: true);
+        RefreshAll();
         RefreshBluetoothOutput();
         StartUiLoopIfNeeded();
+    }
+
+    public override void OnConfigurationChanged(Configuration newConfig)
+    {
+        base.OnConfigurationChanged(newConfig);
+        AudioOutputSheetDialog.DismissIfShowing();
+        var isLandscape = DetectLandscape(newConfig);
+        ApplyResponsiveLayout(isLandscape);
+        ApplyChromeSystemBars();
+        ApplyKeepScreenOnFlag();
+        UpdateTransportAndButtons();
+        SettingsSheetDialog.RefreshWindowBounds(this);
+        _rootLayout.RequestApplyInsets();
+        RebuildTypographySizing();
+        FollowActiveLine(animate: false);
     }
 
     public override void OnRequestPermissionsResult(int requestCode, string[] permissions, Permission[] grantResults)
@@ -198,6 +306,9 @@ public sealed class MainActivity : Activity
     protected override void OnPause()
     {
         _isResumed = false;
+        AudioOutputSheetDialog.DismissIfShowing();
+        TryEnableOrientationWatcher(false);
+        HideRotateHintPill();
         StopUiLoop();
         base.OnPause();
     }
@@ -206,14 +317,48 @@ public sealed class MainActivity : Activity
     {
         _disposed = true;
         StopUiLoop();
+        HideRotateHintPill();
+        try
+        {
+            _orientationWatcher?.Disable();
+            _orientationWatcher?.Dispose();
+        }
+        catch { }
+        _orientationWatcher = null;
         _bgAnimator?.Cancel();
         _scrollAnimator?.Cancel();
         UnbindEngineEvents();
         base.OnDestroy();
     }
 
-    private void ApplyChromeSystemBars() =>
-        UiHelpers.HideStatusBar(Window, edgeToEdge: true, navigationBarColor: LyricsPalette.ChromeBackground);
+    private void ApplyChromeSystemBars()
+    {
+        try
+        {
+            UiHelpers.HideStatusBar(Window, edgeToEdge: true, navigationBarColor: LyricsPalette.ChromeBackground);
+        }
+        catch (Exception ex)
+        {
+            AndroidLog.Write($"[ui] 更新状态栏样式失败: {ex.Message}");
+        }
+    }
+
+    private void ApplyKeepScreenOnFlag()
+    {
+        try
+        {
+            if (Window is null) return;
+            var keepAwake = _isLandscapeLayout && App.Settings.KeepScreenOnInLandscape;
+            if (keepAwake)
+                Window.AddFlags(WindowManagerFlags.KeepScreenOn);
+            else
+                Window.ClearFlags(WindowManagerFlags.KeepScreenOn);
+        }
+        catch
+        {
+            // 忽略屏幕常亮标志异常
+        }
+    }
 
     private void BuildLayout()
     {
@@ -225,12 +370,224 @@ public sealed class MainActivity : Activity
         _rootLayout.SetOnApplyWindowInsetsListener(new InsetsListener(this));
 
         _lyricsPanel = BuildLyricsPanel();
-        _rootLayout.AddView(_lyricsPanel, new LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MatchParent, 0, 1f));
+        _landscapeDivider = new View(this);
+        _landscapeDivider.SetBackgroundColor(Color.Rgb(34, 34, 34));
+        BuildConsoleComponents();
 
-        _footerView = BuildFooter();
-        _rootLayout.AddView(_footerView, new LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent));
+        ApplyResponsiveLayout(DetectLandscape(Resources?.Configuration));
+    }
+
+    private bool DetectLandscape(Configuration? config)
+    {
+        if (config is not null)
+        {
+            if (config.Orientation == global::Android.Content.Res.Orientation.Landscape)
+                return true;
+            if (config.Orientation == global::Android.Content.Res.Orientation.Portrait)
+                return false;
+        }
+        var dm = Resources?.DisplayMetrics;
+        return dm is not null && dm.WidthPixels > dm.HeightPixels;
+    }
+
+    private static void DetachFromParent(View view)
+    {
+        if (view.Parent is ViewGroup parent)
+            parent.RemoveView(view);
+    }
+
+    private void ApplyResponsiveLayout(bool isLandscape)
+    {
+        _isLandscapeLayout = isLandscape;
+
+        DetachFromParent(_lyricsPanel);
+        DetachFromParent(_landscapeDivider);
+        DetachFromParent(_footerView);
+        _rootLayout.RemoveAllViews();
+
+        DetachFromParent(_coverFrame);
+        DetachFromParent(_trackText);
+        DetachFromParent(_actionsRow);
+        DetachFromParent(_timelineRow);
+        DetachFromParent(_transportRow);
+        DetachFromParent(_bluetoothRow);
+        _footerView.RemoveAllViews();
+
+        var dm = Resources?.DisplayMetrics;
+        var rawW = dm?.WidthPixels ?? 1080;
+        var rawH = dm?.HeightPixels ?? 2200;
+
+        UpdateActionButtonSizing(isLandscape);
+
+        if (isLandscape)
+        {
+            var landW = Math.Max(rawW, rawH);
+            var landH = Math.Min(rawW, rawH);
+            var consoleWidth = Math.Clamp((int)(landW * 0.37f), Dp(284), Dp(376));
+            var usableH = Math.Max(Dp(230), landH - _insetTop - _insetBottom - Dp(22));
+            var coverSize = Math.Clamp(usableH - Dp(190), Dp(68), Dp(168));
+
+            _coverFrame.Background = UiHelpers.RoundedRect(
+                this,
+                LyricsPalette.CoverFrameBackground,
+                10,
+                Color.Argb(36, 255, 255, 255),
+                1f);
+            _coverFrame.OutlineProvider = new RoundedOutlineProvider(Dp(10));
+
+            _titleView.Gravity = GravityFlags.CenterHorizontal;
+            _titleView.SetTextSize(ComplexUnitType.Sp, 15.5f);
+            UiHelpers.SetFontWeight(_titleView, UiHelpers.FontWeightSemiBold);
+
+            _artistView.Gravity = GravityFlags.CenterHorizontal;
+            _artistView.SetTextSize(ComplexUnitType.Sp, 12.5f);
+
+            var topSpacer = new View(this);
+            _footerView.AddView(topSpacer, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MatchParent, 0, 0.50f));
+
+            _footerView.AddView(_coverFrame, new LinearLayout.LayoutParams(coverSize, coverSize)
+            {
+                Gravity = GravityFlags.CenterHorizontal,
+                BottomMargin = Dp(11),
+            });
+
+            _footerView.AddView(_trackText, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent)
+            {
+                BottomMargin = Dp(8),
+            });
+
+            _footerView.AddView(_timelineRow, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent)
+            {
+                BottomMargin = Dp(4),
+            });
+
+            var transportTopSpacer = new View(this);
+            _footerView.AddView(transportTopSpacer, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MatchParent, 0, 0.65f));
+
+            _footerView.AddView(_transportRow, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent));
+
+            var transportBottomSpacer = new View(this);
+            _footerView.AddView(transportBottomSpacer, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MatchParent, 0, 0.65f));
+
+            var bottomUtilityRow = new LinearLayout(this)
+            {
+                Orientation = global::Android.Widget.Orientation.Horizontal,
+            };
+            bottomUtilityRow.SetGravity(GravityFlags.CenterVertical);
+            var btSlot = new FrameLayout(this);
+            btSlot.AddView(_bluetoothRow, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent)
+            {
+                Gravity = GravityFlags.Left | GravityFlags.CenterVertical,
+            });
+            bottomUtilityRow.AddView(btSlot, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WrapContent, 1f)
+            {
+                RightMargin = Dp(6),
+            });
+            bottomUtilityRow.AddView(_actionsRow, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WrapContent, ViewGroup.LayoutParams.WrapContent));
+
+            _footerView.AddView(bottomUtilityRow, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent)
+            {
+                TopMargin = Dp(4),
+            });
+
+            _rootLayout.Orientation = global::Android.Widget.Orientation.Horizontal;
+            _rootLayout.AddView(_footerView, new LinearLayout.LayoutParams(
+                consoleWidth, ViewGroup.LayoutParams.MatchParent));
+            _rootLayout.AddView(_landscapeDivider, new LinearLayout.LayoutParams(
+                Math.Max(1, Dp(0.8f)), ViewGroup.LayoutParams.MatchParent));
+            _rootLayout.AddView(_lyricsPanel, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.MatchParent, 1f));
+        }
+        else
+        {
+            _coverFrame.Background = UiHelpers.RoundedRect(this, LyricsPalette.CoverFrameBackground, 4);
+            _coverFrame.OutlineProvider = new RoundedOutlineProvider(Dp(4));
+
+            _titleView.Gravity = GravityFlags.Left;
+            _titleView.SetTextSize(ComplexUnitType.Sp, 14f);
+            UiHelpers.SetFontWeight(_titleView, UiHelpers.FontWeightRegular);
+
+            _artistView.Gravity = GravityFlags.Left;
+            _artistView.SetTextSize(ComplexUnitType.Sp, 12f);
+
+            var topRow = new LinearLayout(this)
+            {
+                Orientation = global::Android.Widget.Orientation.Horizontal,
+            };
+            topRow.SetGravity(GravityFlags.CenterVertical);
+            topRow.AddView(_coverFrame, new LinearLayout.LayoutParams(Dp(46), Dp(46))
+            {
+                RightMargin = Dp(12),
+            });
+            topRow.AddView(_trackText, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WrapContent, 1f)
+            {
+                RightMargin = Dp(8),
+            });
+            topRow.AddView(_actionsRow, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WrapContent, ViewGroup.LayoutParams.WrapContent));
+
+            _footerView.AddView(topRow, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent)
+            {
+                BottomMargin = Dp(6),
+            });
+            _footerView.AddView(_timelineRow, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent)
+            {
+                BottomMargin = Dp(4),
+            });
+            _footerView.AddView(_transportRow, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent));
+            _footerView.AddView(_bluetoothRow, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent)
+            {
+                TopMargin = Dp(4),
+            });
+
+            _rootLayout.Orientation = global::Android.Widget.Orientation.Vertical;
+            _rootLayout.AddView(_lyricsPanel, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MatchParent, 0, 1f));
+            _rootLayout.AddView(_footerView, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent));
+        }
+
+        ApplySystemBarInsets(_insetLeft, _insetTop, _insetRight, _insetBottom);
+    }
+
+    private void UpdateActionButtonSizing(bool isLandscape)
+    {
+        var btnSize = Dp(isLandscape ? 32 : 36);
+        var gap = Dp(isLandscape ? 1 : 2);
+
+        if (_offsetHost.LayoutParameters is LinearLayout.LayoutParams offsetLp)
+        {
+            offsetLp.Height = btnSize;
+            _offsetHost.LayoutParameters = offsetLp;
+        }
+        if (_translateHost.LayoutParameters is LinearLayout.LayoutParams transLp)
+        {
+            transLp.Width = btnSize;
+            transLp.Height = btnSize;
+            transLp.LeftMargin = gap;
+            _translateHost.LayoutParameters = transLp;
+        }
+        if (_settingsHost.LayoutParameters is LinearLayout.LayoutParams setLp)
+        {
+            setLp.Width = btnSize;
+            setLp.Height = btnSize;
+            setLp.LeftMargin = gap;
+            _settingsHost.LayoutParameters = setLp;
+        }
     }
 
     private LinearLayout BuildPermissionBanner()
@@ -364,8 +721,8 @@ public sealed class MainActivity : Activity
         _bottomFadeDrawable = new GradientDrawable(
             GradientDrawable.Orientation.BottomTop,
             [_background.ToArgb(), transparentBg.ToArgb()]);
-        var bottomFade = new View(this) { Background = _bottomFadeDrawable };
-        scrollWrap.AddView(bottomFade, new FrameLayout.LayoutParams(
+        _bottomFadeView = new View(this) { Background = _bottomFadeDrawable };
+        scrollWrap.AddView(_bottomFadeView, new FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MatchParent, Dp(34))
         {
             Gravity = GravityFlags.Bottom,
@@ -379,12 +736,52 @@ public sealed class MainActivity : Activity
             BottomMargin = Dp(20),
         });
 
+        _rotateHintPill = BuildRotateHintPill();
+        scrollWrap.AddView(_rotateHintPill, new FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WrapContent, Dp(34))
+        {
+            Gravity = GravityFlags.Bottom | GravityFlags.Right,
+            RightMargin = Dp(16),
+            BottomMargin = Dp(18),
+        });
+
         panelContent.AddView(scrollWrap, new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MatchParent, 0, 1f));
         panel.AddView(panelContent, new FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.MatchParent));
 
         return panel;
+    }
+
+    private LinearLayout BuildRotateHintPill()
+    {
+        var pill = new LinearLayout(this)
+        {
+            Orientation = global::Android.Widget.Orientation.Horizontal,
+            Background = UiHelpers.RoundedRect(this, Color.Argb(228, 22, 22, 22), 17, Color.Argb(80, 255, 255, 255), 1f),
+            Clickable = true,
+            Elevation = Dp(6),
+            Visibility = ViewStates.Gone,
+        };
+        pill.SetGravity(GravityFlags.CenterVertical);
+        pill.SetPadding(Dp(12), 0, Dp(14), 0);
+
+        var icon = new VectorIconView(this, ClassicIconKind.LandscapePlayer);
+        icon.Configure(ClassicIconKind.LandscapePlayer, LyricsPalette.AccentGreen, iconFraction: 0.78f);
+        pill.AddView(icon, new LinearLayout.LayoutParams(Dp(17), Dp(17))
+        {
+            RightMargin = Dp(6),
+        });
+
+        _rotateHintLabel = new TextView(this) { Text = "横屏播放" };
+        _rotateHintLabel.SetIncludeFontPadding(false);
+        _rotateHintLabel.SetTextColor(Color.White);
+        _rotateHintLabel.SetTextSize(ComplexUnitType.Sp, 12.5f);
+        UiHelpers.SetFontWeight(_rotateHintLabel, UiHelpers.FontWeightSemiBold);
+        pill.AddView(_rotateHintLabel);
+
+        pill.Click += (_, _) => ToggleOrientationQuickAction();
+        return pill;
     }
 
     private LinearLayout BuildResumePill()
@@ -429,23 +826,16 @@ public sealed class MainActivity : Activity
         return pill;
     }
 
-    private LinearLayout BuildFooter()
+    private void BuildConsoleComponents()
     {
-        var footer = new LinearLayout(this)
+        _footerView = new LinearLayout(this)
         {
             Orientation = global::Android.Widget.Orientation.Vertical,
         };
-        footer.SetBackgroundColor(LyricsPalette.ChromeBackground);
-        footer.SetPadding(Dp(14), Dp(6), Dp(14), Dp(10));
+        _footerView.SetBackgroundColor(LyricsPalette.ChromeBackground);
+        _footerView.SetPadding(Dp(14), Dp(6), Dp(14), Dp(10));
 
-        // 第一行：左侧封面+曲目信息，右侧时间偏移 / 译文 / 设置图标（对齐桌面 compact footer）
-        var topRow = new LinearLayout(this)
-        {
-            Orientation = global::Android.Widget.Orientation.Horizontal,
-        };
-        topRow.SetGravity(GravityFlags.CenterVertical);
-
-        var coverFrame = new FrameLayout(this)
+        _coverFrame = new FrameLayout(this)
         {
             Background = UiHelpers.RoundedRect(this, LyricsPalette.CoverFrameBackground, 4),
             ClipToOutline = true,
@@ -457,26 +847,21 @@ public sealed class MainActivity : Activity
             Gravity = GravityFlags.Center,
         };
         noteFallback.SetTextColor(LyricsPalette.MutedGray);
-        noteFallback.SetTextSize(ComplexUnitType.Sp, 18);
-        coverFrame.AddView(noteFallback, new FrameLayout.LayoutParams(
+        noteFallback.SetTextSize(ComplexUnitType.Sp, 22);
+        _coverFrame.AddView(noteFallback, new FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.MatchParent));
 
         _coverView = new ImageView(this);
         _coverView.SetScaleType(ImageView.ScaleType.CenterCrop);
-        coverFrame.AddView(_coverView, new FrameLayout.LayoutParams(
+        _coverFrame.AddView(_coverView, new FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.MatchParent));
 
-        topRow.AddView(coverFrame, new LinearLayout.LayoutParams(Dp(46), Dp(46))
-        {
-            RightMargin = Dp(12),
-        });
-
-        var trackText = new LinearLayout(this)
+        _trackText = new LinearLayout(this)
         {
             Orientation = global::Android.Widget.Orientation.Vertical,
             Clickable = true,
         };
-        trackText.Click += (_, _) => OpenSettingsDialog();
+        _trackText.Click += (_, _) => OpenSettingsDialog();
 
         _titleView = new TextView(this)
         {
@@ -500,26 +885,16 @@ public sealed class MainActivity : Activity
         _artistView.SetTextSize(ComplexUnitType.Sp, 12f);
         UiHelpers.SetFontWeight(_artistView, UiHelpers.FontWeightRegular);
 
-        trackText.AddView(_titleView);
-        trackText.AddView(_artistView);
-        topRow.AddView(trackText, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WrapContent, 1f)
-        {
-            RightMargin = Dp(8),
-        });
+        _trackText.AddView(_titleView);
+        _trackText.AddView(_artistView);
 
-        topRow.AddView(BuildFooterActions());
-        footer.AddView(topRow, new LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent)
-        {
-            BottomMargin = Dp(6),
-        });
+        _actionsRow = BuildFooterActions();
 
-        // 第二行：播放进度条 + 时间标签
-        var timeline = new LinearLayout(this)
+        _timelineRow = new LinearLayout(this)
         {
             Orientation = global::Android.Widget.Orientation.Horizontal,
         };
-        timeline.SetGravity(GravityFlags.CenterVertical);
+        _timelineRow.SetGravity(GravityFlags.CenterVertical);
 
         _elapsedView = MakeTimeLabel(GravityFlags.Right);
         _seekBar = new ClassicSeekBar(this);
@@ -527,25 +902,19 @@ public sealed class MainActivity : Activity
         _seekBar.SeekRequested += sec => _ = SeekToSecondsAsync(sec);
         _durationView = MakeTimeLabel(GravityFlags.Left);
 
-        timeline.AddView(_elapsedView, new LinearLayout.LayoutParams(Dp(40), ViewGroup.LayoutParams.WrapContent));
-        timeline.AddView(_seekBar, new LinearLayout.LayoutParams(0, Dp(24), 1f)
+        _timelineRow.AddView(_elapsedView, new LinearLayout.LayoutParams(Dp(40), ViewGroup.LayoutParams.WrapContent));
+        _timelineRow.AddView(_seekBar, new LinearLayout.LayoutParams(0, Dp(24), 1f)
         {
             LeftMargin = Dp(6),
             RightMargin = Dp(6),
         });
-        timeline.AddView(_durationView, new LinearLayout.LayoutParams(Dp(40), ViewGroup.LayoutParams.WrapContent));
-        footer.AddView(timeline, new LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent)
-        {
-            BottomMargin = Dp(4),
-        });
+        _timelineRow.AddView(_durationView, new LinearLayout.LayoutParams(Dp(40), ViewGroup.LayoutParams.WrapContent));
 
-        // 第三行：极简 Spotify 传输按钮 [⏮] [⚪▶/⏸] [⏭]
-        var transport = new LinearLayout(this)
+        _transportRow = new LinearLayout(this)
         {
             Orientation = global::Android.Widget.Orientation.Horizontal,
         };
-        transport.SetGravity(GravityFlags.Center);
+        _transportRow.SetGravity(GravityFlags.Center);
 
         _prevBtnHost = MakeGlyphButton(ClassicIconKind.Previous, 42, 0.56f, null,
             out _prevIcon, () => _ = App.NowPlaying.SkipPreviousAsync());
@@ -554,24 +923,24 @@ public sealed class MainActivity : Activity
         _nextBtnHost = MakeGlyphButton(ClassicIconKind.Next, 42, 0.56f, null,
             out _nextIcon, () => _ = App.NowPlaying.SkipNextAsync());
 
-        transport.AddView(_prevBtnHost, new LinearLayout.LayoutParams(Dp(42), Dp(42)));
-        transport.AddView(_playBtnHost, new LinearLayout.LayoutParams(Dp(40), Dp(40))
+        _transportRow.AddView(_prevBtnHost, new LinearLayout.LayoutParams(Dp(42), Dp(42)));
+        _transportRow.AddView(_playBtnHost, new LinearLayout.LayoutParams(Dp(40), Dp(40))
         {
             LeftMargin = Dp(22),
             RightMargin = Dp(22),
         });
-        transport.AddView(_nextBtnHost, new LinearLayout.LayoutParams(Dp(42), Dp(42)));
+        _transportRow.AddView(_nextBtnHost, new LinearLayout.LayoutParams(Dp(42), Dp(42)));
 
-        footer.AddView(transport, new LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent));
-
-        // 第四行（按需显示）：当前连接的蓝牙音频设备名称
         _bluetoothRow = new LinearLayout(this)
         {
             Orientation = global::Android.Widget.Orientation.Horizontal,
             Visibility = ViewStates.Gone,
+            Clickable = true,
+            Focusable = true,
         };
         _bluetoothRow.SetGravity(GravityFlags.Left | GravityFlags.CenterVertical);
+        _bluetoothRow.SetPadding(0, Dp(4), Dp(6), Dp(2));
+        _bluetoothRow.Click += (_, _) => OpenAudioOutputDialog();
 
         var btColor = Color.Rgb(230, 230, 230);
         _bluetoothIcon = new VectorIconView(this, ClassicIconKind.BluetoothAudio);
@@ -592,14 +961,6 @@ public sealed class MainActivity : Activity
         UiHelpers.SetFontWeight(_bluetoothNameView, UiHelpers.FontWeightSemiBold);
         _bluetoothRow.AddView(_bluetoothNameView, new LinearLayout.LayoutParams(
             0, ViewGroup.LayoutParams.WrapContent, 1f));
-
-        footer.AddView(_bluetoothRow, new LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent)
-        {
-            TopMargin = Dp(4),
-        });
-
-        return footer;
     }
 
     private LinearLayout BuildFooterActions()
@@ -634,18 +995,18 @@ public sealed class MainActivity : Activity
         _offsetHost.AddView(_offsetBadge);
         _offsetHost.Click += (_, _) => OpenOffsetDialog();
 
-        var translateHost = MakeGlyphButton(ClassicIconKind.Translate, 36, 0.60f, null,
+        _translateHost = MakeGlyphButton(ClassicIconKind.Translate, 36, 0.60f, null,
             out _translateIcon, ToggleTranslationDisplay);
-        var settingsHost = MakeGlyphButton(ClassicIconKind.Settings, 36, 0.60f, null,
+        _settingsHost = MakeGlyphButton(ClassicIconKind.Settings, 36, 0.60f, null,
             out _settingsIcon, OpenSettingsDialog);
 
         actions.AddView(_offsetHost, new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.WrapContent, Dp(36)));
-        actions.AddView(translateHost, new LinearLayout.LayoutParams(Dp(36), Dp(36))
+        actions.AddView(_translateHost, new LinearLayout.LayoutParams(Dp(36), Dp(36))
         {
             LeftMargin = Dp(2),
         });
-        actions.AddView(settingsHost, new LinearLayout.LayoutParams(Dp(36), Dp(36))
+        actions.AddView(_settingsHost, new LinearLayout.LayoutParams(Dp(36), Dp(36))
         {
             LeftMargin = Dp(2),
         });
@@ -700,11 +1061,29 @@ public sealed class MainActivity : Activity
         _insetRight = right;
         _insetBottom = bottom;
 
-        _footerView.SetPadding(Dp(14) + left, Dp(6), Dp(14) + right, Dp(10) + bottom);
+        if (_isLandscapeLayout)
+        {
+            _footerView.SetPadding(Dp(16) + left, Dp(12) + top, Dp(14), Dp(10) + bottom);
+
+            var dm = Resources?.DisplayMetrics;
+            var landH = Math.Min(dm?.WidthPixels ?? 1080, dm?.HeightPixels ?? 2200);
+            var usableH = Math.Max(Dp(230), landH - top - bottom - Dp(22));
+            var coverSize = Math.Clamp(usableH - Dp(190), Dp(68), Dp(168));
+            if (_coverFrame.LayoutParameters is LinearLayout.LayoutParams coverLp && coverLp.Width != coverSize)
+            {
+                coverLp.Width = coverSize;
+                coverLp.Height = coverSize;
+                _coverFrame.LayoutParameters = coverLp;
+            }
+        }
+        else
+        {
+            _footerView.SetPadding(Dp(14) + left, Dp(6), Dp(14) + right, Dp(10) + bottom);
+        }
 
         if (_permissionBanner.LayoutParameters is LinearLayout.LayoutParams bannerLp)
         {
-            bannerLp.LeftMargin = Dp(12) + left;
+            bannerLp.LeftMargin = Dp(_isLandscapeLayout ? 18 : 12) + (_isLandscapeLayout ? 0 : left);
             bannerLp.TopMargin = top + Dp(8);
             bannerLp.RightMargin = Dp(12) + right;
             _permissionBanner.LayoutParameters = bannerLp;
@@ -718,23 +1097,254 @@ public sealed class MainActivity : Activity
             _topFadeView.LayoutParameters = fadeLp;
         }
 
+        if (_bottomFadeView.LayoutParameters is FrameLayout.LayoutParams btmFadeLp)
+        {
+            btmFadeLp.Height = _isLandscapeLayout ? Math.Max(Dp(34), bottom + Dp(24)) : Dp(34);
+            _bottomFadeView.LayoutParameters = btmFadeLp;
+        }
+
+        if (_resumePill.LayoutParameters is FrameLayout.LayoutParams pillLp)
+        {
+            pillLp.BottomMargin = Dp(20) + (_isLandscapeLayout ? bottom : 0);
+            _resumePill.LayoutParameters = pillLp;
+        }
+
+        if (_rotateHintPill.LayoutParameters is FrameLayout.LayoutParams rotHintLp)
+        {
+            rotHintLp.RightMargin = Dp(16) + right;
+            rotHintLp.BottomMargin = Dp(18) + (_isLandscapeLayout ? bottom : 0);
+            _rotateHintPill.LayoutParameters = rotHintLp;
+        }
+
         ApplyLyricsContainerPadding();
     }
 
     private void ApplyLyricsContainerPadding()
     {
-        var left = Dp(24) + _insetLeft;
+        var left = Dp(_isLandscapeLayout ? 28 : 24) + (_isLandscapeLayout ? 0 : _insetLeft);
         var right = Dp(24) + _insetRight;
         var top = _permissionBanner.Visibility == ViewStates.Visible
             ? Dp(14)
             : _insetTop + Dp(28);
-        var bottom = _lyricsScrollView.Height > 0 ? _lyricsScrollView.Height / 2 : Dp(220);
+        var halfView = _lyricsScrollView.Height > 0 ? _lyricsScrollView.Height / 2 : Dp(_isLandscapeLayout ? 160 : 220);
+        var bottom = Math.Max(halfView, _isLandscapeLayout ? _insetBottom + Dp(48) : 0);
         if (_lyricsContainer.PaddingLeft != left
             || _lyricsContainer.PaddingTop != top
             || _lyricsContainer.PaddingRight != right
             || _lyricsContainer.PaddingBottom != bottom)
         {
             _lyricsContainer.SetPadding(left, top, right, bottom);
+        }
+    }
+
+    private string GetNormalizedOrientationMode()
+    {
+        var raw = App.Settings.OrientationMode?.Trim().ToLowerInvariant();
+        return raw is "auto" or "landscape" or "portrait" ? raw : "sensor";
+    }
+
+    private bool IsSystemAutoRotateEnabled()
+    {
+        try
+        {
+            return ContentResolver is not null
+                && global::Android.Provider.Settings.System.GetInt(
+                    ContentResolver,
+                    global::Android.Provider.Settings.System.AccelerometerRotation,
+                    0) == 1;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private void TryEnableOrientationWatcher(bool enable)
+    {
+        try
+        {
+            if (_orientationWatcher is null) return;
+            if (enable && _orientationWatcher.CanDetectOrientation())
+                _orientationWatcher.Enable();
+            else
+                _orientationWatcher.Disable();
+        }
+        catch
+        {
+            // 忽略传感器权限或无加速度计设备异常
+        }
+    }
+
+    private void ApplyOrientationPolicy(bool fromSettingsChange)
+    {
+        if (fromSettingsChange)
+        {
+            _sessionOrientationOverride = null;
+            _waitSensorExitFromSideways = null;
+            _promptedForCurrentPhysicalPose = false;
+            HideRotateHintPill();
+        }
+
+        var mode = GetNormalizedOrientationMode();
+        ScreenOrientation target;
+        if (_sessionOrientationOverride is { } forced)
+        {
+            target = forced;
+        }
+        else
+        {
+            target = mode switch
+            {
+                "landscape" => ScreenOrientation.SensorLandscape,
+                "portrait" => ScreenOrientation.Portrait,
+                "sensor" => (_orientationWatcher?.CanDetectOrientation() ?? false)
+                    ? ((_pendingSensorSideways ?? _isLandscapeLayout)
+                        ? ScreenOrientation.SensorLandscape
+                        : ScreenOrientation.Portrait)
+                    : ScreenOrientation.Unspecified,
+                _ => ScreenOrientation.Unspecified,
+            };
+        }
+
+        try
+        {
+            if (RequestedOrientation != target)
+                RequestedOrientation = target;
+        }
+        catch (Exception ex)
+        {
+            AndroidLog.Write($"[ui] 切换屏幕方向失败: {ex.Message}");
+        }
+    }
+
+    private void ToggleOrientationQuickAction()
+    {
+        HideRotateHintPill();
+        var targetLandscape = !_isLandscapeLayout;
+        var mode = GetNormalizedOrientationMode();
+
+        if (mode == "sensor" && _pendingSensorSideways is { } currentSideways)
+            _waitSensorExitFromSideways = currentSideways;
+
+        if (mode == "auto"
+            && IsSystemAutoRotateEnabled()
+            && _pendingSensorSideways is { } physSideways
+            && physSideways == targetLandscape)
+        {
+            _sessionOrientationOverride = null;
+        }
+        else
+        {
+            _sessionOrientationOverride = targetLandscape
+                ? ScreenOrientation.SensorLandscape
+                : ScreenOrientation.Portrait;
+        }
+
+        ApplyOrientationPolicy(fromSettingsChange: false);
+        UpdateTransportAndButtons();
+    }
+
+    private void HandleSensorOrientation(int orientation)
+    {
+        if (_disposed || !_isResumed || IsFinishing || IsDestroyed) return;
+        if (orientation == OrientationEventListener.OrientationUnknown)
+        {
+            _pendingSensorSideways = null;
+            return;
+        }
+
+        var isSideways = (orientation >= 55 && orientation <= 125) || (orientation >= 235 && orientation <= 305);
+        var isUpright = orientation >= 330 || orientation <= 30;
+        if (!isSideways && !isUpright)
+        {
+            _pendingSensorSideways = null;
+            return;
+        }
+
+        var now = SystemClock.UptimeMillis();
+        if (_pendingSensorSideways != isSideways)
+        {
+            _pendingSensorSideways = isSideways;
+            _pendingSensorSinceMs = now;
+            return;
+        }
+
+        if (now - _pendingSensorSinceMs < 350)
+            return;
+
+        var mode = GetNormalizedOrientationMode();
+        if (mode == "sensor")
+        {
+            HideRotateHintPill();
+            if (_waitSensorExitFromSideways is { } waitSideways)
+            {
+                if (isSideways == waitSideways)
+                    return;
+                _waitSensorExitFromSideways = null;
+                _sessionOrientationOverride = null;
+            }
+
+            if (isSideways != _isLandscapeLayout)
+            {
+                var target = isSideways ? ScreenOrientation.SensorLandscape : ScreenOrientation.Portrait;
+                try
+                {
+                    if (RequestedOrientation != target)
+                        RequestedOrientation = target;
+                }
+                catch { }
+            }
+            return;
+        }
+
+        if (mode == "auto" && !IsSystemAutoRotateEnabled())
+        {
+            if (_lastPromptPoseSideways != isSideways)
+            {
+                _lastPromptPoseSideways = isSideways;
+                _promptedForCurrentPhysicalPose = false;
+            }
+
+            if (isSideways != _isLandscapeLayout)
+            {
+                if (!_promptedForCurrentPhysicalPose)
+                {
+                    _promptedForCurrentPhysicalPose = true;
+                    ShowRotateHintPill(toLandscape: isSideways);
+                }
+            }
+            else
+            {
+                HideRotateHintPill();
+            }
+            return;
+        }
+
+        HideRotateHintPill();
+    }
+
+    private void ShowRotateHintPill(bool toLandscape)
+    {
+        if (_disposed || IsFinishing || IsDestroyed) return;
+        _rotateHintLabel.Text = toLandscape ? "横屏播放" : "切换竖屏";
+        _rotateHintPill.Visibility = ViewStates.Visible;
+        _rotateHintPill.Alpha = 0f;
+        _rotateHintPill.Animate()?.Cancel();
+        _rotateHintPill.Animate()?.Alpha(1f)?.SetDuration(180)?.Start();
+
+        _hideRotateHintRunnable ??= HideRotateHintPill;
+        _uiHandler.RemoveCallbacks(_hideRotateHintRunnable);
+        _uiHandler.PostDelayed(_hideRotateHintRunnable, 4500);
+    }
+
+    private void HideRotateHintPill()
+    {
+        if (_hideRotateHintRunnable is not null)
+            _uiHandler.RemoveCallbacks(_hideRotateHintRunnable);
+        if (_rotateHintPill is not null)
+        {
+            _rotateHintPill.Animate()?.Cancel();
+            _rotateHintPill.Visibility = ViewStates.Gone;
         }
     }
 
@@ -761,16 +1371,16 @@ public sealed class MainActivity : Activity
         app.BluetoothAudio.ConnectedDeviceChanged -= OnBluetoothDeviceUpdated;
     }
 
-    private void OnEngineDirty(DisplayLine? _) => RunIfAlive(() => RefreshAll(forceTrackCheck: false));
-    private void OnStatusDirty(LyricsStatus _) => RunIfAlive(() => RefreshAll(forceTrackCheck: false));
+    private void OnEngineDirty(DisplayLine? _) => RunIfAlive(RefreshAll);
+    private void OnStatusDirty(LyricsStatus _) => RunIfAlive(RefreshAll);
     private void OnTranslationUpdated(TranslationDisplayStatus _) => RunIfAlive(() =>
     {
         RefreshRowTranslations();
-        RefreshAll(forceTrackCheck: false);
+        RefreshAll();
     });
     private void OnTrackUpdated(TrackInfo? _) => RunIfAlive(() =>
     {
-        RefreshAll(forceTrackCheck: true);
+        RefreshAll();
         StartUiLoopIfNeeded();
     });
     private void OnPlayingUpdated(bool _) => RunIfAlive(() =>
@@ -811,10 +1421,10 @@ public sealed class MainActivity : Activity
             _uiHandler.RemoveCallbacks(_tickRunnable);
     }
 
-    private void RefreshAll(bool forceTrackCheck)
+    private void RefreshAll()
     {
         var track = App.NowPlaying.CurrentTrack;
-        var songChanged = forceTrackCheck && !SameTrackIdentity(track, _track);
+        var songChanged = !SameTrackIdentity(track, _track);
         var metadataChanged = !Equals(track, _track);
 
         if (songChanged)
@@ -841,6 +1451,7 @@ public sealed class MainActivity : Activity
                 RefreshCoverArt(track);
         }
 
+        App.EnsureTrackOffsetSynced(track);
         EnsureLyricsListMatchesCurrent();
         UpdateTransportAndButtons();
         RefreshFrameTick();
@@ -851,6 +1462,7 @@ public sealed class MainActivity : Activity
         AutoSyncIfIdle();
 
         var track = App.NowPlaying.CurrentTrack;
+        App.EnsureTrackOffsetSynced(track);
         var lyrics = App.Coordinator.LyricsFor(track);
 
         if (!ReferenceEquals(lyrics, _renderedLyrics) || App.Coordinator.CurrentStatus?.Kind != _renderedStatus)
@@ -951,7 +1563,7 @@ public sealed class MainActivity : Activity
 
         _latinMetrics = IsMostlyLatin(lyrics);
         var (lineScale, gapScale) = App.Settings.LineSpacingScales;
-        var mainSize = 24f;
+        var mainSize = _isLandscapeLayout ? 25f : 24f;
         var subSize = MathF.Max(14f, MathF.Round(mainSize * 0.56f));
         var mainLineMult = (_latinMetrics ? 1.24f : 1.12f) * (float)lineScale;
         var rowGapPx = Dp((float)Math.Max(10, mainSize * (_latinMetrics ? 0.92 : 0.72) * gapScale));
@@ -1237,6 +1849,7 @@ public sealed class MainActivity : Activity
 
     private void SeekToLine(LyricsLine line, Lyrics lyrics)
     {
+        App.EnsureTrackOffsetSynced();
         var targetSec = Math.Max(
             0,
             line.Position - lyrics.TimeDelay - App.Coordinator.ManualOffsetSeconds - App.Coordinator.TrackOffsetSeconds);
@@ -1398,6 +2011,7 @@ public sealed class MainActivity : Activity
             active: App.Settings.ShowTranslation,
             iconFraction: 0.60f);
 
+        App.EnsureTrackOffsetSynced();
         var totalOffset = App.Settings.ManualOffsetSeconds + App.Coordinator.TrackOffsetSeconds;
         var hasOffset = Math.Abs(totalOffset) >= 0.05;
         _offsetIcon.Configure(ClassicIconKind.Clock, LyricsPalette.MutedGray, active: hasOffset, iconFraction: 0.90f);
@@ -1414,30 +2028,45 @@ public sealed class MainActivity : Activity
 
     private void RefreshBluetoothOutput()
     {
-        var connected = App.BluetoothAudio.IsBluetoothAudioConnected;
-        var deviceName = App.BluetoothAudio.ConnectedDeviceName;
+        try
+        {
+            var connected = App.BluetoothAudio.IsBluetoothAudioConnected;
+            var deviceName = App.BluetoothAudio.ConnectedDeviceName;
 
-        if (connected && !string.IsNullOrWhiteSpace(deviceName))
-        {
-            _bluetoothNameView.Text = deviceName;
-            _bluetoothRow.Visibility = ViewStates.Visible;
-            MaybeRequestBluetoothPermission();
+            if (connected && !string.IsNullOrWhiteSpace(deviceName))
+            {
+                _bluetoothNameView.Text = deviceName;
+                _bluetoothRow.Visibility = ViewStates.Visible;
+                MaybeRequestBluetoothPermission();
+            }
+            else
+            {
+                _bluetoothRow.Visibility = ViewStates.Gone;
+            }
         }
-        else
+        catch (Exception ex)
         {
-            _bluetoothRow.Visibility = ViewStates.Gone;
+            AndroidLog.Write($"[bluetooth] 刷新蓝牙 UI 失败: {ex.Message}");
+            try { _bluetoothRow.Visibility = ViewStates.Gone; } catch { }
         }
     }
 
     private void MaybeRequestBluetoothPermission()
     {
-        if (!_isResumed || !OperatingSystem.IsAndroidVersionAtLeast(31)) return;
-        if (BluetoothAudioMonitor.HasBluetoothConnectPermission(this)) return;
-        if (App.Settings.BluetoothPermissionRequested) return;
+        try
+        {
+            if (!_isResumed || !OperatingSystem.IsAndroidVersionAtLeast(31)) return;
+            if (BluetoothAudioMonitor.HasBluetoothConnectPermission(this)) return;
+            if (App.Settings.BluetoothPermissionRequested) return;
 
-        App.Settings.BluetoothPermissionRequested = true;
-        App.SaveSettings();
-        RequestPermissions([global::Android.Manifest.Permission.BluetoothConnect], RequestCodeBluetoothConnect);
+            App.Settings.BluetoothPermissionRequested = true;
+            App.SaveSettings();
+            RequestPermissions([global::Android.Manifest.Permission.BluetoothConnect], RequestCodeBluetoothConnect);
+        }
+        catch (Exception ex)
+        {
+            AndroidLog.Write($"[bluetooth] 请求蓝牙权限失败: {ex.Message}");
+        }
     }
 
     private void RefreshPermissionBanner()
@@ -1464,6 +2093,18 @@ public sealed class MainActivity : Activity
             FollowActiveLine(animate: true);
         });
 
+    private void OpenAudioOutputDialog() =>
+        AudioOutputSheetDialog.Show(
+            this,
+            _bluetoothRow,
+            _coverBackground,
+            _isLandscapeLayout ? _footerView : null,
+            () =>
+            {
+                App.BluetoothAudio.Refresh();
+                RefreshBluetoothOutput();
+            });
+
     private void OpenSettingsDialog() =>
         SettingsSheetDialog.Show(
             this,
@@ -1471,9 +2112,16 @@ public sealed class MainActivity : Activity
             {
                 ApplyActivePalette(animate: true);
                 RebuildTypographySizing();
+                ApplyKeepScreenOnFlag();
                 UpdateTransportAndButtons();
             },
-            OpenNotificationListenerSettings);
+            OpenNotificationListenerSettings,
+            () =>
+            {
+                ApplyOrientationPolicy(fromSettingsChange: true);
+                ApplyKeepScreenOnFlag();
+                UpdateTransportAndButtons();
+            });
 
     private void OpenNotificationListenerSettings()
     {

@@ -100,6 +100,19 @@ public sealed class AndroidAppSettings
     /// <summary>是否已向用户发起过 Android 12+ 蓝牙设备连接权限请求。</summary>
     public bool BluetoothPermissionRequested { get; set; }
 
+    private const int CurrentSettingsSchemaVersion = 2;
+
+    /// <summary>用于升级旧版本默认配置的一次性版本号。</summary>
+    public int SettingsSchemaVersion { get; set; }
+
+    /// <summary>
+    /// 屏幕方向模式："sensor"（默认，无视系统方向锁定，随手机实际横竖自动切换）| "auto"（跟随系统开关，锁定时在歌词区提示切换）| "landscape"（固定横屏歌词播放器）| "portrait"（固定竖屏）。
+    /// </summary>
+    public string OrientationMode { get; set; } = "sensor";
+
+    /// <summary>横屏作为桌面歌词播放器使用时保持屏幕常亮。</summary>
+    public bool KeepScreenOnInLandscape { get; set; } = true;
+
     [JsonIgnore]
     public string EffectiveTranslationEngine =>
         !string.IsNullOrWhiteSpace(TranslationEngine) ? TranslationEngine!.Trim().ToLowerInvariant()
@@ -146,6 +159,16 @@ public sealed class AndroidAppSettings
                 loaded._secretStore = store;
                 loaded._settingsPath = path;
                 loaded.ResolveSecrets();
+                if (loaded.SettingsSchemaVersion < CurrentSettingsSchemaVersion)
+                {
+                    if (string.IsNullOrWhiteSpace(loaded.OrientationMode)
+                        || string.Equals(loaded.OrientationMode, "auto", StringComparison.OrdinalIgnoreCase))
+                    {
+                        loaded.OrientationMode = "sensor";
+                    }
+                    loaded.SettingsSchemaVersion = CurrentSettingsSchemaVersion;
+                    loaded.Save();
+                }
                 return loaded;
             }
         }
@@ -158,6 +181,7 @@ public sealed class AndroidAppSettings
         {
             _secretStore = store,
             _settingsPath = path,
+            SettingsSchemaVersion = CurrentSettingsSchemaVersion,
         };
     }
 

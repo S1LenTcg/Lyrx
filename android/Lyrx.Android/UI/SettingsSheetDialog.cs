@@ -48,6 +48,14 @@ internal static class SettingsSheetDialog
         ("loose", "宽松"),
     ];
 
+    private static readonly (string Id, string Label)[] OrientationModes =
+    [
+        ("sensor", "自动随手机横竖旋转（无视系统方向锁定）"),
+        ("auto", "跟随系统开关（锁定时在歌词区显示切换提示）"),
+        ("landscape", "固定横屏（桌面歌词播放器）"),
+        ("portrait", "固定竖屏"),
+    ];
+
     private static readonly (string Id, string Label)[] AutoSyncOptions =
     [
         ("0", "关闭"),
@@ -82,23 +90,47 @@ internal static class SettingsSheetDialog
         "当前歌曲",
     ];
 
+    private static WeakReference<Dialog>? _activeDialog;
+
+    public static void RefreshWindowBounds(Activity activity)
+    {
+        if (_activeDialog is null || !_activeDialog.TryGetTarget(out var dialog) || !dialog.IsShowing)
+            return;
+
+        var (dialogW, dialogH) = ComputeDialogBounds(activity);
+        dialog.Window?.SetLayout(dialogW, dialogH);
+    }
+
+    private static (int Width, int Height) ComputeDialogBounds(Activity activity)
+    {
+        var dm = activity.Resources?.DisplayMetrics;
+        var screenW = dm?.WidthPixels ?? 1080;
+        var screenH = dm?.HeightPixels ?? 2200;
+        var isLandscape = screenW > screenH;
+        var dialogW = isLandscape
+            ? Math.Min(UiHelpers.Dp(activity, 560), (int)(screenW * 0.80))
+            : (int)(screenW * 0.94);
+        var dialogH = isLandscape
+            ? Math.Min(UiHelpers.Dp(activity, 470), (int)(screenH * 0.86))
+            : Math.Min((int)(screenH * 0.56), UiHelpers.Dp(activity, 470));
+        return (dialogW, dialogH);
+    }
+
     public static void Show(
         Activity activity,
         Action onAppearanceOrLayoutChanged,
-        Action openNotificationSettings)
+        Action openNotificationSettings,
+        Action? onOrientationChanged = null)
     {
         if (activity.IsFinishing || activity.IsDestroyed) return;
 
         var app = LyrxApp.Instance;
-        var dm = activity.Resources?.DisplayMetrics;
-        var screenW = dm?.WidthPixels ?? 1080;
-        var screenH = dm?.HeightPixels ?? 2200;
-        var dialogW = (int)(screenW * 0.94);
-        var dialogH = Math.Min((int)(screenH * 0.56), UiHelpers.Dp(activity, 470));
+        var (dialogW, dialogH) = ComputeDialogBounds(activity);
         var contentApproxW = Math.Max(UiHelpers.Dp(activity, 240), dialogW - UiHelpers.Dp(activity, 48));
 
         var dialog = new Dialog(activity);
         dialog.RequestWindowFeature((int)WindowFeatures.NoTitle);
+        _activeDialog = new WeakReference<Dialog>(dialog);
 
         var root = new LinearLayout(activity)
         {
@@ -157,7 +189,7 @@ internal static class SettingsSheetDialog
         var pageViews = new LinearLayout[4];
         Action? refreshTrackPage = null;
 
-        pageViews[0] = BuildPlaybackAndAppearanceTab(activity, app, contentApproxW, onAppearanceOrLayoutChanged, openNotificationSettings);
+        pageViews[0] = BuildPlaybackAndAppearanceTab(activity, app, contentApproxW, onAppearanceOrLayoutChanged, openNotificationSettings, onOrientationChanged);
         pageViews[1] = BuildSourcesTab(activity, app, dialog);
         pageViews[2] = BuildTranslationTab(activity, app, onAppearanceOrLayoutChanged);
         (pageViews[3], refreshTrackPage) = BuildCurrentTrackTab(activity, app, dialog, onAppearanceOrLayoutChanged);
@@ -249,7 +281,8 @@ internal static class SettingsSheetDialog
         LyrxApp app,
         int contentApproxW,
         Action onAppearanceOrLayoutChanged,
-        Action openNotificationSettings)
+        Action openNotificationSettings,
+        Action? onOrientationChanged)
     {
         var page = new LinearLayout(ctx) { Orientation = global::Android.Widget.Orientation.Vertical };
 
@@ -374,6 +407,54 @@ internal static class SettingsSheetDialog
             "逐字卡拉 OK",
             "歌词包含逐字时间轴时随播放进度渐变点亮",
             karaokeToggle));
+
+        themeCard.AddView(MakeHorizontalLine(ctx, 9));
+
+        var orientationLabel = new TextView(ctx) { Text = "横竖屏与方向锁定适配：" };
+        orientationLabel.SetTextColor(TextMuted);
+        orientationLabel.SetTextSize(global::Android.Util.ComplexUnitType.Sp, 12);
+        UiHelpers.SetFontWeight(orientationLabel, UiHelpers.FontWeightRegular);
+        themeCard.AddView(orientationLabel, new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent)
+        {
+            BottomMargin = UiHelpers.Dp(ctx, 5),
+        });
+
+        var currentOrientationMode = string.IsNullOrWhiteSpace(app.Settings.OrientationMode)
+            ? "sensor"
+            : app.Settings.OrientationMode.Trim().ToLowerInvariant();
+        if (!OrientationModes.Any(o => o.Id == currentOrientationMode))
+            currentOrientationMode = "sensor";
+
+        var (orientationDropdown, _) = CreateDarkDropdown(
+            ctx,
+            OrientationModes,
+            currentOrientationMode,
+            (_, id) =>
+            {
+                app.Settings.OrientationMode = id;
+                app.SaveSettings();
+                onOrientationChanged?.Invoke();
+            });
+        themeCard.AddView(orientationDropdown, new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MatchParent, UiHelpers.Dp(ctx, 34))
+        {
+            BottomMargin = UiHelpers.Dp(ctx, 2),
+        });
+
+        themeCard.AddView(MakeHorizontalLine(ctx, 9));
+
+        var (keepAwakeToggle, _) = CreateToggleSwitch(ctx, app.Settings.KeepScreenOnInLandscape, val =>
+        {
+            app.Settings.KeepScreenOnInLandscape = val;
+            app.SaveSettings();
+            onAppearanceOrLayoutChanged();
+        });
+        themeCard.AddView(CreateSettingRow(
+            ctx,
+            "横屏保持屏幕常亮",
+            "横放做桌面歌词播放器时不自动熄屏",
+            keepAwakeToggle));
 
         themeCard.AddView(MakeHorizontalLine(ctx, 9));
 
@@ -800,6 +881,7 @@ internal static class SettingsSheetDialog
         void RefreshData()
         {
             var t = app.NowPlaying.CurrentTrack;
+            app.EnsureTrackOffsetSynced(t);
             trackTitleTv.Text = t is null ? "当前未检测到播放曲目" : $"{t.Title} — {t.Artist}";
             trackStatusTv.Text = app.GetTrackStatusSummary();
 

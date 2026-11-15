@@ -13,6 +13,7 @@
     <ApplicationDisplayVersion>1.0.0</ApplicationDisplayVersion>
     <ApplicationTitle>Lyrx</ApplicationTitle>
     <AndroidPackageFormat>apk</AndroidPackageFormat>
+    <AndroidStoreUncompressedFileExtensions>$(AndroidStoreUncompressedFileExtensions);.ttf;.otf</AndroidStoreUncompressedFileExtensions>
   </PropertyGroup>
 
   <ItemGroup>
@@ -23,5 +24,16 @@
     <ProjectReference Include="..\..\src\Lyrx.Core\Lyrx.Core.csproj" />
     <ProjectReference Include="..\..\src\Lyrx.Engine\Lyrx.Engine.csproj" />
   </ItemGroup>
+
+  <Target Name="_ExportVersionedSignedApk"
+          AfterTargets="_Sign;SignAndroidPackage"
+          Condition=" '$(Configuration)' == 'Release' And '$(DesignTimeBuild)' != 'True' And Exists('$(ApkFileSigned)') ">
+    <PropertyGroup>
+      <_VersionedSignedApk>$(OutDir)$(ApplicationTitle) V$(ApplicationDisplayVersion).apk</_VersionedSignedApk>
+    </PropertyGroup>
+    <Copy SourceFiles="$(ApkFileSigned)" DestinationFiles="$(_VersionedSignedApk)" OverwriteReadOnlyFiles="true" />
+    <Delete Files="$(ApkFile)" Condition=" Exists('$(ApkFile)') " />
+    <Message Importance="High" Text="[Lyrx.Android] Signed APK: $(_VersionedSignedApk)" />
+  </Target>
 
 </Project>

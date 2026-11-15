@@ -24,6 +24,7 @@ public sealed class LyrxApp : Application
     public ITranslationCache TranslationCache { get; private set; } = null!;
     public LyricsCoordinator Coordinator { get; private set; } = null!;
     public string DataDirectory { get; private set; } = "";
+    private string? _appliedTrackOffsetKey;
 
     public LyrxApp(IntPtr javaReference, JniHandleOwnership transfer)
         : base(javaReference, transfer)
@@ -40,6 +41,7 @@ public sealed class LyrxApp : Application
             ?? global::System.Environment.GetFolderPath(global::System.Environment.SpecialFolder.Personal);
 
         AndroidLog.Initialize(DataDirectory);
+        RegisterGlobalCrashHandlers();
         AndroidLog.Write("[app] Lyrx Android starting");
 
         Settings = AndroidAppSettings.Load(DataDirectory);
@@ -62,8 +64,8 @@ public sealed class LyrxApp : Application
             log: AndroidLog.Write);
 
         Coordinator.ManualOffsetSeconds = Settings.ManualOffsetSeconds;
-        if (NowPlaying.CurrentTrack is { } initTrack)
-            Coordinator.TrackOffsetSeconds = Settings.GetTrackOffset(TrackOffsetKey(initTrack));
+        ApplyTrackOffsetFor(NowPlaying.CurrentTrack);
+        NowPlaying.TrackChanged += track => Dispatcher.Post(() => EnsureTrackOffsetSynced(track));
         foreach (var key in Settings.SuppressedTracks)
             Coordinator.SuppressedTrackKeys.Add(key);
 
@@ -74,8 +76,35 @@ public sealed class LyrxApp : Application
         };
 
         NowPlaying.Start();
-        BluetoothAudio.Start();
+        try
+        {
+            BluetoothAudio.Start();
+        }
+        catch (Exception ex)
+        {
+            AndroidLog.Write($"[bluetooth] 启动监听异常: {ex}");
+        }
         Coordinator.Start();
+    }
+
+    private static bool _crashHandlersRegistered;
+
+    private static void RegisterGlobalCrashHandlers()
+    {
+        if (_crashHandlersRegistered) return;
+        _crashHandlersRegistered = true;
+
+        AndroidEnvironment.UnhandledExceptionRaiser += (_, e) =>
+            AndroidLog.Write($"[crash] AndroidEnvironment unhandled: {e.Exception}");
+
+        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+            AndroidLog.Write($"[crash] AppDomain unhandled (terminating={e.IsTerminating}): {e.ExceptionObject}");
+
+        TaskScheduler.UnobservedTaskException += (_, e) =>
+        {
+            AndroidLog.Write($"[crash] Unobserved task exception: {e.Exception}");
+            e.SetObserved();
+        };
     }
 
     public EngineConfig CurrentConfig()
@@ -141,8 +170,27 @@ public sealed class LyrxApp : Application
     public static string? TrackOffsetKey(TrackInfo? track) =>
         track is null ? null : LyricsCacheStore.MakeKey(track.Title, track.Artist);
 
-    public void ApplyTrackOffsetFor(TrackInfo? track) =>
-        Coordinator.TrackOffsetSeconds = Settings.GetTrackOffset(TrackOffsetKey(track));
+    /// <summary>
+    /// 确保引擎中的 <see cref="LyricsCoordinator.TrackOffsetSeconds"/> 与当前曲目一致，
+    /// 防止前序曲目的“仅此曲”偏移残留到下一首曲目。
+    /// </summary>
+    public void EnsureTrackOffsetSynced(TrackInfo? track = null)
+    {
+        var target = track ?? NowPlaying.CurrentTrack;
+        var key = TrackOffsetKey(target);
+        if (string.Equals(key, _appliedTrackOffsetKey, StringComparison.Ordinal))
+            return;
+
+        _appliedTrackOffsetKey = key;
+        Coordinator.TrackOffsetSeconds = Settings.GetTrackOffset(key);
+    }
+
+    public void ApplyTrackOffsetFor(TrackInfo? track)
+    {
+        var key = TrackOffsetKey(track);
+        _appliedTrackOffsetKey = key;
+        Coordinator.TrackOffsetSeconds = Settings.GetTrackOffset(key);
+    }
 
     public void AdjustGlobalOffsetDelta(double? deltaSeconds)
     {
@@ -158,11 +206,18 @@ public sealed class LyrxApp : Application
 
     public void AdjustTrackOffsetDelta(TrackInfo? track, double? deltaSeconds)
     {
-        var key = TrackOffsetKey(track ?? NowPlaying.CurrentTrack);
+        var target = track ?? NowPlaying.CurrentTrack;
+        var key = TrackOffsetKey(target);
+        if (string.IsNullOrEmpty(key)) return;
+
+        var current = string.Equals(key, _appliedTrackOffsetKey, StringComparison.Ordinal)
+            ? Coordinator.TrackOffsetSeconds
+            : Settings.GetTrackOffset(key);
         var next = deltaSeconds is null
             ? 0
-            : Math.Clamp(Math.Round(Coordinator.TrackOffsetSeconds + deltaSeconds.Value, 2), -60d, 60d);
+            : Math.Clamp(Math.Round(current + deltaSeconds.Value, 2), -60d, 60d);
         if (Math.Abs(next) < 0.005) next = 0;
+        _appliedTrackOffsetKey = key;
         Coordinator.TrackOffsetSeconds = next;
         Settings.SetTrackOffset(key, next);
         Settings.Save();
