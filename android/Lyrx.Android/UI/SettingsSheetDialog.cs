@@ -50,9 +50,9 @@ internal static class SettingsSheetDialog
 
     private static readonly (string Id, string Label)[] OrientationModes =
     [
-        ("sensor", "自动随手机横竖旋转（无视系统方向锁定）"),
-        ("auto", "跟随系统开关（锁定时在歌词区显示切换提示）"),
-        ("landscape", "固定横屏（桌面歌词播放器）"),
+        ("sensor", "自动随手机横竖旋转"),
+        ("auto", "跟随系统开关"),
+        ("landscape", "固定横屏"),
         ("portrait", "固定竖屏"),
     ];
 
@@ -107,6 +107,18 @@ internal static class SettingsSheetDialog
         var screenW = dm?.WidthPixels ?? 1080;
         var screenH = dm?.HeightPixels ?? 2200;
         var isLandscape = screenW > screenH;
+        var isTablet = UiHelpers.IsTabletLayout(activity);
+        if (isTablet)
+        {
+            var tabW = isLandscape
+                ? Math.Min(UiHelpers.Dp(activity, 660), (int)(screenW * 0.72))
+                : Math.Min(UiHelpers.Dp(activity, 600), (int)(screenW * 0.84));
+            var tabH = isLandscape
+                ? Math.Min(UiHelpers.Dp(activity, 620), (int)(screenH * 0.82))
+                : Math.Min(UiHelpers.Dp(activity, 680), (int)(screenH * 0.68));
+            return (tabW, tabH);
+        }
+
         var dialogW = isLandscape
             ? Math.Min(UiHelpers.Dp(activity, 560), (int)(screenW * 0.80))
             : (int)(screenW * 0.94);
@@ -404,13 +416,13 @@ internal static class SettingsSheetDialog
         });
         themeCard.AddView(CreateSettingRow(
             ctx,
-            "逐字卡拉 OK",
-            "歌词包含逐字时间轴时随播放进度渐变点亮",
+            "逐词高亮",
+            null,
             karaokeToggle));
 
         themeCard.AddView(MakeHorizontalLine(ctx, 9));
 
-        var orientationLabel = new TextView(ctx) { Text = "横竖屏与方向锁定适配：" };
+        var orientationLabel = new TextView(ctx) { Text = "横竖屏切换：" };
         orientationLabel.SetTextColor(TextMuted);
         orientationLabel.SetTextSize(global::Android.Util.ComplexUnitType.Sp, 12);
         UiHelpers.SetFontWeight(orientationLabel, UiHelpers.FontWeightRegular);
@@ -453,7 +465,7 @@ internal static class SettingsSheetDialog
         themeCard.AddView(CreateSettingRow(
             ctx,
             "横屏保持屏幕常亮",
-            "横放做桌面歌词播放器时不自动熄屏",
+            "横屏时不自动熄屏",
             keepAwakeToggle));
 
         themeCard.AddView(MakeHorizontalLine(ctx, 9));

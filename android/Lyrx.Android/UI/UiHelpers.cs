@@ -373,4 +373,45 @@ internal static class UiHelpers
         host.Click += (_, _) => onClick();
         return host;
     }
+
+    public readonly record struct HorizontalAnchorBounds(int Left, int Right, bool ConstrainedToContainer);
+
+    /// <summary>
+    /// 基于当前窗口实际可用短边判断是否为平板（Pad / 折叠屏展开态）布局，兼容分屏缩小场景。
+    /// </summary>
+    public static bool IsTabletLayout(Context? ctx)
+    {
+        var res = ctx?.Resources;
+        var dm = res?.DisplayMetrics;
+        if (dm is not null && dm.Density > 0f && dm.WidthPixels > 0 && dm.HeightPixels > 0)
+        {
+            var minDimDp = Math.Min(dm.WidthPixels, dm.HeightPixels) / dm.Density;
+            return minDimDp >= 580f;
+        }
+
+        return (res?.Configuration?.SmallestScreenWidthDp ?? 0) >= 580;
+    }
+
+    public static HorizontalAnchorBounds ResolveHorizontalAnchorBounds(
+        Context ctx,
+        View? anchorContainer,
+        int screenW,
+        int margin)
+    {
+        if (anchorContainer is not null && anchorContainer.Width > 0)
+        {
+            var containerLoc = new int[2];
+            anchorContainer.GetLocationInWindow(containerLoc);
+            var containerLeft = containerLoc[0];
+            var containerRight = containerLeft + anchorContainer.Width;
+            var leftPad = Math.Max(Dp(ctx, 8), anchorContainer.PaddingLeft - Dp(ctx, 4));
+            var rightPad = Math.Max(Dp(ctx, 10), anchorContainer.PaddingRight - Dp(ctx, 4));
+            var innerLeft = containerLeft + leftPad;
+            var innerRight = containerRight - rightPad;
+            if (innerRight - innerLeft >= Dp(ctx, 180))
+                return new HorizontalAnchorBounds(innerLeft, innerRight, ConstrainedToContainer: true);
+        }
+
+        return new HorizontalAnchorBounds(margin, Math.Max(margin + 1, screenW - margin), ConstrainedToContainer: false);
+    }
 }
