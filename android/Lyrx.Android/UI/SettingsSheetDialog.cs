@@ -125,9 +125,10 @@ internal static class SettingsSheetDialog
         });
 
         var titleTv = new TextView(activity) { Text = "设置" };
+        titleTv.SetIncludeFontPadding(false);
         titleTv.SetTextColor(TextPrimary);
-        titleTv.SetTextSize(global::Android.Util.ComplexUnitType.Sp, 14.5f);
-        titleTv.SetTypeface(null, TypefaceStyle.Bold);
+        titleTv.SetTextSize(global::Android.Util.ComplexUnitType.Sp, 15f);
+        UiHelpers.SetFontWeight(titleTv, UiHelpers.FontWeightBold);
         topBar.AddView(titleTv, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WrapContent, 1f));
 
         var closeBtn = UiHelpers.IconButton(activity, ClassicIconKind.Close, TextMuted, () => dialog.Dismiss(), sizeDp: 32, iconFraction: 0.50f);
@@ -177,7 +178,7 @@ internal static class SettingsSheetDialog
                 host.Background = active ? UiHelpers.RoundedRect(activity, BgNavActive, 6) : null;
                 indicator.Background = active ? UiHelpers.RoundedRect(activity, AccentGreen, 1.5f) : null;
                 label.SetTextColor(active ? TextPrimary : TextMuted);
-                label.SetTypeface(null, active ? TypefaceStyle.Bold : TypefaceStyle.Normal);
+                UiHelpers.SetFontWeight(label, active ? UiHelpers.FontWeightBold : UiHelpers.FontWeightRegular);
                 pageViews[i].Visibility = active ? ViewStates.Visible : ViewStates.Gone;
             }
             if (index == 3) refreshTrackPage?.Invoke();
@@ -202,6 +203,7 @@ internal static class SettingsSheetDialog
                 Ellipsize = TextUtils.TruncateAt.End,
             };
             navLabel.SetMaxLines(1);
+            navLabel.SetIncludeFontPadding(false);
             navLabel.SetTextSize(global::Android.Util.ComplexUnitType.Sp, 11.5f);
             item.AddView(navLabel, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MatchParent, 0, 1f));
@@ -234,6 +236,7 @@ internal static class SettingsSheetDialog
         dialog.Window?.SetBackgroundDrawable(new ColorDrawable(Color.Transparent));
         dialog.Window?.SetSoftInputMode(SoftInput.AdjustResize);
         dialog.Window?.SetLayout(dialogW, dialogH);
+        UiHelpers.HideStatusBar(dialog.Window);
         dialog.SetCanceledOnTouchOutside(true);
         dialog.Show();
     }
@@ -271,6 +274,7 @@ internal static class SettingsSheetDialog
         var srcLabel = new TextView(ctx) { Text = "音源选择：" };
         srcLabel.SetTextColor(TextMuted);
         srcLabel.SetTextSize(global::Android.Util.ComplexUnitType.Sp, 12);
+        UiHelpers.SetFontWeight(srcLabel, UiHelpers.FontWeightRegular);
         audioCard.AddView(srcLabel, new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent)
         {
@@ -308,7 +312,8 @@ internal static class SettingsSheetDialog
             granted ? "已授权" : "去开启",
             granted ? AccentGreen : Color.Rgb(255, 196, 96),
             openNotificationSettings,
-            horizontalPadDp: 12);
+            horizontalPadDp: 12,
+            fontWeight: UiHelpers.FontWeightSemiBold);
         audioCard.AddView(CreateSettingRow(
             ctx,
             "通知使用权",
@@ -375,6 +380,7 @@ internal static class SettingsSheetDialog
         var themeLabel = new TextView(ctx) { Text = "背景配色模式：" };
         themeLabel.SetTextColor(TextMuted);
         themeLabel.SetTextSize(global::Android.Util.ComplexUnitType.Sp, 12);
+        UiHelpers.SetFontWeight(themeLabel, UiHelpers.FontWeightRegular);
         themeCard.AddView(themeLabel, new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent)
         {
@@ -454,7 +460,8 @@ internal static class SettingsSheetDialog
         };
         logHint.SetMaxLines(1);
         logHint.SetTextColor(TextMuted);
-        logHint.SetTextSize(global::Android.Util.ComplexUnitType.Sp, 11);
+        logHint.SetTextSize(global::Android.Util.ComplexUnitType.Sp, 11.5f);
+        UiHelpers.SetFontWeight(logHint, UiHelpers.FontWeightRegular);
         shareLogRow.AddView(logHint, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WrapContent, 1f)
         {
             RightMargin = UiHelpers.Dp(ctx, 8),
@@ -482,6 +489,7 @@ internal static class SettingsSheetDialog
         };
         note.SetTextColor(TextMuted);
         note.SetTextSize(global::Android.Util.ComplexUnitType.Sp, 11.5f);
+        UiHelpers.SetFontWeight(note, UiHelpers.FontWeightRegular);
         note.SetLineSpacing(0f, 1.15f);
         card.AddView(note, new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent)
@@ -602,6 +610,7 @@ internal static class SettingsSheetDialog
         var langLabel = new TextView(ctx) { Text = "目标语言：" };
         langLabel.SetTextColor(TextMuted);
         langLabel.SetTextSize(global::Android.Util.ComplexUnitType.Sp, 12);
+        UiHelpers.SetFontWeight(langLabel, UiHelpers.FontWeightRegular);
         engineCard.AddView(langLabel, new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent)
         {
@@ -625,6 +634,7 @@ internal static class SettingsSheetDialog
         var engineLabel = new TextView(ctx) { Text = "在线机器翻译补充（当歌词源无自带翻译时使用）：" };
         engineLabel.SetTextColor(TextMuted);
         engineLabel.SetTextSize(global::Android.Util.ComplexUnitType.Sp, 12);
+        UiHelpers.SetFontWeight(engineLabel, UiHelpers.FontWeightRegular);
         engineCard.AddView(engineLabel, new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent)
         {
@@ -636,6 +646,7 @@ internal static class SettingsSheetDialog
         var keyTitle = new TextView(ctx);
         keyTitle.SetTextColor(TextMuted);
         keyTitle.SetTextSize(global::Android.Util.ComplexUnitType.Sp, 11.5f);
+        UiHelpers.SetFontWeight(keyTitle, UiHelpers.FontWeightRegular);
         keySection.AddView(keyTitle, new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent)
         {
@@ -650,6 +661,7 @@ internal static class SettingsSheetDialog
         var modelLabel = new TextView(ctx) { Text = "OpenRouter 模型（可选）：" };
         modelLabel.SetTextColor(TextMuted);
         modelLabel.SetTextSize(global::Android.Util.ComplexUnitType.Sp, 11.5f);
+        UiHelpers.SetFontWeight(modelLabel, UiHelpers.FontWeightRegular);
         keySection.AddView(modelLabel, new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent)
         {
@@ -712,7 +724,7 @@ internal static class SettingsSheetDialog
             _ = app.Coordinator.RetranslateCurrentAsync();
             onAppearanceOrLayoutChanged();
             Toast.MakeText(ctx, "已应用翻译密钥", ToastLength.Short)?.Show();
-        });
+        }, fontWeight: UiHelpers.FontWeightSemiBold, fontSizeSp: 12.5f);
         keySection.AddView(saveKeyBtn, new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MatchParent, UiHelpers.Dp(ctx, 34))
         {
@@ -756,11 +768,12 @@ internal static class SettingsSheetDialog
         var trackTitleTv = new TextView(ctx);
         trackTitleTv.SetTextColor(TextPrimary);
         trackTitleTv.SetTextSize(global::Android.Util.ComplexUnitType.Sp, 13);
-        trackTitleTv.SetTypeface(null, TypefaceStyle.Bold);
+        UiHelpers.SetFontWeight(trackTitleTv, UiHelpers.FontWeightSemiBold);
 
         var trackStatusTv = new TextView(ctx);
         trackStatusTv.SetTextColor(TextMuted);
         trackStatusTv.SetTextSize(global::Android.Util.ComplexUnitType.Sp, 12);
+        UiHelpers.SetFontWeight(trackStatusTv, UiHelpers.FontWeightRegular);
         trackStatusTv.SetLineSpacing(0f, 1.25f);
 
         infoCard.AddView(trackTitleTv, new LinearLayout.LayoutParams(
@@ -776,6 +789,8 @@ internal static class SettingsSheetDialog
         var offsetReadout = new TextView(ctx);
         offsetReadout.SetTextColor(TextMuted);
         offsetReadout.SetTextSize(global::Android.Util.ComplexUnitType.Sp, 12);
+        UiHelpers.SetFontWeight(offsetReadout, UiHelpers.FontWeightRegular);
+        UiHelpers.SetTabularNumerals(offsetReadout);
         offsetCard.AddView(offsetReadout, new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent)
         {
@@ -817,8 +832,15 @@ internal static class SettingsSheetDialog
         for (var i = 0; i < steps.Length; i++)
         {
             var (label, delta) = steps[i];
-            var btn = CreateDarkButton(ctx, label, TextPrimary, () => StepOffset(delta), horizontalPadDp: 0);
-            btn.SetTextSize(global::Android.Util.ComplexUnitType.Sp, 11.5f);
+            var btn = CreateDarkButton(
+                ctx,
+                label,
+                TextPrimary,
+                () => StepOffset(delta),
+                horizontalPadDp: 0,
+                fontWeight: UiHelpers.FontWeightSemiBold,
+                fontSizeSp: 12f,
+                tabular: true);
             var lp = new LinearLayout.LayoutParams(0, UiHelpers.Dp(ctx, 32), 1f);
             if (i < steps.Length - 1) lp.RightMargin = UiHelpers.Dp(ctx, 5);
             stepRow.AddView(btn, lp);
@@ -833,14 +855,14 @@ internal static class SettingsSheetDialog
             app.Coordinator.ReloadCurrentTrackLyrics();
             Toast.MakeText(ctx, "正在重新搜索歌词…", ToastLength.Short)?.Show();
             dialog.Dismiss();
-        });
+        }, fontSizeSp: 12.5f);
         opsCard.AddView(reloadBtn, new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MatchParent, UiHelpers.Dp(ctx, 36))
         {
             BottomMargin = UiHelpers.Dp(ctx, 8),
         });
 
-        var exportBtn = CreateDarkButton(ctx, "导出当前歌词 (.lrc)", TextPrimary, () => ExportCurrentLrc(ctx, app));
+        var exportBtn = CreateDarkButton(ctx, "导出当前歌词 (.lrc)", TextPrimary, () => ExportCurrentLrc(ctx, app), fontSizeSp: 12.5f);
         opsCard.AddView(exportBtn, new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MatchParent, UiHelpers.Dp(ctx, 36))
         {
@@ -852,7 +874,7 @@ internal static class SettingsSheetDialog
             app.Coordinator.MarkWrongLyrics();
             Toast.MakeText(ctx, "已隐藏当前歌曲的错误歌词", ToastLength.Short)?.Show();
             dialog.Dismiss();
-        });
+        }, fontSizeSp: 12.5f);
         opsCard.AddView(wrongBtn, new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MatchParent, UiHelpers.Dp(ctx, 36)));
 
@@ -880,7 +902,7 @@ internal static class SettingsSheetDialog
         var header = new TextView(ctx) { Text = title };
         header.SetTextColor(TextPrimary);
         header.SetTextSize(global::Android.Util.ComplexUnitType.Sp, 13.5f);
-        header.SetTypeface(null, TypefaceStyle.Bold);
+        UiHelpers.SetFontWeight(header, UiHelpers.FontWeightBold);
         card.AddView(header, new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent)
         {
@@ -925,15 +947,16 @@ internal static class SettingsSheetDialog
         var leftCol = new LinearLayout(ctx) { Orientation = global::Android.Widget.Orientation.Vertical };
         var titleTv = new TextView(ctx) { Text = title };
         titleTv.SetTextColor(TextPrimary);
-        titleTv.SetTextSize(global::Android.Util.ComplexUnitType.Sp, 12.5f);
-        titleTv.SetTypeface(null, TypefaceStyle.Bold);
+        titleTv.SetTextSize(global::Android.Util.ComplexUnitType.Sp, 13f);
+        UiHelpers.SetFontWeight(titleTv, UiHelpers.FontWeightSemiBold);
         leftCol.AddView(titleTv);
 
         if (!string.IsNullOrEmpty(subtitle))
         {
             var subTv = new TextView(ctx) { Text = subtitle };
             subTv.SetTextColor(TextMuted);
-            subTv.SetTextSize(global::Android.Util.ComplexUnitType.Sp, 11);
+            subTv.SetTextSize(global::Android.Util.ComplexUnitType.Sp, 11.5f);
+            UiHelpers.SetFontWeight(subTv, UiHelpers.FontWeightRegular);
             subTv.SetLineSpacing(0f, 1.15f);
             leftCol.AddView(subTv, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent)
@@ -1048,8 +1071,10 @@ internal static class SettingsSheetDialog
             Ellipsize = TextUtils.TruncateAt.End,
         };
         selectedTv.SetMaxLines(1);
+        selectedTv.SetIncludeFontPadding(false);
         selectedTv.SetTextColor(TextPrimary);
         selectedTv.SetTextSize(global::Android.Util.ComplexUnitType.Sp, 12);
+        UiHelpers.SetFontWeight(selectedTv, UiHelpers.FontWeightRegular);
         box.AddView(selectedTv, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WrapContent, 1f)
         {
             RightMargin = UiHelpers.Dp(ctx, 6),
@@ -1127,9 +1152,9 @@ internal static class SettingsSheetDialog
                     Ellipsize = TextUtils.TruncateAt.End,
                 };
                 labelTv.SetMaxLines(1);
-                labelTv.SetTextSize(global::Android.Util.ComplexUnitType.Sp, 12);
+                labelTv.SetTextSize(global::Android.Util.ComplexUnitType.Sp, 12.5f);
                 labelTv.SetTextColor(active ? AccentGreen : TextPrimary);
-                labelTv.SetTypeface(null, active ? TypefaceStyle.Bold : TypefaceStyle.Normal);
+                UiHelpers.SetFontWeight(labelTv, active ? UiHelpers.FontWeightBold : UiHelpers.FontWeightRegular);
                 itemRow.AddView(labelTv, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WrapContent, 1f));
 
                 var check = new TextView(ctx)
@@ -1138,7 +1163,7 @@ internal static class SettingsSheetDialog
                 };
                 check.SetTextColor(AccentGreen);
                 check.SetTextSize(global::Android.Util.ComplexUnitType.Sp, 12);
-                check.SetTypeface(null, TypefaceStyle.Bold);
+                UiHelpers.SetFontWeight(check, UiHelpers.FontWeightBold);
                 itemRow.AddView(check, new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.WrapContent, ViewGroup.LayoutParams.WrapContent)
                 {
@@ -1230,8 +1255,10 @@ internal static class SettingsSheetDialog
             });
 
             var labelTv = new TextView(ctx) { Text = shortName };
+            labelTv.SetIncludeFontPadding(false);
             labelTv.SetTextColor(TextPrimary);
             labelTv.SetTextSize(global::Android.Util.ComplexUnitType.Sp, 11.5f);
+            UiHelpers.SetFontWeight(labelTv, UiHelpers.FontWeightRegular);
             labelTv.SetMaxLines(1);
             chip.AddView(labelTv);
 
@@ -1304,7 +1331,10 @@ internal static class SettingsSheetDialog
         string label,
         Color textColor,
         Action onClick,
-        int horizontalPadDp = 12)
+        int horizontalPadDp = 12,
+        int fontWeight = UiHelpers.FontWeightRegular,
+        float fontSizeSp = 12f,
+        bool tabular = false)
     {
         var btn = new Button(ctx)
         {
@@ -1313,9 +1343,11 @@ internal static class SettingsSheetDialog
             Gravity = GravityFlags.Center,
         };
         btn.SetAllCaps(false);
+        btn.SetIncludeFontPadding(false);
         btn.SetTextColor(textColor);
-        btn.SetTextSize(global::Android.Util.ComplexUnitType.Sp, 12);
-        btn.SetTypeface(null, TypefaceStyle.Bold);
+        btn.SetTextSize(global::Android.Util.ComplexUnitType.Sp, fontSizeSp);
+        UiHelpers.SetFontWeight(btn, fontWeight);
+        if (tabular) UiHelpers.SetTabularNumerals(btn);
         var hPad = UiHelpers.Dp(ctx, horizontalPadDp);
         btn.SetPadding(hPad, 0, hPad, 0);
         btn.SetMinHeight(0);
@@ -1340,6 +1372,7 @@ internal static class SettingsSheetDialog
         edit.SetTextColor(TextPrimary);
         edit.SetHintTextColor(Color.Rgb(118, 118, 118));
         edit.SetTextSize(global::Android.Util.ComplexUnitType.Sp, 12);
+        UiHelpers.SetFontWeight(edit, UiHelpers.FontWeightRegular);
         edit.SetPadding(UiHelpers.Dp(ctx, 10), 0, UiHelpers.Dp(ctx, 10), 0);
         return edit;
     }

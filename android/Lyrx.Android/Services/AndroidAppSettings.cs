@@ -97,6 +97,9 @@ public sealed class AndroidAppSettings
 
     public bool TimingDiagnosticsEnabled { get; set; }
 
+    /// <summary>是否已向用户发起过 Android 12+ 蓝牙设备连接权限请求。</summary>
+    public bool BluetoothPermissionRequested { get; set; }
+
     [JsonIgnore]
     public string EffectiveTranslationEngine =>
         !string.IsNullOrWhiteSpace(TranslationEngine) ? TranslationEngine!.Trim().ToLowerInvariant()

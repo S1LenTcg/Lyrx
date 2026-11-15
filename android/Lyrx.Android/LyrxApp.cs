@@ -19,6 +19,7 @@ public sealed class LyrxApp : Application
 
     public AndroidAppSettings Settings { get; private set; } = null!;
     public AndroidNowPlayingSource NowPlaying { get; private set; } = null!;
+    public BluetoothAudioMonitor BluetoothAudio { get; private set; } = null!;
     public AndroidEngineDispatcher Dispatcher { get; private set; } = null!;
     public ITranslationCache TranslationCache { get; private set; } = null!;
     public LyricsCoordinator Coordinator { get; private set; } = null!;
@@ -48,6 +49,7 @@ public sealed class LyrxApp : Application
             TimingDiagnostics = Settings.TimingDiagnosticsEnabled,
         };
         NowPlaying.SetSource(Settings.PlaybackSource, Settings.IncludeBrowsers, Settings.PreferredSources);
+        BluetoothAudio = new BluetoothAudioMonitor(this);
 
         var translationsDb = Path.Combine(DataDirectory, "translations.db");
         TranslationCache = new SqliteTranslationCache(translationsDb);
@@ -72,6 +74,7 @@ public sealed class LyrxApp : Application
         };
 
         NowPlaying.Start();
+        BluetoothAudio.Start();
         Coordinator.Start();
     }
 
@@ -177,6 +180,7 @@ public sealed class LyrxApp : Application
     public override void OnTerminate()
     {
         Coordinator?.Dispose();
+        BluetoothAudio?.Dispose();
         NowPlaying?.Dispose();
         base.OnTerminate();
     }

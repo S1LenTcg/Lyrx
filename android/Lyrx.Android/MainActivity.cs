@@ -21,7 +21,7 @@ namespace Musebase.Android;
 
 /// <summary>
 /// Android 主界面：整体视觉排版、字体层级、色彩体系与交互均向桌面端 <c>ClassicLyricsWindow</c> 对齐。
-/// 采用 #121212 外框 + 圆角动态取色歌词主卡片 + 底部精简播控与时间轴。
+/// 顶部与左右使用沉浸式满铺动态取色歌词区（延伸至状态栏下方），底部固定 #121212 精简播控与时间轴。
 /// </summary>
 [Activity(
     Label = "@string/app_name",
@@ -45,18 +45,30 @@ public sealed class MainActivity : Activity
         public ValueAnimator? ColorAnimator { get; set; }
     }
 
-    private sealed class InsetsListener : Java.Lang.Object, View.IOnApplyWindowInsetsListener
+    private sealed class InsetsListener(MainActivity owner) : Java.Lang.Object, View.IOnApplyWindowInsetsListener
     {
         public WindowInsets OnApplyWindowInsets(View? v, WindowInsets? insets)
         {
-            if (v is not null && insets is not null && OperatingSystem.IsAndroidVersionAtLeast(30))
+            if (insets is not null)
             {
-                var bars = insets.GetInsets(WindowInsets.Type.SystemBars() | WindowInsets.Type.DisplayCutout());
-                v.SetPadding(
-                    bars.Left,
-                    bars.Top,
-                    bars.Right,
-                    bars.Bottom);
+                if (OperatingSystem.IsAndroidVersionAtLeast(30))
+                {
+                    var bars = insets.GetInsets(WindowInsets.Type.SystemBars() | WindowInsets.Type.DisplayCutout());
+                    owner.ApplySystemBarInsets(bars.Left, bars.Top, bars.Right, bars.Bottom);
+                }
+                else
+                {
+#pragma warning disable CS0618
+                    var cutoutTop = OperatingSystem.IsAndroidVersionAtLeast(28)
+                        ? (insets.DisplayCutout?.SafeInsetTop ?? 0)
+                        : 0;
+                    owner.ApplySystemBarInsets(
+                        insets.SystemWindowInsetLeft,
+                        Math.Max(insets.SystemWindowInsetTop, cutoutTop),
+                        insets.SystemWindowInsetRight,
+                        insets.SystemWindowInsetBottom);
+#pragma warning restore CS0618
+                }
             }
             return insets!;
         }
@@ -69,6 +81,7 @@ public sealed class MainActivity : Activity
 
     private static readonly DecelerateInterpolator ScrollInterpolator = new(1.8f);
     private static readonly DecelerateInterpolator RowEaseInterpolator = new(1.5f);
+    private const int RequestCodeBluetoothConnect = 1001;
 
     private readonly List<LyricRowHolder> _rows = new();
     private readonly Handler _uiHandler = new(Looper.MainLooper!);
@@ -102,10 +115,17 @@ public sealed class MainActivity : Activity
     private GradientDrawable _panelBgDrawable = null!;
     private GradientDrawable _topFadeDrawable = null!;
     private GradientDrawable _bottomFadeDrawable = null!;
+    private View _topFadeView = null!;
+    private LinearLayout _footerView = null!;
     private ScrollView _lyricsScrollView = null!;
     private LinearLayout _lyricsContainer = null!;
     private TextView _emptyHintView = null!;
     private LinearLayout _resumePill = null!;
+
+    private int _insetLeft;
+    private int _insetTop;
+    private int _insetRight;
+    private int _insetBottom;
 
     private ImageView _coverView = null!;
     private TextView _titleView = null!;
@@ -125,6 +145,9 @@ public sealed class MainActivity : Activity
     private VectorIconView _playIcon = null!;
     private FrameLayout _nextBtnHost = null!;
     private VectorIconView _nextIcon = null!;
+    private LinearLayout _bluetoothRow = null!;
+    private VectorIconView _bluetoothIcon = null!;
+    private TextView _bluetoothNameView = null!;
 
     private static LyrxApp App => LyrxApp.Instance;
 
@@ -132,24 +155,44 @@ public sealed class MainActivity : Activity
     {
         base.OnCreate(savedInstanceState);
 
-        ApplyChromeSystemBars();
         BuildLayout();
         SetContentView(_rootLayout);
+        ApplyChromeSystemBars();
 
         ApplyActivePalette(animate: false);
         BindEngineEvents();
         StartUiLoopIfNeeded();
         RefreshAll(forceTrackCheck: true);
+        RefreshBluetoothOutput();
     }
 
     protected override void OnResume()
     {
         base.OnResume();
         _isResumed = true;
+        ApplyChromeSystemBars();
         App.EnsureNowPlayingStarted();
+        App.BluetoothAudio.Refresh();
         RefreshPermissionBanner();
         RefreshAll(forceTrackCheck: true);
+        RefreshBluetoothOutput();
         StartUiLoopIfNeeded();
+    }
+
+    public override void OnRequestPermissionsResult(int requestCode, string[] permissions, Permission[] grantResults)
+    {
+        base.OnRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == RequestCodeBluetoothConnect)
+        {
+            App.BluetoothAudio.Refresh();
+            RefreshBluetoothOutput();
+        }
+    }
+
+    public override void OnWindowFocusChanged(bool hasFocus)
+    {
+        base.OnWindowFocusChanged(hasFocus);
+        if (hasFocus) ApplyChromeSystemBars();
     }
 
     protected override void OnPause()
@@ -169,16 +212,8 @@ public sealed class MainActivity : Activity
         base.OnDestroy();
     }
 
-    private void ApplyChromeSystemBars()
-    {
-        if (!OperatingSystem.IsAndroidVersionAtLeast(35))
-        {
-#pragma warning disable CS0618
-            Window?.SetStatusBarColor(LyricsPalette.ChromeBackground);
-            Window?.SetNavigationBarColor(LyricsPalette.ChromeBackground);
-#pragma warning restore CS0618
-        }
-    }
+    private void ApplyChromeSystemBars() =>
+        UiHelpers.HideStatusBar(Window, edgeToEdge: true, navigationBarColor: LyricsPalette.ChromeBackground);
 
     private void BuildLayout()
     {
@@ -187,32 +222,14 @@ public sealed class MainActivity : Activity
             Orientation = global::Android.Widget.Orientation.Vertical,
         };
         _rootLayout.SetBackgroundColor(LyricsPalette.ChromeBackground);
-        if (OperatingSystem.IsAndroidVersionAtLeast(30))
-            _rootLayout.SetOnApplyWindowInsetsListener(new InsetsListener());
-        else
-            _rootLayout.SetFitsSystemWindows(true);
-
-        _permissionBanner = BuildPermissionBanner();
-        _rootLayout.AddView(_permissionBanner, new LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent)
-        {
-            LeftMargin = Dp(10),
-            TopMargin = Dp(4),
-            RightMargin = Dp(10),
-            BottomMargin = Dp(4),
-        });
+        _rootLayout.SetOnApplyWindowInsetsListener(new InsetsListener(this));
 
         _lyricsPanel = BuildLyricsPanel();
         _rootLayout.AddView(_lyricsPanel, new LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MatchParent, 0, 1f)
-        {
-            LeftMargin = Dp(8),
-            TopMargin = Dp(4),
-            RightMargin = Dp(8),
-            BottomMargin = Dp(4),
-        });
+            ViewGroup.LayoutParams.MatchParent, 0, 1f));
 
-        _rootLayout.AddView(BuildFooter(), new LinearLayout.LayoutParams(
+        _footerView = BuildFooter();
+        _rootLayout.AddView(_footerView, new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent));
     }
 
@@ -231,11 +248,12 @@ public sealed class MainActivity : Activity
         var title = new TextView(this) { Text = "需要开启「通知使用权」" };
         title.SetTextColor(Color.White);
         title.SetTextSize(ComplexUnitType.Sp, 13);
-        title.SetTypeface(null, TypefaceStyle.Bold);
+        UiHelpers.SetFontWeight(title, UiHelpers.FontWeightSemiBold);
 
         var desc = new TextView(this) { Text = "开启后可自动读取正在播放的曲目、封面与进度" };
         desc.SetTextColor(LyricsPalette.MutedGray);
         desc.SetTextSize(ComplexUnitType.Sp, 11.5f);
+        UiHelpers.SetFontWeight(desc, UiHelpers.FontWeightRegular);
 
         col.AddView(title);
         col.AddView(desc);
@@ -251,9 +269,10 @@ public sealed class MainActivity : Activity
             Gravity = GravityFlags.Center,
         };
         goBtn.SetAllCaps(false);
+        goBtn.SetIncludeFontPadding(false);
         goBtn.SetTextColor(LyricsPalette.ChromeBackground);
         goBtn.SetTextSize(ComplexUnitType.Sp, 12);
-        goBtn.SetTypeface(null, TypefaceStyle.Bold);
+        UiHelpers.SetFontWeight(goBtn, UiHelpers.FontWeightSemiBold);
         goBtn.SetPadding(Dp(14), 0, Dp(14), 0);
         goBtn.SetMinHeight(0);
         goBtn.SetMinimumHeight(0);
@@ -266,13 +285,29 @@ public sealed class MainActivity : Activity
 
     private FrameLayout BuildLyricsPanel()
     {
-        _panelBgDrawable = UiHelpers.RoundedRect(this, _background, 10);
+        _panelBgDrawable = new GradientDrawable();
+        _panelBgDrawable.SetColor(_background.ToArgb());
         var panel = new FrameLayout(this)
         {
             Background = _panelBgDrawable,
-            ClipToOutline = true,
-            OutlineProvider = new RoundedOutlineProvider(Dp(10)),
         };
+
+        var panelContent = new LinearLayout(this)
+        {
+            Orientation = global::Android.Widget.Orientation.Vertical,
+        };
+
+        _permissionBanner = BuildPermissionBanner();
+        panelContent.AddView(_permissionBanner, new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent)
+        {
+            LeftMargin = Dp(12),
+            TopMargin = Dp(8),
+            RightMargin = Dp(12),
+            BottomMargin = Dp(4),
+        });
+
+        var scrollWrap = new FrameLayout(this);
 
         _lyricsScrollView = new ScrollView(this)
         {
@@ -299,7 +334,7 @@ public sealed class MainActivity : Activity
         };
         _emptyHintView.SetTextColor(_subdued);
         _emptyHintView.SetTextSize(ComplexUnitType.Sp, 24);
-        _emptyHintView.SetTypeface(null, TypefaceStyle.Bold);
+        UiHelpers.SetFontWeight(_emptyHintView, UiHelpers.FontWeightBold, useTitleFont: true);
         _emptyHintView.SetLineSpacing(0f, 1.15f);
         _lyricsContainer.AddView(_emptyHintView, new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent));
@@ -311,17 +346,17 @@ public sealed class MainActivity : Activity
             ApplyLyricsContainerPadding();
         };
 
-        panel.AddView(_lyricsScrollView, new FrameLayout.LayoutParams(
+        scrollWrap.AddView(_lyricsScrollView, new FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.MatchParent));
 
-        // 卡片上下边缘柔和渐隐遮罩（使用同色透明通道，避免插值泛黑）
+        // 顶部渐隐遮罩延伸至状态栏下方，避免滚动歌词遮挡状态栏时钟与电量图标
         var transparentBg = Color.Argb(0, _background.R, _background.G, _background.B);
         _topFadeDrawable = new GradientDrawable(
             GradientDrawable.Orientation.TopBottom,
-            [_background.ToArgb(), transparentBg.ToArgb()]);
-        var topFade = new View(this) { Background = _topFadeDrawable };
-        panel.AddView(topFade, new FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.MatchParent, Dp(26))
+            [_background.ToArgb(), _background.ToArgb(), transparentBg.ToArgb()]);
+        _topFadeView = new View(this) { Background = _topFadeDrawable };
+        scrollWrap.AddView(_topFadeView, new FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MatchParent, Dp(34))
         {
             Gravity = GravityFlags.Top,
         });
@@ -330,19 +365,24 @@ public sealed class MainActivity : Activity
             GradientDrawable.Orientation.BottomTop,
             [_background.ToArgb(), transparentBg.ToArgb()]);
         var bottomFade = new View(this) { Background = _bottomFadeDrawable };
-        panel.AddView(bottomFade, new FrameLayout.LayoutParams(
+        scrollWrap.AddView(bottomFade, new FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MatchParent, Dp(34))
         {
             Gravity = GravityFlags.Bottom,
         });
 
         _resumePill = BuildResumePill();
-        panel.AddView(_resumePill, new FrameLayout.LayoutParams(
+        scrollWrap.AddView(_resumePill, new FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.WrapContent, Dp(42))
         {
             Gravity = GravityFlags.Bottom | GravityFlags.CenterHorizontal,
             BottomMargin = Dp(20),
         });
+
+        panelContent.AddView(scrollWrap, new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MatchParent, 0, 1f));
+        panel.AddView(panelContent, new FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.MatchParent));
 
         return panel;
     }
@@ -369,9 +409,10 @@ public sealed class MainActivity : Activity
         });
 
         var label = new TextView(this) { Text = "同步" };
+        label.SetIncludeFontPadding(false);
         label.SetTextColor(LyricsPalette.ChromeBackground);
-        label.SetTextSize(ComplexUnitType.Sp, 14.5f);
-        label.SetTypeface(null, TypefaceStyle.Bold);
+        label.SetTextSize(ComplexUnitType.Sp, 15f);
+        UiHelpers.SetFontWeight(label, UiHelpers.FontWeightBold);
         pill.AddView(label);
 
         pill.Click += (_, _) =>
@@ -443,9 +484,10 @@ public sealed class MainActivity : Activity
             Ellipsize = TextUtils.TruncateAt.End,
         };
         _titleView.SetMaxLines(1);
+        _titleView.SetIncludeFontPadding(false);
         _titleView.SetTextColor(Color.White);
-        _titleView.SetTextSize(ComplexUnitType.Sp, 14.5f);
-        _titleView.SetTypeface(null, TypefaceStyle.Bold);
+        _titleView.SetTextSize(ComplexUnitType.Sp, 14f);
+        UiHelpers.SetFontWeight(_titleView, UiHelpers.FontWeightRegular);
 
         _artistView = new TextView(this)
         {
@@ -453,8 +495,10 @@ public sealed class MainActivity : Activity
             Ellipsize = TextUtils.TruncateAt.End,
         };
         _artistView.SetMaxLines(1);
+        _artistView.SetIncludeFontPadding(false);
         _artistView.SetTextColor(LyricsPalette.MutedGray);
         _artistView.SetTextSize(ComplexUnitType.Sp, 12f);
+        UiHelpers.SetFontWeight(_artistView, UiHelpers.FontWeightRegular);
 
         trackText.AddView(_titleView);
         trackText.AddView(_artistView);
@@ -521,6 +565,40 @@ public sealed class MainActivity : Activity
         footer.AddView(transport, new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent));
 
+        // 第四行（按需显示）：当前连接的蓝牙音频设备名称
+        _bluetoothRow = new LinearLayout(this)
+        {
+            Orientation = global::Android.Widget.Orientation.Horizontal,
+            Visibility = ViewStates.Gone,
+        };
+        _bluetoothRow.SetGravity(GravityFlags.Left | GravityFlags.CenterVertical);
+
+        var btColor = Color.Rgb(230, 230, 230);
+        _bluetoothIcon = new VectorIconView(this, ClassicIconKind.BluetoothAudio);
+        _bluetoothIcon.Configure(ClassicIconKind.BluetoothAudio, btColor, iconFraction: 0.92f);
+        _bluetoothRow.AddView(_bluetoothIcon, new LinearLayout.LayoutParams(Dp(18), Dp(18))
+        {
+            RightMargin = Dp(6),
+        });
+
+        _bluetoothNameView = new TextView(this)
+        {
+            Ellipsize = TextUtils.TruncateAt.End,
+        };
+        _bluetoothNameView.SetMaxLines(1);
+        _bluetoothNameView.SetIncludeFontPadding(false);
+        _bluetoothNameView.SetTextColor(btColor);
+        _bluetoothNameView.SetTextSize(ComplexUnitType.Sp, 12.5f);
+        UiHelpers.SetFontWeight(_bluetoothNameView, UiHelpers.FontWeightSemiBold);
+        _bluetoothRow.AddView(_bluetoothNameView, new LinearLayout.LayoutParams(
+            0, ViewGroup.LayoutParams.WrapContent, 1f));
+
+        footer.AddView(_bluetoothRow, new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent)
+        {
+            TopMargin = Dp(4),
+        });
+
         return footer;
     }
 
@@ -547,9 +625,11 @@ public sealed class MainActivity : Activity
         {
             Visibility = ViewStates.Gone,
         };
+        _offsetBadge.SetIncludeFontPadding(false);
         _offsetBadge.SetTextColor(LyricsPalette.AccentGreen);
         _offsetBadge.SetTextSize(ComplexUnitType.Sp, 11f);
-        _offsetBadge.SetTypeface(null, TypefaceStyle.Bold);
+        UiHelpers.SetFontWeight(_offsetBadge, UiHelpers.FontWeightSemiBold);
+        UiHelpers.SetTabularNumerals(_offsetBadge);
         _offsetBadge.SetPadding(Dp(4), 0, 0, 0);
         _offsetHost.AddView(_offsetBadge);
         _offsetHost.Click += (_, _) => OpenOffsetDialog();
@@ -605,18 +685,57 @@ public sealed class MainActivity : Activity
             Text = "–:––",
             Gravity = gravity | GravityFlags.CenterVertical,
         };
+        tv.SetIncludeFontPadding(false);
         tv.SetTextColor(LyricsPalette.MutedGray);
-        tv.SetTextSize(ComplexUnitType.Sp, 11.5f);
+        tv.SetTextSize(ComplexUnitType.Sp, 12f);
+        UiHelpers.SetFontWeight(tv, UiHelpers.FontWeightRegular);
+        UiHelpers.SetTabularNumerals(tv);
         return tv;
+    }
+
+    private void ApplySystemBarInsets(int left, int top, int right, int bottom)
+    {
+        _insetLeft = left;
+        _insetTop = top;
+        _insetRight = right;
+        _insetBottom = bottom;
+
+        _footerView.SetPadding(Dp(14) + left, Dp(6), Dp(14) + right, Dp(10) + bottom);
+
+        if (_permissionBanner.LayoutParameters is LinearLayout.LayoutParams bannerLp)
+        {
+            bannerLp.LeftMargin = Dp(12) + left;
+            bannerLp.TopMargin = top + Dp(8);
+            bannerLp.RightMargin = Dp(12) + right;
+            _permissionBanner.LayoutParameters = bannerLp;
+        }
+
+        if (_topFadeView.LayoutParameters is FrameLayout.LayoutParams fadeLp)
+        {
+            fadeLp.Height = _permissionBanner.Visibility == ViewStates.Visible
+                ? Dp(24)
+                : top + Dp(34);
+            _topFadeView.LayoutParameters = fadeLp;
+        }
+
+        ApplyLyricsContainerPadding();
     }
 
     private void ApplyLyricsContainerPadding()
     {
-        var side = Dp(24);
-        var top = Dp(40);
+        var left = Dp(24) + _insetLeft;
+        var right = Dp(24) + _insetRight;
+        var top = _permissionBanner.Visibility == ViewStates.Visible
+            ? Dp(14)
+            : _insetTop + Dp(28);
         var bottom = _lyricsScrollView.Height > 0 ? _lyricsScrollView.Height / 2 : Dp(220);
-        if (_lyricsContainer.PaddingLeft != side || _lyricsContainer.PaddingTop != top || _lyricsContainer.PaddingBottom != bottom)
-            _lyricsContainer.SetPadding(side, top, side, bottom);
+        if (_lyricsContainer.PaddingLeft != left
+            || _lyricsContainer.PaddingTop != top
+            || _lyricsContainer.PaddingRight != right
+            || _lyricsContainer.PaddingBottom != bottom)
+        {
+            _lyricsContainer.SetPadding(left, top, right, bottom);
+        }
     }
 
     private void BindEngineEvents()
@@ -627,6 +746,7 @@ public sealed class MainActivity : Activity
         App.NowPlaying.TrackChanged += OnTrackUpdated;
         App.NowPlaying.IsPlayingChanged += OnPlayingUpdated;
         App.NowPlaying.ArtworkChanged += OnArtworkUpdated;
+        App.BluetoothAudio.ConnectedDeviceChanged += OnBluetoothDeviceUpdated;
     }
 
     private void UnbindEngineEvents()
@@ -638,6 +758,7 @@ public sealed class MainActivity : Activity
         app.NowPlaying.TrackChanged -= OnTrackUpdated;
         app.NowPlaying.IsPlayingChanged -= OnPlayingUpdated;
         app.NowPlaying.ArtworkChanged -= OnArtworkUpdated;
+        app.BluetoothAudio.ConnectedDeviceChanged -= OnBluetoothDeviceUpdated;
     }
 
     private void OnEngineDirty(DisplayLine? _) => RunIfAlive(() => RefreshAll(forceTrackCheck: false));
@@ -658,6 +779,7 @@ public sealed class MainActivity : Activity
         StartUiLoopIfNeeded();
     });
     private void OnArtworkUpdated() => RunIfAlive(() => RefreshCoverArt(App.NowPlaying.CurrentTrack));
+    private void OnBluetoothDeviceUpdated(string? _) => RunIfAlive(RefreshBluetoothOutput);
 
     private void RunIfAlive(Action action)
     {
@@ -830,7 +952,7 @@ public sealed class MainActivity : Activity
         _latinMetrics = IsMostlyLatin(lyrics);
         var (lineScale, gapScale) = App.Settings.LineSpacingScales;
         var mainSize = 24f;
-        var subSize = MathF.Round(mainSize * 0.58f);
+        var subSize = MathF.Max(14f, MathF.Round(mainSize * 0.56f));
         var mainLineMult = (_latinMetrics ? 1.24f : 1.12f) * (float)lineScale;
         var rowGapPx = Dp((float)Math.Max(10, mainSize * (_latinMetrics ? 0.92 : 0.72) * gapScale));
 
@@ -856,7 +978,7 @@ public sealed class MainActivity : Activity
                 Gravity = GravityFlags.Left,
             };
             originalView.SetTextSize(ComplexUnitType.Sp, mainSize);
-            originalView.SetTypeface(null, TypefaceStyle.Bold);
+            UiHelpers.SetFontWeight(originalView, UiHelpers.FontWeightBold, useTitleFont: true);
             originalView.SetLineSpacing(0f, mainLineMult);
 
             var translationView = new TextView(this)
@@ -865,6 +987,7 @@ public sealed class MainActivity : Activity
                 Visibility = ViewStates.Gone,
             };
             translationView.SetTextSize(ComplexUnitType.Sp, subSize);
+            UiHelpers.SetFontWeight(translationView, UiHelpers.FontWeightRegular);
             translationView.SetPadding(0, Dp(4), 0, 0);
 
             var holder = new LyricRowHolder
@@ -1247,7 +1370,7 @@ public sealed class MainActivity : Activity
     {
         var transparentSameRgb = Color.Argb(0, bg.R, bg.G, bg.B);
         _panelBgDrawable.SetColor(bg.ToArgb());
-        _topFadeDrawable.SetColors([bg.ToArgb(), transparentSameRgb.ToArgb()]);
+        _topFadeDrawable.SetColors([bg.ToArgb(), bg.ToArgb(), transparentSameRgb.ToArgb()]);
         _bottomFadeDrawable.SetColors([bg.ToArgb(), transparentSameRgb.ToArgb()]);
     }
 
@@ -1289,10 +1412,39 @@ public sealed class MainActivity : Activity
         }
     }
 
+    private void RefreshBluetoothOutput()
+    {
+        var connected = App.BluetoothAudio.IsBluetoothAudioConnected;
+        var deviceName = App.BluetoothAudio.ConnectedDeviceName;
+
+        if (connected && !string.IsNullOrWhiteSpace(deviceName))
+        {
+            _bluetoothNameView.Text = deviceName;
+            _bluetoothRow.Visibility = ViewStates.Visible;
+            MaybeRequestBluetoothPermission();
+        }
+        else
+        {
+            _bluetoothRow.Visibility = ViewStates.Gone;
+        }
+    }
+
+    private void MaybeRequestBluetoothPermission()
+    {
+        if (!_isResumed || !OperatingSystem.IsAndroidVersionAtLeast(31)) return;
+        if (BluetoothAudioMonitor.HasBluetoothConnectPermission(this)) return;
+        if (App.Settings.BluetoothPermissionRequested) return;
+
+        App.Settings.BluetoothPermissionRequested = true;
+        App.SaveSettings();
+        RequestPermissions([global::Android.Manifest.Permission.BluetoothConnect], RequestCodeBluetoothConnect);
+    }
+
     private void RefreshPermissionBanner()
     {
         var granted = App.NowPlaying.HasNotificationAccess();
         _permissionBanner.Visibility = granted ? ViewStates.Gone : ViewStates.Visible;
+        ApplySystemBarInsets(_insetLeft, _insetTop, _insetRight, _insetBottom);
     }
 
     private void ToggleTranslationDisplay()

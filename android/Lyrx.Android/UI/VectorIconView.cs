@@ -17,6 +17,7 @@ internal enum ClassicIconKind
     Clock,
     Close,
     ChevronDown,
+    BluetoothAudio,
 }
 
 /// <summary>
@@ -175,6 +176,30 @@ internal sealed class VectorIconView : View
                 _path.MoveTo(5.5f, 8.8f);
                 _path.LineTo(12f, 15.3f);
                 _path.LineTo(18.5f, 8.8f);
+                canvas.DrawPath(_path, _strokePaint);
+                break;
+
+            case ClassicIconKind.BluetoothAudio:
+                _path.Reset();
+                _path.MoveTo(2.4f, 9.2f);
+                _path.LineTo(5.5f, 9.2f);
+                _path.LineTo(10.2f, 5.0f);
+                _path.LineTo(10.2f, 19.0f);
+                _path.LineTo(5.5f, 14.8f);
+                _path.LineTo(2.4f, 14.8f);
+                _path.Close();
+                canvas.DrawPath(_path, _fillPaint);
+                _strokePaint.StrokeWidth = 1.1f;
+                canvas.DrawPath(_path, _strokePaint);
+
+                _path.Reset();
+                _path.MoveTo(13.5f, 8.3f);
+                _path.LineTo(20.9f, 15.7f);
+                _path.LineTo(17.2f, 19.4f);
+                _path.LineTo(17.2f, 4.6f);
+                _path.LineTo(20.9f, 8.3f);
+                _path.LineTo(13.5f, 15.7f);
+                _strokePaint.StrokeWidth = 1.75f;
                 canvas.DrawPath(_path, _strokePaint);
                 break;
         }

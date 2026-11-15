@@ -66,9 +66,10 @@ internal static class OffsetSheetDialog
         header.SetGravity(GravityFlags.CenterVertical);
 
         var title = new TextView(activity) { Text = "音频同步调整" };
+        title.SetIncludeFontPadding(false);
         title.SetTextColor(Color.White);
-        title.SetTextSize(global::Android.Util.ComplexUnitType.Sp, 13);
-        title.SetTypeface(null, TypefaceStyle.Bold);
+        title.SetTextSize(global::Android.Util.ComplexUnitType.Sp, 12.5f);
+        UiHelpers.SetFontWeight(title, UiHelpers.FontWeightSemiBold);
         header.AddView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WrapContent, 1f));
 
         var scopeHost = new LinearLayout(activity)
@@ -106,12 +107,15 @@ internal static class OffsetSheetDialog
         readoutLeft.SetGravity(GravityFlags.CenterVertical);
 
         var valueView = new TextView(activity);
-        valueView.SetTextSize(global::Android.Util.ComplexUnitType.Sp, 15.5f);
-        valueView.SetTypeface(null, TypefaceStyle.Bold);
+        valueView.SetIncludeFontPadding(false);
+        valueView.SetTextSize(global::Android.Util.ComplexUnitType.Sp, 15f);
+        UiHelpers.SetFontWeight(valueView, UiHelpers.FontWeightBold);
+        UiHelpers.SetTabularNumerals(valueView);
 
         var dirView = new TextView(activity);
         dirView.SetTextColor(LyricsPalette.MutedGray);
         dirView.SetTextSize(global::Android.Util.ComplexUnitType.Sp, 11.5f);
+        UiHelpers.SetFontWeight(dirView, UiHelpers.FontWeightRegular);
 
         readoutLeft.AddView(valueView);
         readoutLeft.AddView(dirView, new LinearLayout.LayoutParams(
@@ -128,8 +132,10 @@ internal static class OffsetSheetDialog
             Gravity = GravityFlags.Center,
         };
         resetBtn.SetAllCaps(false);
+        resetBtn.SetIncludeFontPadding(false);
         resetBtn.SetTextColor(Color.White);
-        resetBtn.SetTextSize(global::Android.Util.ComplexUnitType.Sp, 11.5f);
+        resetBtn.SetTextSize(global::Android.Util.ComplexUnitType.Sp, 12f);
+        UiHelpers.SetFontWeight(resetBtn, UiHelpers.FontWeightSemiBold);
         resetBtn.SetPadding(UiHelpers.Dp(activity, 12), 0, UiHelpers.Dp(activity, 12), 0);
         resetBtn.SetMinWidth(0);
         resetBtn.SetMinimumWidth(0);
@@ -206,9 +212,11 @@ internal static class OffsetSheetDialog
                 Gravity = GravityFlags.Center,
             };
             btn.SetAllCaps(false);
+            btn.SetIncludeFontPadding(false);
             btn.SetTextColor(Color.White);
             btn.SetTextSize(global::Android.Util.ComplexUnitType.Sp, 12);
-            btn.SetTypeface(null, TypefaceStyle.Bold);
+            UiHelpers.SetFontWeight(btn, UiHelpers.FontWeightSemiBold);
+            UiHelpers.SetTabularNumerals(btn);
             btn.SetPadding(0, 0, 0, 0);
             btn.SetMinWidth(0);
             btn.SetMinimumWidth(0);
@@ -271,6 +279,7 @@ internal static class OffsetSheetDialog
             Gravity = GravityFlags.Center,
             Clickable = true,
         };
+        tv.SetIncludeFontPadding(false);
         tv.SetTextSize(global::Android.Util.ComplexUnitType.Sp, 11.5f);
         tv.SetPadding(UiHelpers.Dp(ctx, 10), 0, UiHelpers.Dp(ctx, 10), 0);
         return tv;
@@ -282,6 +291,6 @@ internal static class OffsetSheetDialog
             ? UiHelpers.RoundedRect(ctx, ActiveScopeBg, 10, ActiveScopeBorder, 1f)
             : null;
         chip.SetTextColor(active ? LyricsPalette.AccentGreen : LyricsPalette.MutedGray);
-        chip.SetTypeface(null, active ? TypefaceStyle.Bold : TypefaceStyle.Normal);
+        UiHelpers.SetFontWeight(chip, active ? UiHelpers.FontWeightSemiBold : UiHelpers.FontWeightRegular);
     }
 }
