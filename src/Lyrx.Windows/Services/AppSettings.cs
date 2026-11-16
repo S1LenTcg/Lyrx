@@ -47,6 +47,7 @@ public sealed class AppSettings
     public bool ClassicShowTranslation { get; set; }
     public bool ClassicTopmost { get; set; }
     public string ClassicBackgroundMode { get; set; } = "dynamic";
+    public string? ClassicLyricsFont { get; set; }
 
     // ---- 覆盖层样式 (#RRGGBB) ----
     public string TextColor { get; set; } = "#FFFFFF";
