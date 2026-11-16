@@ -113,6 +113,9 @@ public sealed class AndroidAppSettings
     /// <summary>横屏作为桌面歌词播放器使用时保持屏幕常亮。</summary>
     public bool KeepScreenOnInLandscape { get; set; } = true;
 
+    /// <summary>歌词分享卡片默认样式："spotify" | "apple-music"。</summary>
+    public string LyricShareStyle { get; set; } = "spotify";
+
     [JsonIgnore]
     public string EffectiveTranslationEngine =>
         !string.IsNullOrWhiteSpace(TranslationEngine) ? TranslationEngine!.Trim().ToLowerInvariant()

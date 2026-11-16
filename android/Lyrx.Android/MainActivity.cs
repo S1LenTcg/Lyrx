@@ -42,12 +42,27 @@ public sealed class MainActivity : Activity
         public int LineIndex { get; init; }
         public int DisplayIndex { get; init; }
         public required LinearLayout Root { get; init; }
+        public required LinearLayout ContentWrap { get; init; }
         public required TextView Original { get; init; }
         public required TextView Translation { get; init; }
         public required string RawText { get; init; }
         public IReadOnlyList<KaraokeSegment> KaraokeSegments { get; init; } = Array.Empty<KaraokeSegment>();
         public Color CurrentColor { get; set; } = LyricsPalette.DefaultSubdued;
         public ValueAnimator? ColorAnimator { get; set; }
+    }
+
+    [global::System.Runtime.Versioning.SupportedOSPlatform("android33.0")]
+    private sealed class ShareBackCallback : Java.Lang.Object, global::Android.Window.IOnBackInvokedCallback
+    {
+        private readonly WeakReference<MainActivity> _owner;
+
+        public ShareBackCallback(MainActivity owner) => _owner = new WeakReference<MainActivity>(owner);
+
+        public void OnBackInvoked()
+        {
+            if (_owner.TryGetTarget(out var owner))
+                owner.ExitShareSelectionMode(resumeAutoScroll: true);
+        }
     }
 
     private sealed class InsetsListener : Java.Lang.Object, View.IOnApplyWindowInsetsListener
@@ -149,6 +164,8 @@ public sealed class MainActivity : Activity
     private static readonly DecelerateInterpolator ScrollInterpolator = new(1.8f);
     private static readonly DecelerateInterpolator RowEaseInterpolator = new(1.5f);
     private const int RequestCodeBluetoothConnect = 1001;
+    private const int RequestCodeShareLyrics = 1002;
+    private const int MaxShareSelectionCount = 6;
 
     private readonly List<LyricRowHolder> _rows = new();
     private readonly Handler _uiHandler = new(Looper.MainLooper!);
@@ -164,9 +181,13 @@ public sealed class MainActivity : Activity
     private int _lastViewportWidthPx;
     private int _lastViewportHeightPx;
     private bool _manualScroll;
+    private bool _isShareSelecting;
+    private int _shareSelectStart = -1;
+    private int _shareSelectEnd = -1;
     private long _manualScrollAtMs;
     private long _coverGeneration;
     private string? _lastCoverKey;
+    private Bitmap? _coverBitmap;
     private double? _pendingSeekSeconds;
     private long _pendingSeekDeadlineMs;
     private bool _disposed;
@@ -203,6 +224,10 @@ public sealed class MainActivity : Activity
     private LinearLayout _lyricsContainer = null!;
     private TextView _emptyHintView = null!;
     private LinearLayout _resumePill = null!;
+    private LinearLayout _shareHeaderBar = null!;
+    private LinearLayout _shareActionBar = null!;
+    private TextView _shareCountView = null!;
+    private object? _shareBackCallback;
     private LinearLayout _rotateHintPill = null!;
     private TextView _rotateHintLabel = null!;
 
@@ -293,6 +318,15 @@ public sealed class MainActivity : Activity
         FollowActiveLine(animate: false);
     }
 
+    protected override void OnActivityResult(int requestCode, Result resultCode, Intent? data)
+    {
+#pragma warning disable CA1422
+        base.OnActivityResult(requestCode, resultCode, data);
+#pragma warning restore CA1422
+        if (requestCode == RequestCodeShareLyrics && resultCode == Result.Ok)
+            ExitShareSelectionMode(resumeAutoScroll: true);
+    }
+
     public override void OnRequestPermissionsResult(int requestCode, string[] permissions, Permission[] grantResults)
     {
         base.OnRequestPermissionsResult(requestCode, permissions, grantResults);
@@ -324,6 +358,7 @@ public sealed class MainActivity : Activity
         _disposed = true;
         StopUiLoop();
         HideRotateHintPill();
+        UnregisterShareBackCallback();
         try
         {
             _orientationWatcher?.Disable();
@@ -336,6 +371,18 @@ public sealed class MainActivity : Activity
         UnbindEngineEvents();
         base.OnDestroy();
     }
+
+#pragma warning disable CA1422
+    public override void OnBackPressed()
+    {
+        if (_isShareSelecting)
+        {
+            ExitShareSelectionMode(resumeAutoScroll: true);
+            return;
+        }
+        base.OnBackPressed();
+    }
+#pragma warning restore CA1422
 
     private void ApplyChromeSystemBars()
     {
@@ -769,6 +816,10 @@ public sealed class MainActivity : Activity
             Orientation = global::Android.Widget.Orientation.Vertical,
         };
 
+        _shareHeaderBar = BuildShareHeaderBar();
+        panelContent.AddView(_shareHeaderBar, new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent));
+
         _permissionBanner = BuildPermissionBanner();
         panelContent.AddView(_permissionBanner, new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent)
@@ -854,6 +905,14 @@ public sealed class MainActivity : Activity
         _resumePill = BuildResumePill();
         scrollWrap.AddView(_resumePill, new FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.WrapContent, Dp(42))
+        {
+            Gravity = GravityFlags.Bottom | GravityFlags.CenterHorizontal,
+            BottomMargin = Dp(20),
+        });
+
+        _shareActionBar = BuildShareActionBar();
+        scrollWrap.AddView(_shareActionBar, new FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WrapContent, Dp(46))
         {
             Gravity = GravityFlags.Bottom | GravityFlags.CenterHorizontal,
             BottomMargin = Dp(20),
@@ -946,6 +1005,93 @@ public sealed class MainActivity : Activity
             e.Handled = true;
             OpenOffsetDialog();
         };
+        return pill;
+    }
+
+    private LinearLayout BuildShareHeaderBar()
+    {
+        var header = new LinearLayout(this)
+        {
+            Orientation = global::Android.Widget.Orientation.Horizontal,
+            Visibility = ViewStates.Gone,
+            Clickable = true,
+        };
+        header.SetGravity(GravityFlags.CenterVertical);
+        header.SetPadding(Dp(12), Dp(8), Dp(12), Dp(8));
+
+        var backBtn = UiHelpers.IconButton(
+            this,
+            ClassicIconKind.ChevronDown,
+            Color.White,
+            () => ExitShareSelectionMode(resumeAutoScroll: true),
+            sizeDp: 36,
+            iconFraction: 0.60f);
+        header.AddView(backBtn, new LinearLayout.LayoutParams(Dp(36), Dp(36)));
+
+        var titleStack = new LinearLayout(this)
+        {
+            Orientation = global::Android.Widget.Orientation.Vertical,
+        };
+        titleStack.SetGravity(GravityFlags.CenterHorizontal);
+
+        var title = new TextView(this)
+        {
+            Text = "选中歌词",
+            Gravity = GravityFlags.Center,
+        };
+        title.SetIncludeFontPadding(false);
+        title.SetTextColor(Color.White);
+        title.SetTextSize(ComplexUnitType.Sp, 14.5f);
+        UiHelpers.SetFontWeight(title, UiHelpers.FontWeightBold);
+        titleStack.AddView(title, new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WrapContent, ViewGroup.LayoutParams.WrapContent));
+
+        _shareCountView = new TextView(this)
+        {
+            Text = "已选择 0 行歌词",
+            Gravity = GravityFlags.Center,
+        };
+        _shareCountView.SetIncludeFontPadding(false);
+        _shareCountView.SetTextColor(Color.Argb(220, 255, 255, 255));
+        _shareCountView.SetTextSize(ComplexUnitType.Sp, 12f);
+        UiHelpers.SetFontWeight(_shareCountView, UiHelpers.FontWeightRegular);
+        titleStack.AddView(_shareCountView, new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WrapContent, ViewGroup.LayoutParams.WrapContent)
+        {
+            TopMargin = Dp(2),
+        });
+
+        header.AddView(titleStack, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WrapContent, 1f));
+        header.AddView(new View(this), new LinearLayout.LayoutParams(Dp(36), Dp(36)));
+        return header;
+    }
+
+    private LinearLayout BuildShareActionBar()
+    {
+        var pill = new LinearLayout(this)
+        {
+            Orientation = global::Android.Widget.Orientation.Horizontal,
+            Background = UiHelpers.RoundedRect(this, Color.White, 24f),
+            Clickable = true,
+            Focusable = true,
+            Elevation = Dp(6),
+            Visibility = ViewStates.Gone,
+        };
+        pill.SetGravity(GravityFlags.Center);
+        pill.SetPadding(Dp(36), 0, Dp(36), 0);
+        pill.Click += (_, _) => OpenLyricSharePreview();
+
+        var confirmLabel = new TextView(this)
+        {
+            Text = "继续",
+            Gravity = GravityFlags.Center,
+        };
+        confirmLabel.SetIncludeFontPadding(false);
+        confirmLabel.SetTextColor(Color.Rgb(18, 18, 18));
+        confirmLabel.SetTextSize(ComplexUnitType.Sp, 15f);
+        UiHelpers.SetFontWeight(confirmLabel, UiHelpers.FontWeightBold);
+        pill.AddView(confirmLabel);
+
         return pill;
     }
 
@@ -1253,17 +1399,27 @@ public sealed class MainActivity : Activity
             _permissionBanner.LayoutParameters = bannerLp;
         }
 
+        if (_shareHeaderBar is not null)
+        {
+            var headerLeftPad = (_isLandscapeLayout ? 0 : left) + Dp(isTablet ? 20 : 12);
+            var headerRightPad = right + Dp(isTablet ? 20 : 12);
+            _shareHeaderBar.SetPadding(headerLeftPad, top + Dp(isTablet ? 10 : 8), headerRightPad, Dp(isTablet ? 10 : 8));
+        }
+
         if (_topFadeView.LayoutParameters is FrameLayout.LayoutParams fadeLp)
         {
-            fadeLp.Height = _permissionBanner.Visibility == ViewStates.Visible
-                ? Dp(24)
+            fadeLp.Height = _isShareSelecting || _permissionBanner.Visibility == ViewStates.Visible
+                ? Dp(18)
                 : top + Dp(isTablet ? 46 : 36);
             _topFadeView.LayoutParameters = fadeLp;
         }
 
         if (_bottomFadeView.LayoutParameters is FrameLayout.LayoutParams btmFadeLp)
         {
-            btmFadeLp.Height = _isLandscapeLayout ? Math.Max(Dp(isTablet ? 52 : 36), bottom + Dp(28)) : Dp(38);
+            var baseFade = _isShareSelecting ? Dp(isTablet ? 64 : 52) : Dp(isTablet ? 52 : 36);
+            btmFadeLp.Height = _isLandscapeLayout
+                ? Math.Max(baseFade, bottom + Dp(_isShareSelecting ? 36 : 28))
+                : (_isShareSelecting ? Dp(52) : Dp(38));
             _bottomFadeView.LayoutParameters = btmFadeLp;
         }
 
@@ -1271,6 +1427,12 @@ public sealed class MainActivity : Activity
         {
             pillLp.BottomMargin = Dp(isTablet ? 26 : 20) + (_isLandscapeLayout ? bottom : 0);
             _resumePill.LayoutParameters = pillLp;
+        }
+
+        if (_shareActionBar.LayoutParameters is FrameLayout.LayoutParams shareLp)
+        {
+            shareLp.BottomMargin = Dp(isTablet ? 26 : 20) + (_isLandscapeLayout ? bottom : 0);
+            _shareActionBar.LayoutParameters = shareLp;
         }
 
         if (_rotateHintPill.LayoutParameters is FrameLayout.LayoutParams rotHintLp)
@@ -1290,11 +1452,26 @@ public sealed class MainActivity : Activity
             ? ComputeLandscapeConsoleMetrics(_insetTop, _insetBottom).ConsoleWidth
             : 0;
         var (left, right) = ComputeLyricsHorizontalPadding(isTablet, consoleWidth);
-        var top = _permissionBanner.Visibility == ViewStates.Visible
-            ? Dp(14)
-            : _insetTop + Dp(isTablet ? 44 : 32);
+        int top;
+        int bottom;
         var halfView = _lyricsScrollView.Height > 0 ? _lyricsScrollView.Height / 2 : Dp(_isLandscapeLayout ? 160 : 220);
-        var bottom = Math.Max(halfView, _isLandscapeLayout ? _insetBottom + Dp(isTablet ? 60 : 48) : 0);
+
+        if (_isShareSelecting)
+        {
+            var sharePadH = Dp(isTablet ? 16 : 12);
+            left = Math.Max(Dp(isTablet ? 16 : 10) + (_isLandscapeLayout ? 0 : _insetLeft), left - sharePadH);
+            right = Math.Max(Dp(isTablet ? 16 : 10) + _insetRight, right - sharePadH);
+            top = Dp(isTablet ? 10 : 6);
+            bottom = Math.Max(halfView, Dp(isTablet ? 110 : 96) + (_isLandscapeLayout ? _insetBottom : 0));
+        }
+        else
+        {
+            top = _permissionBanner.Visibility == ViewStates.Visible
+                ? Dp(14)
+                : _insetTop + Dp(isTablet ? 44 : 32);
+            bottom = Math.Max(halfView, _isLandscapeLayout ? _insetBottom + Dp(isTablet ? 60 : 48) : 0);
+        }
+
         if (_lyricsContainer.PaddingLeft != left
             || _lyricsContainer.PaddingTop != top
             || _lyricsContainer.PaddingRight != right
@@ -1630,6 +1807,7 @@ public sealed class MainActivity : Activity
 
         if (songChanged)
         {
+            ExitShareSelectionMode(resumeAutoScroll: false);
             _track = track;
             App.ApplyTrackOffsetFor(track);
             _activeLineIndex = -1;
@@ -1720,11 +1898,11 @@ public sealed class MainActivity : Activity
                 }
             }
 
-            if (!_manualScroll)
+            if (!_manualScroll && !_isShareSelecting)
                 FollowActiveLine(animate: true);
         }
 
-        if (_activeLineIndex >= 0 && App.Settings.CharacterKaraoke)
+        if (_activeLineIndex >= 0 && App.Settings.CharacterKaraoke && !_isShareSelecting)
         {
             var activeRow = _rows.FirstOrDefault(r => r.LineIndex == _activeLineIndex);
             if (activeRow is { KaraokeSegments.Count: > 0 })
@@ -1798,6 +1976,12 @@ public sealed class MainActivity : Activity
             };
             rowLayout.SetGravity(GravityFlags.Left);
 
+            var contentWrap = new LinearLayout(this)
+            {
+                Orientation = global::Android.Widget.Orientation.Vertical,
+            };
+            contentWrap.SetGravity(GravityFlags.Left);
+
             var originalView = new TextView(this)
             {
                 Text = mainText,
@@ -1813,26 +1997,46 @@ public sealed class MainActivity : Activity
             UiHelpers.SetFontWeight(translationView, UiHelpers.FontWeightRegular);
             translationView.SetPadding(0, Dp(4), 0, 0);
 
+            contentWrap.AddView(originalView, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent));
+            contentWrap.AddView(translationView, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent));
+
             var holder = new LyricRowHolder
             {
                 LineIndex = i,
                 DisplayIndex = _rows.Count,
                 Root = rowLayout,
+                ContentWrap = contentWrap,
                 Original = originalView,
                 Translation = translationView,
                 RawText = mainText,
                 KaraokeSegments = segments,
             };
-            ApplyRowTypography(holder, mainSize, subSize, mainLineMult, rowGapPx, rowRightPadPx);
+            var effectiveGap = _isShareSelecting ? Dp(isTablet ? 6 : 5) : rowGapPx;
+            var effectiveRight = _isShareSelecting ? 0 : rowRightPadPx;
+            ApplyRowTypography(holder, mainSize, subSize, mainLineMult, effectiveGap, effectiveRight);
 
             var capturedLine = line;
+            rowLayout.LongClickable = true;
             rowLayout.Click += (_, _) =>
             {
-                if (rowLayout.Alpha > 0.05f)
+                if (_isShareSelecting)
+                    ToggleShareRowSelection(holder);
+                else if (rowLayout.Alpha > 0.05f)
                     SeekToLine(capturedLine, lyrics);
             };
-            rowLayout.AddView(originalView);
-            rowLayout.AddView(translationView);
+            rowLayout.LongClick += (_, e) =>
+            {
+                if (!_isShareSelecting && rowLayout.Alpha <= 0.05f) return;
+                e.Handled = true;
+                if (_isShareSelecting)
+                    ToggleShareRowSelection(holder);
+                else
+                    EnterShareSelectionMode(holder);
+            };
+            rowLayout.AddView(contentWrap, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent));
 
             _lyricsContainer.AddView(rowLayout, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent));
@@ -1905,17 +2109,33 @@ public sealed class MainActivity : Activity
     private void RefreshLyricsTypographyIfNeeded()
     {
         if (_disposed || _renderedLyrics is null || _rows.Count == 0) return;
-        var (mainSize, subSize, mainLineMult, rowGapPx, rowRightPadPx) = ComputeLyricsTypography(_renderedLyrics, IsTablet());
+        var isTablet = IsTablet();
+        var (mainSize, subSize, mainLineMult, rowGapPx, rowRightPadPx) = ComputeLyricsTypography(_renderedLyrics, isTablet);
         if (MathF.Abs(mainSize - _appliedLyricsMainSp) < 0.5f && Math.Abs(rowGapPx - _appliedLyricsGapPx) < Dp(2))
             return;
 
         _appliedLyricsMainSp = mainSize;
         _appliedLyricsGapPx = rowGapPx;
+        var effectiveGap = _isShareSelecting ? Dp(isTablet ? 6 : 5) : rowGapPx;
+        var effectiveRight = _isShareSelecting ? 0 : rowRightPadPx;
         foreach (var row in _rows)
-            ApplyRowTypography(row, mainSize, subSize, mainLineMult, rowGapPx, rowRightPadPx);
+            ApplyRowTypography(row, mainSize, subSize, mainLineMult, effectiveGap, effectiveRight);
 
-        if (!_manualScroll)
+        if (!_manualScroll && !_isShareSelecting)
             FollowActiveLine(animate: false);
+    }
+
+    private void ApplyShareRowSpacing(bool compact)
+    {
+        if (_disposed || _renderedLyrics is null || _rows.Count == 0) return;
+        var isTablet = IsTablet();
+        var (mainSize, subSize, mainLineMult, rowGapPx, rowRightPadPx) = ComputeLyricsTypography(_renderedLyrics, isTablet);
+        _appliedLyricsMainSp = mainSize;
+        _appliedLyricsGapPx = rowGapPx;
+        var effectiveGap = compact ? Dp(isTablet ? 6 : 5) : rowGapPx;
+        var effectiveRight = compact ? 0 : rowRightPadPx;
+        foreach (var row in _rows)
+            ApplyRowTypography(row, mainSize, subSize, mainLineMult, effectiveGap, effectiveRight);
     }
 
     private void RebuildTypographySizing()
@@ -1980,8 +2200,24 @@ public sealed class MainActivity : Activity
         return -1;
     }
 
+    private int ShareSelectedCount =>
+        _shareSelectStart >= 0 && _shareSelectEnd >= _shareSelectStart ? (_shareSelectEnd - _shareSelectStart + 1) : 0;
+
+    private bool IsRowShareSelected(int displayIndex) =>
+        _isShareSelecting && _shareSelectStart >= 0 && displayIndex >= _shareSelectStart && displayIndex <= _shareSelectEnd;
+
+    private bool IsRowShareSuggestAdjacent(int displayIndex) =>
+        _isShareSelecting && _shareSelectStart >= 0 && (displayIndex == _shareSelectStart - 1 || displayIndex == _shareSelectEnd + 1);
+
     private float ComputeRowTargetAlpha(LyricRowHolder row, int activeDisplayIndex, bool isActive, bool isPast)
     {
+        if (_isShareSelecting)
+        {
+            if (IsRowShareSelected(row.DisplayIndex)) return 1.0f;
+            if (IsRowShareSuggestAdjacent(row.DisplayIndex)) return 0.86f;
+            return 0.68f;
+        }
+
         if (_manualScroll)
             return isActive ? 1.0f : (isPast ? 0.45f : 0.72f);
 
@@ -2056,19 +2292,50 @@ public sealed class MainActivity : Activity
 
     private void ApplyRowVisualState(LyricRowHolder row, bool animate, int activeDisplayIndex)
     {
+        var isTablet = IsTablet();
         var isActive = row.LineIndex == _activeLineIndex;
         var isPast = _activeLineIndex >= 0 && row.LineIndex < _activeLineIndex;
+        var isShareSelected = IsRowShareSelected(row.DisplayIndex);
+        var isShareSuggest = !isShareSelected && IsRowShareSuggestAdjacent(row.DisplayIndex);
 
-        var targetColor = isActive
-            ? Color.White
-            : isPast
-                ? LyricsPalette.BlendColor(_subdued, _background, 0.50)
-                : _subdued;
+        var suggestInk = LyricsPalette.BlendColor(_subdued, Color.White, 0.35);
+        var targetColor = _isShareSelecting
+            ? (isShareSelected ? Color.White : isShareSuggest ? suggestInk : _subdued)
+            : isActive
+                ? Color.White
+                : isPast
+                    ? LyricsPalette.BlendColor(_subdued, _background, 0.50)
+                    : _subdued;
         var targetAlpha = ComputeRowTargetAlpha(row, activeDisplayIndex, isActive, isPast);
-        var targetScale = isActive ? 1.045f : 1.0f;
-        row.Root.Clickable = targetAlpha > 0.05f;
+        var targetScale = _isShareSelecting ? 1.0f : (isActive ? 1.045f : 1.0f);
+        var canInteract = _isShareSelecting || targetAlpha > 0.05f;
+        row.Root.Clickable = canInteract;
+        row.Root.LongClickable = canInteract;
 
-        if (!isActive && row.KaraokeSegments.Count > 0)
+        if (_isShareSelecting)
+        {
+            var padH = Dp(isTablet ? 16 : 12);
+            var padV = Dp(isTablet ? 12 : 9);
+            row.ContentWrap.SetPadding(padH, padV, padH, padV);
+            var pillRadius = isTablet ? 20f : 17f;
+            var selectedCardFill = LyricsPalette.BlendColor(_background, _subdued, 0.22);
+            var selectedCardBorder = Color.Argb(96, _subdued.R, _subdued.G, _subdued.B);
+            var suggestCardFill = Color.Argb(22, _subdued.R, _subdued.G, _subdued.B);
+            row.ContentWrap.Background = isShareSelected
+                ? UiHelpers.RoundedRect(this, selectedCardFill, pillRadius, selectedCardBorder, 1f)
+                : isShareSuggest
+                    ? UiHelpers.RoundedRect(this, suggestCardFill, pillRadius)
+                    : null;
+        }
+        else
+        {
+            if (row.ContentWrap.PaddingLeft != 0 || row.ContentWrap.PaddingTop != 0)
+                row.ContentWrap.SetPadding(0, 0, 0, 0);
+            if (row.ContentWrap.Background is not null)
+                row.ContentWrap.Background = null;
+        }
+
+        if ((_isShareSelecting || !isActive) && row.KaraokeSegments.Count > 0)
             row.Original.Text = row.RawText;
 
         row.Root.PivotX = 0f;
@@ -2195,7 +2462,8 @@ public sealed class MainActivity : Activity
         if (_manualScroll) return;
         _manualScroll = true;
         _scrollAnimator?.Cancel();
-        _resumePill.Visibility = ViewStates.Visible;
+        if (!_isShareSelecting)
+            _resumePill.Visibility = ViewStates.Visible;
         RefreshAllRowVisualStates(animate: true);
         StartUiLoopIfNeeded();
     }
@@ -2211,10 +2479,217 @@ public sealed class MainActivity : Activity
     private void AutoSyncIfIdle()
     {
         var seconds = App.Settings.AutoSyncSeconds;
-        if (seconds <= 0 || !_manualScroll || _rows.Count == 0) return;
+        if (seconds <= 0 || !_manualScroll || _isShareSelecting || _rows.Count == 0) return;
         if (SystemClock.UptimeMillis() - _manualScrollAtMs < seconds * 1000L) return;
         ResumeAutoScroll();
         FollowActiveLine(animate: true);
+    }
+
+    private void EnterShareSelectionMode(LyricRowHolder initialRow)
+    {
+        if (_disposed || _rows.Count == 0 || _renderedLyrics is null) return;
+
+        var anchorOffset = initialRow.Root.Top - _lyricsScrollView.ScrollY;
+
+        AudioOutputSheetDialog.DismissIfShowing();
+        OffsetSheetDialog.DismissIfShowing();
+        HideRotateHintPill();
+        _scrollAnimator?.Cancel();
+        _manualScroll = false;
+        _resumePill.Visibility = ViewStates.Gone;
+
+        _isShareSelecting = true;
+        _shareSelectStart = initialRow.DisplayIndex;
+        _shareSelectEnd = initialRow.DisplayIndex;
+
+        initialRow.Root.PerformHapticFeedback(FeedbackConstants.LongPress);
+        RegisterShareBackCallback();
+        UpdateShareSelectionChrome();
+        ApplySystemBarInsets(_insetLeft, _insetTop, _insetRight, _insetBottom);
+        ApplyShareRowSpacing(compact: true);
+        RefreshAllRowVisualStates(animate: true);
+
+        initialRow.Root.Post(() =>
+        {
+            if (_disposed || !_isShareSelecting) return;
+            var headerOffset = _shareHeaderBar.Height > 0 ? _shareHeaderBar.Height : Dp(56);
+            var targetY = Math.Max(0, initialRow.Root.Top - Math.Max(Dp(24), anchorOffset - headerOffset));
+            _lyricsScrollView.ScrollTo(0, targetY);
+        });
+    }
+
+    private void ToggleShareRowSelection(LyricRowHolder row)
+    {
+        if (!_isShareSelecting) return;
+
+        var idx = row.DisplayIndex;
+        var prevStart = _shareSelectStart;
+        var prevEnd = _shareSelectEnd;
+        var count = ShareSelectedCount;
+
+        if (count == 0)
+        {
+            _shareSelectStart = idx;
+            _shareSelectEnd = idx;
+        }
+        else if (idx == _shareSelectStart - 1)
+        {
+            if (count >= MaxShareSelectionCount)
+            {
+                Toast.MakeText(this, $"最多可选择 {MaxShareSelectionCount} 行歌词", ToastLength.Short)?.Show();
+                return;
+            }
+            _shareSelectStart = idx;
+        }
+        else if (idx == _shareSelectEnd + 1)
+        {
+            if (count >= MaxShareSelectionCount)
+            {
+                Toast.MakeText(this, $"最多可选择 {MaxShareSelectionCount} 行歌词", ToastLength.Short)?.Show();
+                return;
+            }
+            _shareSelectEnd = idx;
+        }
+        else if (idx == _shareSelectStart && idx == _shareSelectEnd)
+        {
+            _shareSelectStart = -1;
+            _shareSelectEnd = -1;
+        }
+        else if (idx == _shareSelectStart)
+        {
+            _shareSelectStart++;
+        }
+        else if (idx == _shareSelectEnd)
+        {
+            _shareSelectEnd--;
+        }
+        else
+        {
+            // 点选非相邻行或内部行时，切换为以该行重新起选（与 Spotify 交互一致）
+            _shareSelectStart = idx;
+            _shareSelectEnd = idx;
+        }
+
+        UpdateShareSelectionChrome();
+        var activeDisplayIndex = ResolveDisplayIndexForLine(_activeLineIndex);
+        foreach (var item in _rows)
+        {
+            var wasAffected = prevStart >= 0 && item.DisplayIndex >= prevStart - 1 && item.DisplayIndex <= prevEnd + 1;
+            var isAffected = _shareSelectStart >= 0 && item.DisplayIndex >= _shareSelectStart - 1 && item.DisplayIndex <= _shareSelectEnd + 1;
+            if (wasAffected || isAffected)
+                ApplyRowVisualState(item, animate: true, activeDisplayIndex);
+        }
+    }
+
+    private void ExitShareSelectionMode(bool resumeAutoScroll)
+    {
+        if (!_isShareSelecting && _shareSelectStart < 0) return;
+
+        _isShareSelecting = false;
+        _shareSelectStart = -1;
+        _shareSelectEnd = -1;
+        UnregisterShareBackCallback();
+
+        if (_shareHeaderBar is not null)
+            _shareHeaderBar.Visibility = ViewStates.Gone;
+        if (_shareActionBar is not null)
+            _shareActionBar.Visibility = ViewStates.Gone;
+
+        if (resumeAutoScroll)
+        {
+            _manualScroll = false;
+            _resumePill.Visibility = ViewStates.Gone;
+        }
+
+        ApplySystemBarInsets(_insetLeft, _insetTop, _insetRight, _insetBottom);
+        ApplyShareRowSpacing(compact: false);
+        RefreshAllRowVisualStates(animate: true);
+        if (resumeAutoScroll)
+        {
+            RefreshFrameTick();
+            FollowActiveLine(animate: true);
+        }
+    }
+
+    private void UpdateShareSelectionChrome()
+    {
+        var count = ShareSelectedCount;
+        _shareHeaderBar.Visibility = _isShareSelecting ? ViewStates.Visible : ViewStates.Gone;
+        _shareActionBar.Visibility = _isShareSelecting ? ViewStates.Visible : ViewStates.Gone;
+        if (_isShareSelecting)
+        {
+            var pillBg = LyricsPalette.BlendColor(Color.White, _subdued, 0.16);
+            _shareActionBar.Background = UiHelpers.RoundedRect(this, pillBg, 24f);
+        }
+        _shareCountView.Text = $"已选择 {count} 行歌词";
+        var canConfirm = count > 0;
+        _shareActionBar.Enabled = canConfirm;
+        _shareActionBar.Alpha = canConfirm ? 1f : 0.45f;
+    }
+
+    private void OpenLyricSharePreview()
+    {
+        if (!_isShareSelecting || _renderedLyrics is null || ShareSelectedCount == 0)
+            return;
+
+        var selectedLines = _rows
+            .Where(r => r.DisplayIndex >= _shareSelectStart && r.DisplayIndex <= _shareSelectEnd)
+            .OrderBy(r => r.DisplayIndex)
+            .Select(r =>
+            {
+                string? tr = null;
+                if (r.LineIndex >= 0 && r.LineIndex < _renderedLyrics.Lines.Count)
+                    tr = ResolveLineTranslation(_renderedLyrics.Lines[r.LineIndex]);
+                return new ShareLyricLine(r.RawText, tr);
+            })
+            .ToList();
+
+        if (selectedLines.Count == 0) return;
+
+        LyricShareActivity.Launch(
+            this,
+            RequestCodeShareLyrics,
+            new LyricSharePayload(
+                _track?.Title,
+                _track?.Artist,
+                _coverBitmap,
+                _coverBackground,
+                selectedLines,
+                App.Settings.ShowTranslation));
+    }
+
+    private void RegisterShareBackCallback()
+    {
+        if (!OperatingSystem.IsAndroidVersionAtLeast(33)) return;
+        RegisterShareBackCallbackApi33();
+    }
+
+    private void UnregisterShareBackCallback()
+    {
+        if (!OperatingSystem.IsAndroidVersionAtLeast(33)) return;
+        UnregisterShareBackCallbackApi33();
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    [global::System.Runtime.Versioning.SupportedOSPlatform("android33.0")]
+    private void RegisterShareBackCallbackApi33()
+    {
+        if (_shareBackCallback is not null) return;
+        var cb = new ShareBackCallback(this);
+        _shareBackCallback = cb;
+        OnBackInvokedDispatcher.RegisterOnBackInvokedCallback(
+            global::Android.Window.IOnBackInvokedDispatcher.PriorityDefault,
+            cb);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    [global::System.Runtime.Versioning.SupportedOSPlatform("android33.0")]
+    private void UnregisterShareBackCallbackApi33()
+    {
+        if (_shareBackCallback is not ShareBackCallback cb) return;
+        _shareBackCallback = null;
+        try { OnBackInvokedDispatcher.UnregisterOnBackInvokedCallback(cb); }
+        catch { }
     }
 
     private async Task SeekToSecondsAsync(double seconds)
@@ -2245,6 +2720,7 @@ public sealed class MainActivity : Activity
         if (track is null)
         {
             _lastCoverKey = null;
+            _coverBitmap = null;
             _coverView.SetImageBitmap(null);
             _coverBackground = LyricsPalette.DefaultBackground;
             _coverSubdued = LyricsPalette.DefaultSubdued;
@@ -2255,6 +2731,7 @@ public sealed class MainActivity : Activity
         if (resetBeforeLoad)
         {
             _lastCoverKey = null;
+            _coverBitmap = null;
             _coverView.SetImageBitmap(null);
             _coverBackground = LyricsPalette.DefaultBackground;
             _coverSubdued = LyricsPalette.DefaultSubdued;
@@ -2316,6 +2793,7 @@ public sealed class MainActivity : Activity
 
     private void ApplyCoverBitmap(Bitmap bitmap)
     {
+        _coverBitmap = bitmap;
         _coverView.SetImageBitmap(bitmap);
         (_coverBackground, _coverSubdued) = LyricsPalette.FromCover(bitmap);
         ApplyActivePalette(animate: true);

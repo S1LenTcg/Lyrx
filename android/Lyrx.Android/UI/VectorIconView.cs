@@ -22,6 +22,12 @@ internal enum ClassicIconKind
     PhoneSpeaker,
     Headphones,
     Speaker,
+    Check,
+    Download,
+    Share,
+    ArrowLeft,
+    Image,
+    Bilingual,
 }
 
 /// <summary>
@@ -230,6 +236,75 @@ internal static class ClassicIconRenderer
                 path.Reset();
                 path.AddArc(new RectF(12.2f, 8.2f, 16.6f, 15.8f), -52f, 104f);
                 path.AddArc(new RectF(13.6f, 5.4f, 20.6f, 18.6f), -54f, 108f);
+                canvas.DrawPath(path, strokePaint);
+                break;
+
+            case ClassicIconKind.Check:
+                strokePaint.StrokeWidth = 2.4f;
+                path.MoveTo(5.2f, 12.4f);
+                path.LineTo(9.8f, 17.0f);
+                path.LineTo(18.8f, 7.6f);
+                canvas.DrawPath(path, strokePaint);
+                break;
+
+            case ClassicIconKind.Download:
+                strokePaint.StrokeWidth = 2.0f;
+                canvas.DrawLine(12.0f, 4.2f, 12.0f, 15.2f, strokePaint);
+                path.MoveTo(7.4f, 11.2f);
+                path.LineTo(12.0f, 15.8f);
+                path.LineTo(16.6f, 11.2f);
+                canvas.DrawPath(path, strokePaint);
+                canvas.DrawLine(5.0f, 19.2f, 19.0f, 19.2f, strokePaint);
+                break;
+
+            case ClassicIconKind.Share:
+                strokePaint.StrokeWidth = 1.9f;
+                canvas.DrawCircle(17.2f, 5.6f, 2.5f, strokePaint);
+                canvas.DrawCircle(6.4f, 12.0f, 2.5f, strokePaint);
+                canvas.DrawCircle(17.2f, 18.4f, 2.5f, strokePaint);
+                canvas.DrawLine(8.6f, 10.7f, 15.0f, 6.9f, strokePaint);
+                canvas.DrawLine(8.6f, 13.3f, 15.0f, 17.1f, strokePaint);
+                break;
+
+            case ClassicIconKind.ArrowLeft:
+                strokePaint.StrokeWidth = 2.1f;
+                canvas.DrawLine(19.0f, 12.0f, 5.5f, 12.0f, strokePaint);
+                path.MoveTo(11.6f, 5.8f);
+                path.LineTo(5.4f, 12.0f);
+                path.LineTo(11.6f, 18.2f);
+                canvas.DrawPath(path, strokePaint);
+                break;
+
+            case ClassicIconKind.Image:
+                strokePaint.StrokeWidth = 1.85f;
+                canvas.DrawRoundRect(new RectF(3.5f, 4.2f, 20.5f, 19.8f), 2.4f, 2.4f, strokePaint);
+                canvas.DrawCircle(8.4f, 9.2f, 1.35f, fillPaint);
+                path.MoveTo(4.6f, 17.5f);
+                path.LineTo(9.4f, 12.8f);
+                path.LineTo(12.6f, 15.6f);
+                path.LineTo(15.6f, 11.8f);
+                path.LineTo(19.4f, 17.5f);
+                path.Close();
+                canvas.DrawPath(path, fillPaint);
+                break;
+
+            case ClassicIconKind.Bilingual:
+                strokePaint.StrokeWidth = 1.95f;
+                // 极简双语切换徽标：左上隐约叠层代表原语言，右下简洁框 + A 代表译文（无汉字、无多余箭头）
+                path.MoveTo(4.0f, 13.8f);
+                path.LineTo(4.0f, 6.6f);
+                path.QuadTo(4.0f, 4.2f, 6.4f, 4.2f);
+                path.LineTo(14.0f, 4.2f);
+                canvas.DrawPath(path, strokePaint);
+
+                canvas.DrawRoundRect(new RectF(7.8f, 7.8f, 20.0f, 20.0f), 2.8f, 2.8f, strokePaint);
+
+                path.Reset();
+                path.MoveTo(11.1f, 16.8f);
+                path.LineTo(13.9f, 10.9f);
+                path.LineTo(16.7f, 16.8f);
+                path.MoveTo(11.9f, 15.1f);
+                path.LineTo(15.9f, 15.1f);
                 canvas.DrawPath(path, strokePaint);
                 break;
         }

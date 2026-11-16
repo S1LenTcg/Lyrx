@@ -39,6 +39,7 @@ internal sealed class RoundedOutlineProvider : ViewOutlineProvider
 internal static class UiHelpers
 {
     public const int FontWeightRegular = 400;
+    public const int FontWeightMedium = 500;
     public const int FontWeightSemiBold = 600;
     public const int FontWeightBold = 700;
 
@@ -53,6 +54,7 @@ internal static class UiHelpers
     private static Typeface? _tfUiBold;
     private static Typeface? _tfTitleBold;
     private static Typeface? _tfFallbackRegular;
+    private static Typeface? _tfFallbackMedium;
     private static Typeface? _tfFallbackSemiBold;
     private static Typeface? _tfFallbackBold;
 
@@ -112,13 +114,37 @@ internal static class UiHelpers
         }
     }
 
+    /// <summary>
+    /// 直接解析系统默认无衬线字体的指定字重（如 400 Regular / 500 Medium），
+    /// 避免绑定拉丁品牌字体导致中英文回退与粗细不协调。
+    /// </summary>
+    public static Typeface? ResolveSystemFontWeight(int weight)
+    {
+        try
+        {
+            if (OperatingSystem.IsAndroidVersionAtLeast(28))
+                return CreateSystemWeightTypefaceApi28(weight);
+
+            if (weight >= FontWeightSemiBold)
+                return Typeface.Create(Typeface.SansSerif, TypefaceStyle.Bold);
+            if (weight >= FontWeightMedium)
+                return Typeface.Create("sans-serif-medium", TypefaceStyle.Normal) ?? Typeface.SansSerif;
+            return Typeface.SansSerif;
+        }
+        catch
+        {
+            return Typeface.Default;
+        }
+    }
+
     [MethodImpl(MethodImplOptions.NoInlining)]
     [global::System.Runtime.Versioning.SupportedOSPlatform("android28.0")]
     private static Typeface? CreateSystemWeightTypefaceApi28(int weight) => weight switch
     {
-        >= FontWeightBold => _tfFallbackBold ??= Typeface.Create(Typeface.Default, FontWeightBold, false),
-        >= FontWeightSemiBold => _tfFallbackSemiBold ??= Typeface.Create(Typeface.Default, FontWeightSemiBold, false),
-        _ => _tfFallbackRegular ??= Typeface.Create(Typeface.Default, FontWeightRegular, false),
+        >= FontWeightBold => _tfFallbackBold ??= Typeface.Create(Typeface.SansSerif, FontWeightBold, false),
+        >= FontWeightSemiBold => _tfFallbackSemiBold ??= Typeface.Create(Typeface.SansSerif, FontWeightSemiBold, false),
+        >= FontWeightMedium => _tfFallbackMedium ??= Typeface.Create(Typeface.SansSerif, FontWeightMedium, false),
+        _ => _tfFallbackRegular ??= Typeface.Create(Typeface.SansSerif, FontWeightRegular, false),
     };
 
     private static Typeface? ResolveCustomTypeface(AssetManager? assets, int weight, bool useTitleFont)
