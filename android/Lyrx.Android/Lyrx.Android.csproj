@@ -9,11 +9,20 @@
     <RootNamespace>Musebase.Android</RootNamespace>
     <AssemblyName>Lyrx.Android</AssemblyName>
     <ApplicationId>app.lyrx.android</ApplicationId>
-    <ApplicationVersion>1</ApplicationVersion>
-    <ApplicationDisplayVersion>1.0.0</ApplicationDisplayVersion>
+    <ApplicationVersion>2</ApplicationVersion>
+    <ApplicationDisplayVersion>1.0.1</ApplicationDisplayVersion>
     <ApplicationTitle>Lyrx</ApplicationTitle>
     <AndroidPackageFormat>apk</AndroidPackageFormat>
     <AndroidStoreUncompressedFileExtensions>$(AndroidStoreUncompressedFileExtensions);.ttf;.otf</AndroidStoreUncompressedFileExtensions>
+  </PropertyGroup>
+
+  <PropertyGroup Condition=" '$(Configuration)' == 'Release' ">
+    <!-- 仅输出真机 arm64-v8a 架构，并关闭 AOT 以显著缩小正式包体积 -->
+    <RuntimeIdentifiers>android-arm64</RuntimeIdentifiers>
+    <!-- 发布裁剪使用上面的 Android 架构，避免 .NET SDK 附加构建主机的架构。 -->
+    <UseDefaultPublishRuntimeIdentifier>false</UseDefaultPublishRuntimeIdentifier>
+    <RunAOTCompilation>false</RunAOTCompilation>
+    <AndroidEnableProfiledAot>false</AndroidEnableProfiledAot>
   </PropertyGroup>
 
   <ItemGroup>

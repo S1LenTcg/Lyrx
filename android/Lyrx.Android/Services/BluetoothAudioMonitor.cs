@@ -50,6 +50,8 @@ public sealed class BluetoothAudioMonitor : IDisposable
     private IBluetoothProfile? _hearingAidProxy;
     private IBluetoothProfile? _leAudioProxy;
 
+    private string? _lastActiveOutputKey;
+
     public bool IsBluetoothAudioConnected { get; private set; }
     public string? ConnectedDeviceName { get; private set; }
 
@@ -159,17 +161,23 @@ public sealed class BluetoothAudioMonitor : IDisposable
         try
         {
             EnsureBluetoothProxies();
-            var (connected, name) = ResolveConnectedBluetoothAudio();
+            var outputDevices = _audioManager?.GetDevices(GetDevicesTargets.Outputs)
+                ?? Array.Empty<AudioDeviceInfo>();
+            var (connected, name) = ResolveConnectedBluetoothAudio(outputDevices);
+            var activeOutput = ResolveActiveOutputFromDevices(outputDevices, GetLocalDeviceDisplayName());
+            var activeKey = $"{(int)activeOutput.Kind}:{activeOutput.Name}";
 
             var stateChanged = IsBluetoothAudioConnected != connected
-                || !string.Equals(ConnectedDeviceName, name, StringComparison.Ordinal);
+                || !string.Equals(ConnectedDeviceName, name, StringComparison.Ordinal)
+                || !string.Equals(_lastActiveOutputKey, activeKey, StringComparison.Ordinal);
             IsBluetoothAudioConnected = connected;
             ConnectedDeviceName = name;
+            _lastActiveOutputKey = activeKey;
 
             if (stateChanged)
             {
-                AndroidLog.Write($"[bluetooth] 音频输出设备: {(connected ? name ?? "(未知蓝牙设备)" : "(未连接)")}");
-                ConnectedDeviceChanged?.Invoke(name);
+                AndroidLog.Write($"[bluetooth] 音频输出设备: {(connected ? name ?? "(未知蓝牙设备)" : activeOutput.Name)}");
+                ConnectedDeviceChanged?.Invoke(activeOutput.Name);
             }
         }
         catch (Exception ex)
@@ -214,10 +222,78 @@ public sealed class BluetoothAudioMonitor : IDisposable
         }
     }
 
+    public string GetLocalDeviceDisplayName()
+    {
+        try
+        {
+            var cr = _context.ContentResolver;
+            if (cr is not null)
+            {
+                var globalName = global::Android.Provider.Settings.Global.GetString(
+                    cr,
+                    global::Android.Provider.Settings.Global.DeviceName);
+                if (!string.IsNullOrWhiteSpace(globalName))
+                    return globalName.Trim();
+
+                var legacyBtName = global::Android.Provider.Settings.Secure.GetString(cr, "bluetooth_name");
+                if (!string.IsNullOrWhiteSpace(legacyBtName))
+                    return legacyBtName.Trim();
+            }
+        }
+        catch
+        {
+            // 部分系统权限限制读取设置项时回退至硬件型号
+        }
+
+        try
+        {
+            var model = Build.Model?.Trim();
+            if (!string.IsNullOrWhiteSpace(model))
+                return model;
+        }
+        catch { }
+
+        return "本机扬声器";
+    }
+
+    public AudioOutputEntry GetCurrentActiveOutput()
+    {
+        var localName = GetLocalDeviceDisplayName();
+        try
+        {
+            var outputDevices = _audioManager?.GetDevices(GetDevicesTargets.Outputs)
+                ?? Array.Empty<AudioDeviceInfo>();
+            return ResolveActiveOutputFromDevices(outputDevices, localName);
+        }
+        catch
+        {
+            if (IsBluetoothAudioConnected && !string.IsNullOrWhiteSpace(ConnectedDeviceName))
+                return new AudioOutputEntry(ConnectedDeviceName!, AudioOutputKind.Bluetooth, IsActive: true);
+            return new AudioOutputEntry(localName, AudioOutputKind.PhoneSpeaker, IsActive: true);
+        }
+    }
+
+    private AudioOutputEntry ResolveActiveOutputFromDevices(AudioDeviceInfo[] outputDevices, string localName)
+    {
+        var activeBt = FindActiveBluetoothOutput(outputDevices);
+        if (activeBt is not null)
+        {
+            var activeBtName = ResolveDeviceDisplayName(activeBt) ?? ConnectedDeviceName ?? "蓝牙音频设备";
+            return new AudioOutputEntry(activeBtName, AudioOutputKind.Bluetooth, IsActive: true);
+        }
+
+        var activeWired = FindActiveWiredOutput(outputDevices);
+        if (activeWired is not null)
+            return new AudioOutputEntry(ResolveWiredDisplayName(activeWired), AudioOutputKind.WiredOrUsb, IsActive: true);
+
+        return new AudioOutputEntry(localName, AudioOutputKind.PhoneSpeaker, IsActive: true);
+    }
+
     public IReadOnlyList<AudioOutputEntry> GetAvailableOutputs()
     {
         var inactive = new List<AudioOutputEntry>();
         AudioOutputEntry? activeEntry = null;
+        var localName = GetLocalDeviceDisplayName();
 
         try
         {
@@ -264,7 +340,7 @@ public sealed class BluetoothAudioMonitor : IDisposable
                     inactive.Add(new AudioOutputEntry(wName, AudioOutputKind.WiredOrUsb, IsActive: false));
             }
 
-            var speakerEntry = new AudioOutputEntry("手机扬声器", AudioOutputKind.PhoneSpeaker, IsActive: activeEntry is null);
+            var speakerEntry = new AudioOutputEntry(localName, AudioOutputKind.PhoneSpeaker, IsActive: activeEntry is null);
             if (activeEntry is null)
                 activeEntry = speakerEntry;
             else
@@ -275,12 +351,12 @@ public sealed class BluetoothAudioMonitor : IDisposable
             AndroidLog.Write($"[audio] 枚举播放设备失败: {ex.Message}");
             if (!string.IsNullOrWhiteSpace(ConnectedDeviceName))
             {
-                inactive.Add(new AudioOutputEntry("手机扬声器", AudioOutputKind.PhoneSpeaker, IsActive: false));
+                inactive.Add(new AudioOutputEntry(localName, AudioOutputKind.PhoneSpeaker, IsActive: false));
                 activeEntry ??= new AudioOutputEntry(ConnectedDeviceName!, AudioOutputKind.Bluetooth, IsActive: true);
             }
             else
             {
-                activeEntry ??= new AudioOutputEntry("手机扬声器", AudioOutputKind.PhoneSpeaker, IsActive: true);
+                activeEntry ??= new AudioOutputEntry(localName, AudioOutputKind.PhoneSpeaker, IsActive: true);
             }
         }
 
@@ -502,14 +578,13 @@ public sealed class BluetoothAudioMonitor : IDisposable
         }
     }
 
-    private (bool Connected, string? DeviceName) ResolveConnectedBluetoothAudio()
+    private (bool Connected, string? DeviceName) ResolveConnectedBluetoothAudio(AudioDeviceInfo[] outputDevices)
     {
         if (_audioManager is null)
             return (false, null);
 
         try
         {
-            var outputDevices = _audioManager.GetDevices(GetDevicesTargets.Outputs) ?? Array.Empty<AudioDeviceInfo>();
             var bluetoothDevice = FindActiveBluetoothOutput(outputDevices);
             if (bluetoothDevice is null)
                 return (false, null);

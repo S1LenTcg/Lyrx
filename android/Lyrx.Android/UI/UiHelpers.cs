@@ -39,6 +39,7 @@ internal sealed class RoundedOutlineProvider : ViewOutlineProvider
 internal static class UiHelpers
 {
     public const int FontWeightRegular = 400;
+    public const int FontWeightMedium = 500;
     public const int FontWeightSemiBold = 600;
     public const int FontWeightBold = 700;
 
@@ -53,6 +54,7 @@ internal static class UiHelpers
     private static Typeface? _tfUiBold;
     private static Typeface? _tfTitleBold;
     private static Typeface? _tfFallbackRegular;
+    private static Typeface? _tfFallbackMedium;
     private static Typeface? _tfFallbackSemiBold;
     private static Typeface? _tfFallbackBold;
 
@@ -112,13 +114,37 @@ internal static class UiHelpers
         }
     }
 
+    /// <summary>
+    /// 直接解析系统默认无衬线字体的指定字重（如 400 Regular / 500 Medium），
+    /// 避免绑定拉丁品牌字体导致中英文回退与粗细不协调。
+    /// </summary>
+    public static Typeface? ResolveSystemFontWeight(int weight)
+    {
+        try
+        {
+            if (OperatingSystem.IsAndroidVersionAtLeast(28))
+                return CreateSystemWeightTypefaceApi28(weight);
+
+            if (weight >= FontWeightSemiBold)
+                return Typeface.Create(Typeface.SansSerif, TypefaceStyle.Bold);
+            if (weight >= FontWeightMedium)
+                return Typeface.Create("sans-serif-medium", TypefaceStyle.Normal) ?? Typeface.SansSerif;
+            return Typeface.SansSerif;
+        }
+        catch
+        {
+            return Typeface.Default;
+        }
+    }
+
     [MethodImpl(MethodImplOptions.NoInlining)]
     [global::System.Runtime.Versioning.SupportedOSPlatform("android28.0")]
     private static Typeface? CreateSystemWeightTypefaceApi28(int weight) => weight switch
     {
-        >= FontWeightBold => _tfFallbackBold ??= Typeface.Create(Typeface.Default, FontWeightBold, false),
-        >= FontWeightSemiBold => _tfFallbackSemiBold ??= Typeface.Create(Typeface.Default, FontWeightSemiBold, false),
-        _ => _tfFallbackRegular ??= Typeface.Create(Typeface.Default, FontWeightRegular, false),
+        >= FontWeightBold => _tfFallbackBold ??= Typeface.Create(Typeface.SansSerif, FontWeightBold, false),
+        >= FontWeightSemiBold => _tfFallbackSemiBold ??= Typeface.Create(Typeface.SansSerif, FontWeightSemiBold, false),
+        >= FontWeightMedium => _tfFallbackMedium ??= Typeface.Create(Typeface.SansSerif, FontWeightMedium, false),
+        _ => _tfFallbackRegular ??= Typeface.Create(Typeface.SansSerif, FontWeightRegular, false),
     };
 
     private static Typeface? ResolveCustomTypeface(AssetManager? assets, int weight, bool useTitleFont)
@@ -372,5 +398,46 @@ internal static class UiHelpers
             ViewGroup.LayoutParams.MatchParent));
         host.Click += (_, _) => onClick();
         return host;
+    }
+
+    public readonly record struct HorizontalAnchorBounds(int Left, int Right, bool ConstrainedToContainer);
+
+    /// <summary>
+    /// 基于当前窗口实际可用短边判断是否为平板（Pad / 折叠屏展开态）布局，兼容分屏缩小场景。
+    /// </summary>
+    public static bool IsTabletLayout(Context? ctx)
+    {
+        var res = ctx?.Resources;
+        var dm = res?.DisplayMetrics;
+        if (dm is not null && dm.Density > 0f && dm.WidthPixels > 0 && dm.HeightPixels > 0)
+        {
+            var minDimDp = Math.Min(dm.WidthPixels, dm.HeightPixels) / dm.Density;
+            return minDimDp >= 580f;
+        }
+
+        return (res?.Configuration?.SmallestScreenWidthDp ?? 0) >= 580;
+    }
+
+    public static HorizontalAnchorBounds ResolveHorizontalAnchorBounds(
+        Context ctx,
+        View? anchorContainer,
+        int screenW,
+        int margin)
+    {
+        if (anchorContainer is not null && anchorContainer.Width > 0)
+        {
+            var containerLoc = new int[2];
+            anchorContainer.GetLocationInWindow(containerLoc);
+            var containerLeft = containerLoc[0];
+            var containerRight = containerLeft + anchorContainer.Width;
+            var leftPad = Math.Max(Dp(ctx, 8), anchorContainer.PaddingLeft - Dp(ctx, 4));
+            var rightPad = Math.Max(Dp(ctx, 10), anchorContainer.PaddingRight - Dp(ctx, 4));
+            var innerLeft = containerLeft + leftPad;
+            var innerRight = containerRight - rightPad;
+            if (innerRight - innerLeft >= Dp(ctx, 180))
+                return new HorizontalAnchorBounds(innerLeft, innerRight, ConstrainedToContainer: true);
+        }
+
+        return new HorizontalAnchorBounds(margin, Math.Max(margin + 1, screenW - margin), ConstrainedToContainer: false);
     }
 }

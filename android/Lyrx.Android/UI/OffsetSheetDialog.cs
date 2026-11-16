@@ -23,7 +23,14 @@ internal static class OffsetSheetDialog
     private static PopupWindow? _activePopup;
     private static long _lastDismissAtMs;
 
-    public static void Show(Activity activity, View anchor, Action onChanged)
+    public static void DismissIfShowing()
+    {
+        if (_activePopup is { IsShowing: true } popup)
+            popup.Dismiss();
+        _activePopup = null;
+    }
+
+    public static void Show(Activity activity, View anchor, Action onChanged, View? anchorContainer = null)
     {
         if (activity.IsFinishing || activity.IsDestroyed) return;
 
@@ -45,7 +52,13 @@ internal static class OffsetSheetDialog
         var dm = activity.Resources?.DisplayMetrics;
         var screenW = dm?.WidthPixels ?? 1080;
         var screenH = dm?.HeightPixels ?? 2200;
-        var popupWidth = Math.Min(UiHelpers.Dp(activity, 278), (int)(screenW * 0.90));
+        var margin = UiHelpers.Dp(activity, 12);
+        var isTablet = UiHelpers.IsTabletLayout(activity);
+        var bounds = UiHelpers.ResolveHorizontalAnchorBounds(activity, anchorContainer, screenW, margin);
+        var maxAvailW = Math.Max(UiHelpers.Dp(activity, 180), bounds.Right - bounds.Left);
+        var popupWidth = bounds.ConstrainedToContainer
+            ? Math.Min(UiHelpers.Dp(activity, isTablet ? 320 : 278), maxAvailW)
+            : Math.Min(UiHelpers.Dp(activity, isTablet ? 320 : 278), (int)(screenW * 0.90));
 
         var card = new LinearLayout(activity)
         {
@@ -263,15 +276,15 @@ internal static class OffsetSheetDialog
 
         var loc = new int[2];
         anchor.GetLocationInWindow(loc);
-        var margin = UiHelpers.Dp(activity, 12);
+        var maxX = Math.Max(bounds.Left, bounds.Right - popupWidth);
 
         _activePopup = popup;
         if (loc[1] > 0 || anchor.Height > 0)
         {
             var x = Math.Clamp(
                 loc[0] + anchor.Width + UiHelpers.Dp(activity, 64) - popupWidth,
-                margin,
-                Math.Max(margin, screenW - popupWidth - margin));
+                bounds.Left,
+                maxX);
             var y = Math.Clamp(
                 loc[1] - popupHeight - UiHelpers.Dp(activity, 10),
                 margin,

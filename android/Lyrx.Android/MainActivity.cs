@@ -40,13 +40,29 @@ public sealed class MainActivity : Activity
     private sealed class LyricRowHolder
     {
         public int LineIndex { get; init; }
+        public int DisplayIndex { get; init; }
         public required LinearLayout Root { get; init; }
+        public required LinearLayout ContentWrap { get; init; }
         public required TextView Original { get; init; }
         public required TextView Translation { get; init; }
         public required string RawText { get; init; }
         public IReadOnlyList<KaraokeSegment> KaraokeSegments { get; init; } = Array.Empty<KaraokeSegment>();
         public Color CurrentColor { get; set; } = LyricsPalette.DefaultSubdued;
         public ValueAnimator? ColorAnimator { get; set; }
+    }
+
+    [global::System.Runtime.Versioning.SupportedOSPlatform("android33.0")]
+    private sealed class ShareBackCallback : Java.Lang.Object, global::Android.Window.IOnBackInvokedCallback
+    {
+        private readonly WeakReference<MainActivity> _owner;
+
+        public ShareBackCallback(MainActivity owner) => _owner = new WeakReference<MainActivity>(owner);
+
+        public void OnBackInvoked()
+        {
+            if (_owner.TryGetTarget(out var owner))
+                owner.ExitShareSelectionMode(resumeAutoScroll: true);
+        }
     }
 
     private sealed class InsetsListener : Java.Lang.Object, View.IOnApplyWindowInsetsListener
@@ -148,6 +164,8 @@ public sealed class MainActivity : Activity
     private static readonly DecelerateInterpolator ScrollInterpolator = new(1.8f);
     private static readonly DecelerateInterpolator RowEaseInterpolator = new(1.5f);
     private const int RequestCodeBluetoothConnect = 1001;
+    private const int RequestCodeShareLyrics = 1002;
+    private const int MaxShareSelectionCount = 6;
 
     private readonly List<LyricRowHolder> _rows = new();
     private readonly Handler _uiHandler = new(Looper.MainLooper!);
@@ -158,10 +176,18 @@ public sealed class MainActivity : Activity
     private LyricsStatusKind? _renderedStatus;
     private int _activeLineIndex = -1;
     private bool _latinMetrics;
+    private float _appliedLyricsMainSp;
+    private int _appliedLyricsGapPx;
+    private int _lastViewportWidthPx;
+    private int _lastViewportHeightPx;
     private bool _manualScroll;
+    private bool _isShareSelecting;
+    private int _shareSelectStart = -1;
+    private int _shareSelectEnd = -1;
     private long _manualScrollAtMs;
     private long _coverGeneration;
     private string? _lastCoverKey;
+    private Bitmap? _coverBitmap;
     private double? _pendingSeekSeconds;
     private long _pendingSeekDeadlineMs;
     private bool _disposed;
@@ -198,6 +224,10 @@ public sealed class MainActivity : Activity
     private LinearLayout _lyricsContainer = null!;
     private TextView _emptyHintView = null!;
     private LinearLayout _resumePill = null!;
+    private LinearLayout _shareHeaderBar = null!;
+    private LinearLayout _shareActionBar = null!;
+    private TextView _shareCountView = null!;
+    private object? _shareBackCallback;
     private LinearLayout _rotateHintPill = null!;
     private TextView _rotateHintLabel = null!;
 
@@ -276,6 +306,7 @@ public sealed class MainActivity : Activity
     {
         base.OnConfigurationChanged(newConfig);
         AudioOutputSheetDialog.DismissIfShowing();
+        OffsetSheetDialog.DismissIfShowing();
         var isLandscape = DetectLandscape(newConfig);
         ApplyResponsiveLayout(isLandscape);
         ApplyChromeSystemBars();
@@ -285,6 +316,15 @@ public sealed class MainActivity : Activity
         _rootLayout.RequestApplyInsets();
         RebuildTypographySizing();
         FollowActiveLine(animate: false);
+    }
+
+    protected override void OnActivityResult(int requestCode, Result resultCode, Intent? data)
+    {
+#pragma warning disable CA1422
+        base.OnActivityResult(requestCode, resultCode, data);
+#pragma warning restore CA1422
+        if (requestCode == RequestCodeShareLyrics && resultCode == Result.Ok)
+            ExitShareSelectionMode(resumeAutoScroll: true);
     }
 
     public override void OnRequestPermissionsResult(int requestCode, string[] permissions, Permission[] grantResults)
@@ -318,6 +358,7 @@ public sealed class MainActivity : Activity
         _disposed = true;
         StopUiLoop();
         HideRotateHintPill();
+        UnregisterShareBackCallback();
         try
         {
             _orientationWatcher?.Disable();
@@ -330,6 +371,18 @@ public sealed class MainActivity : Activity
         UnbindEngineEvents();
         base.OnDestroy();
     }
+
+#pragma warning disable CA1422
+    public override void OnBackPressed()
+    {
+        if (_isShareSelecting)
+        {
+            ExitShareSelectionMode(resumeAutoScroll: true);
+            return;
+        }
+        base.OnBackPressed();
+    }
+#pragma warning restore CA1422
 
     private void ApplyChromeSystemBars()
     {
@@ -396,9 +449,54 @@ public sealed class MainActivity : Activity
             parent.RemoveView(view);
     }
 
+    private bool IsTablet() => UiHelpers.IsTabletLayout(this);
+
+    private (int ConsoleWidth, int CoverSize, bool IsTablet) ComputeLandscapeConsoleMetrics(int topInset, int bottomInset)
+    {
+        var dm = Resources?.DisplayMetrics;
+        var rawW = dm?.WidthPixels ?? 1080;
+        var rawH = dm?.HeightPixels ?? 2200;
+        var landW = Math.Max(rawW, rawH);
+        var landH = Math.Min(rawW, rawH);
+        var isTablet = IsTablet();
+
+        if (!isTablet)
+        {
+            var consoleWidth = Math.Clamp((int)(landW * 0.37f), Dp(284), Dp(376));
+            var usableH = Math.Max(Dp(230), landH - topInset - bottomInset - Dp(22));
+            var coverSize = Math.Clamp(usableH - Dp(190), Dp(68), Dp(168));
+            return (consoleWidth, coverSize, false);
+        }
+
+        var padConsoleW = Math.Clamp((int)(landW * 0.39f), Dp(360), Math.Min((int)(landW * 0.44f), Dp(500)));
+        var padUsableH = Math.Max(Dp(420), landH - topInset - bottomInset - Dp(38));
+        var maxCoverByW = Math.Max(Dp(150), padConsoleW - Dp(92));
+        var maxCoverByH = Math.Max(Dp(150), padUsableH - Dp(255));
+        var padCoverSize = Math.Clamp(
+            Math.Min((int)(padUsableH * 0.43f), maxCoverByW),
+            Dp(150),
+            Math.Min(Dp(340), maxCoverByH));
+        return (padConsoleW, padCoverSize, true);
+    }
+
+    private (int LeftPad, int RightPad) ComputePortraitConsolePadding(int leftInset, int rightInset)
+    {
+        var isTablet = IsTablet();
+        if (!isTablet)
+            return (Dp(14) + leftInset, Dp(14) + rightInset);
+
+        var rawW = Resources?.DisplayMetrics?.WidthPixels ?? 1080;
+        var targetContentW = Math.Min(rawW - Dp(48), Dp(620));
+        var sidePad = Math.Max(Dp(24) + Math.Max(leftInset, rightInset), (rawW - targetContentW) / 2);
+        return (sidePad, sidePad);
+    }
+
     private void ApplyResponsiveLayout(bool isLandscape)
     {
         _isLandscapeLayout = isLandscape;
+        _lastViewportWidthPx = 0;
+        _lastViewportHeightPx = 0;
+        var isTablet = IsTablet();
 
         DetachFromParent(_lyricsPanel);
         DetachFromParent(_landscapeDivider);
@@ -413,67 +511,62 @@ public sealed class MainActivity : Activity
         DetachFromParent(_bluetoothRow);
         _footerView.RemoveAllViews();
 
-        var dm = Resources?.DisplayMetrics;
-        var rawW = dm?.WidthPixels ?? 1080;
-        var rawH = dm?.HeightPixels ?? 2200;
-
-        UpdateActionButtonSizing(isLandscape);
+        UpdateConsoleControlSizing(isLandscape, isTablet);
+        _emptyHintView.SetTextSize(ComplexUnitType.Sp, isTablet ? 34f : 24f);
 
         if (isLandscape)
         {
-            var landW = Math.Max(rawW, rawH);
-            var landH = Math.Min(rawW, rawH);
-            var consoleWidth = Math.Clamp((int)(landW * 0.37f), Dp(284), Dp(376));
-            var usableH = Math.Max(Dp(230), landH - _insetTop - _insetBottom - Dp(22));
-            var coverSize = Math.Clamp(usableH - Dp(190), Dp(68), Dp(168));
+            var (consoleWidth, coverSize, _) = ComputeLandscapeConsoleMetrics(_insetTop, _insetBottom);
+            var coverRadiusDp = isTablet ? 14f : 10f;
 
             _coverFrame.Background = UiHelpers.RoundedRect(
                 this,
                 LyricsPalette.CoverFrameBackground,
-                10,
+                coverRadiusDp,
                 Color.Argb(36, 255, 255, 255),
                 1f);
-            _coverFrame.OutlineProvider = new RoundedOutlineProvider(Dp(10));
+            _coverFrame.OutlineProvider = new RoundedOutlineProvider(Dp(coverRadiusDp));
 
             _titleView.Gravity = GravityFlags.CenterHorizontal;
-            _titleView.SetTextSize(ComplexUnitType.Sp, 15.5f);
+            _titleView.SetTextSize(ComplexUnitType.Sp, isTablet ? 20f : 15.5f);
             UiHelpers.SetFontWeight(_titleView, UiHelpers.FontWeightSemiBold);
 
             _artistView.Gravity = GravityFlags.CenterHorizontal;
-            _artistView.SetTextSize(ComplexUnitType.Sp, 12.5f);
+            _artistView.SetTextSize(ComplexUnitType.Sp, isTablet ? 14.5f : 12.5f);
+            _artistView.SetPadding(0, Dp(isTablet ? 4 : 1), 0, 0);
 
             var topSpacer = new View(this);
             _footerView.AddView(topSpacer, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MatchParent, 0, 0.50f));
+                ViewGroup.LayoutParams.MatchParent, 0, isTablet ? 0.65f : 0.50f));
 
             _footerView.AddView(_coverFrame, new LinearLayout.LayoutParams(coverSize, coverSize)
             {
                 Gravity = GravityFlags.CenterHorizontal,
-                BottomMargin = Dp(11),
+                BottomMargin = Dp(isTablet ? 18 : 11),
             });
 
             _footerView.AddView(_trackText, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent)
             {
-                BottomMargin = Dp(8),
+                BottomMargin = Dp(isTablet ? 14 : 8),
             });
 
             _footerView.AddView(_timelineRow, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent)
             {
-                BottomMargin = Dp(4),
+                BottomMargin = Dp(isTablet ? 8 : 4),
             });
 
             var transportTopSpacer = new View(this);
             _footerView.AddView(transportTopSpacer, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MatchParent, 0, 0.65f));
+                ViewGroup.LayoutParams.MatchParent, 0, isTablet ? 0.42f : 0.65f));
 
             _footerView.AddView(_transportRow, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent));
 
             var transportBottomSpacer = new View(this);
             _footerView.AddView(transportBottomSpacer, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MatchParent, 0, 0.65f));
+                ViewGroup.LayoutParams.MatchParent, 0, isTablet ? 0.42f : 0.65f));
 
             var bottomUtilityRow = new LinearLayout(this)
             {
@@ -497,7 +590,7 @@ public sealed class MainActivity : Activity
             _footerView.AddView(bottomUtilityRow, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent)
             {
-                TopMargin = Dp(4),
+                TopMargin = Dp(isTablet ? 8 : 4),
             });
 
             _rootLayout.Orientation = global::Android.Widget.Orientation.Horizontal;
@@ -510,24 +603,28 @@ public sealed class MainActivity : Activity
         }
         else
         {
-            _coverFrame.Background = UiHelpers.RoundedRect(this, LyricsPalette.CoverFrameBackground, 4);
-            _coverFrame.OutlineProvider = new RoundedOutlineProvider(Dp(4));
+            var coverRadiusDp = isTablet ? 6f : 4f;
+            var coverThumbSize = Dp(isTablet ? 58 : 46);
+
+            _coverFrame.Background = UiHelpers.RoundedRect(this, LyricsPalette.CoverFrameBackground, coverRadiusDp);
+            _coverFrame.OutlineProvider = new RoundedOutlineProvider(Dp(coverRadiusDp));
 
             _titleView.Gravity = GravityFlags.Left;
-            _titleView.SetTextSize(ComplexUnitType.Sp, 14f);
-            UiHelpers.SetFontWeight(_titleView, UiHelpers.FontWeightRegular);
+            _titleView.SetTextSize(ComplexUnitType.Sp, isTablet ? 16f : 14f);
+            UiHelpers.SetFontWeight(_titleView, isTablet ? UiHelpers.FontWeightSemiBold : UiHelpers.FontWeightRegular);
 
             _artistView.Gravity = GravityFlags.Left;
-            _artistView.SetTextSize(ComplexUnitType.Sp, 12f);
+            _artistView.SetTextSize(ComplexUnitType.Sp, isTablet ? 13.5f : 12f);
+            _artistView.SetPadding(0, Dp(isTablet ? 2 : 0), 0, 0);
 
             var topRow = new LinearLayout(this)
             {
                 Orientation = global::Android.Widget.Orientation.Horizontal,
             };
             topRow.SetGravity(GravityFlags.CenterVertical);
-            topRow.AddView(_coverFrame, new LinearLayout.LayoutParams(Dp(46), Dp(46))
+            topRow.AddView(_coverFrame, new LinearLayout.LayoutParams(coverThumbSize, coverThumbSize)
             {
-                RightMargin = Dp(12),
+                RightMargin = Dp(isTablet ? 14 : 12),
             });
             topRow.AddView(_trackText, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WrapContent, 1f)
             {
@@ -539,19 +636,19 @@ public sealed class MainActivity : Activity
             _footerView.AddView(topRow, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent)
             {
-                BottomMargin = Dp(6),
+                BottomMargin = Dp(isTablet ? 10 : 6),
             });
             _footerView.AddView(_timelineRow, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent)
             {
-                BottomMargin = Dp(4),
+                BottomMargin = Dp(isTablet ? 6 : 4),
             });
             _footerView.AddView(_transportRow, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent));
             _footerView.AddView(_bluetoothRow, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent)
             {
-                TopMargin = Dp(4),
+                TopMargin = Dp(isTablet ? 6 : 4),
             });
 
             _rootLayout.Orientation = global::Android.Widget.Orientation.Vertical;
@@ -564,16 +661,25 @@ public sealed class MainActivity : Activity
         ApplySystemBarInsets(_insetLeft, _insetTop, _insetRight, _insetBottom);
     }
 
-    private void UpdateActionButtonSizing(bool isLandscape)
+    private void UpdateConsoleControlSizing(bool isLandscape, bool isTablet)
     {
-        var btnSize = Dp(isLandscape ? 32 : 36);
-        var gap = Dp(isLandscape ? 1 : 2);
+        var btnSize = Dp(isTablet ? 40 : (isLandscape ? 32 : 36));
+        var gap = Dp(isTablet ? 4 : (isLandscape ? 1 : 2));
 
         if (_offsetHost.LayoutParameters is LinearLayout.LayoutParams offsetLp)
         {
             offsetLp.Height = btnSize;
             _offsetHost.LayoutParameters = offsetLp;
         }
+        if (_offsetIcon.LayoutParameters is LinearLayout.LayoutParams offsetIconLp)
+        {
+            var iconSize = Dp(isTablet ? 21 : 18);
+            offsetIconLp.Width = iconSize;
+            offsetIconLp.Height = iconSize;
+            _offsetIcon.LayoutParameters = offsetIconLp;
+        }
+        _offsetBadge.SetTextSize(ComplexUnitType.Sp, isTablet ? 12.5f : 11f);
+
         if (_translateHost.LayoutParameters is LinearLayout.LayoutParams transLp)
         {
             transLp.Width = btnSize;
@@ -588,6 +694,62 @@ public sealed class MainActivity : Activity
             setLp.LeftMargin = gap;
             _settingsHost.LayoutParameters = setLp;
         }
+
+        var skipSize = Dp(isTablet ? 52 : 42);
+        var playSize = Dp(isTablet ? 52 : 40);
+        var playRadius = isTablet ? 26f : 20f;
+        var transportGap = Dp(isTablet ? 28 : 22);
+
+        if (_prevBtnHost.LayoutParameters is LinearLayout.LayoutParams prevLp)
+        {
+            prevLp.Width = skipSize;
+            prevLp.Height = skipSize;
+            _prevBtnHost.LayoutParameters = prevLp;
+        }
+        if (_nextBtnHost.LayoutParameters is LinearLayout.LayoutParams nextLp)
+        {
+            nextLp.Width = skipSize;
+            nextLp.Height = skipSize;
+            _nextBtnHost.LayoutParameters = nextLp;
+        }
+        if (_playBtnHost.LayoutParameters is LinearLayout.LayoutParams playLp)
+        {
+            playLp.Width = playSize;
+            playLp.Height = playSize;
+            playLp.LeftMargin = transportGap;
+            playLp.RightMargin = transportGap;
+            _playBtnHost.LayoutParameters = playLp;
+        }
+        _playBtnHost.Background = UiHelpers.RoundedRect(this, Color.White, playRadius);
+
+        var timeLabelW = Dp(isTablet ? 46 : 40);
+        var timeSp = isTablet ? 13f : 12f;
+        _elapsedView.SetTextSize(ComplexUnitType.Sp, timeSp);
+        _durationView.SetTextSize(ComplexUnitType.Sp, timeSp);
+        if (_elapsedView.LayoutParameters is LinearLayout.LayoutParams elapsedLp)
+        {
+            elapsedLp.Width = timeLabelW;
+            _elapsedView.LayoutParameters = elapsedLp;
+        }
+        if (_durationView.LayoutParameters is LinearLayout.LayoutParams durLp)
+        {
+            durLp.Width = timeLabelW;
+            _durationView.LayoutParameters = durLp;
+        }
+        if (_seekBar.LayoutParameters is LinearLayout.LayoutParams seekLp)
+        {
+            seekLp.Height = Dp(isTablet ? 28 : 24);
+            _seekBar.LayoutParameters = seekLp;
+        }
+
+        if (_bluetoothIcon.LayoutParameters is LinearLayout.LayoutParams btIconLp)
+        {
+            var btSize = Dp(isTablet ? 20 : 18);
+            btIconLp.Width = btSize;
+            btIconLp.Height = btSize;
+            _bluetoothIcon.LayoutParameters = btIconLp;
+        }
+        _bluetoothNameView.SetTextSize(ComplexUnitType.Sp, isTablet ? 13.5f : 12.5f);
     }
 
     private LinearLayout BuildPermissionBanner()
@@ -654,6 +816,10 @@ public sealed class MainActivity : Activity
             Orientation = global::Android.Widget.Orientation.Vertical,
         };
 
+        _shareHeaderBar = BuildShareHeaderBar();
+        panelContent.AddView(_shareHeaderBar, new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent));
+
         _permissionBanner = BuildPermissionBanner();
         panelContent.AddView(_permissionBanner, new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent)
@@ -701,6 +867,14 @@ public sealed class MainActivity : Activity
         _lyricsScrollView.LayoutChange += (_, _) =>
         {
             ApplyLyricsContainerPadding();
+            var w = _lyricsScrollView.Width;
+            var h = _lyricsScrollView.Height;
+            if (w > 0 && h > 0 && (w != _lastViewportWidthPx || h != _lastViewportHeightPx))
+            {
+                _lastViewportWidthPx = w;
+                _lastViewportHeightPx = h;
+                _lyricsScrollView.Post(RefreshLyricsTypographyIfNeeded);
+            }
         };
 
         scrollWrap.AddView(_lyricsScrollView, new FrameLayout.LayoutParams(
@@ -731,6 +905,14 @@ public sealed class MainActivity : Activity
         _resumePill = BuildResumePill();
         scrollWrap.AddView(_resumePill, new FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.WrapContent, Dp(42))
+        {
+            Gravity = GravityFlags.Bottom | GravityFlags.CenterHorizontal,
+            BottomMargin = Dp(20),
+        });
+
+        _shareActionBar = BuildShareActionBar();
+        scrollWrap.AddView(_shareActionBar, new FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WrapContent, Dp(46))
         {
             Gravity = GravityFlags.Bottom | GravityFlags.CenterHorizontal,
             BottomMargin = Dp(20),
@@ -823,6 +1005,93 @@ public sealed class MainActivity : Activity
             e.Handled = true;
             OpenOffsetDialog();
         };
+        return pill;
+    }
+
+    private LinearLayout BuildShareHeaderBar()
+    {
+        var header = new LinearLayout(this)
+        {
+            Orientation = global::Android.Widget.Orientation.Horizontal,
+            Visibility = ViewStates.Gone,
+            Clickable = true,
+        };
+        header.SetGravity(GravityFlags.CenterVertical);
+        header.SetPadding(Dp(12), Dp(8), Dp(12), Dp(8));
+
+        var backBtn = UiHelpers.IconButton(
+            this,
+            ClassicIconKind.ChevronDown,
+            Color.White,
+            () => ExitShareSelectionMode(resumeAutoScroll: true),
+            sizeDp: 36,
+            iconFraction: 0.60f);
+        header.AddView(backBtn, new LinearLayout.LayoutParams(Dp(36), Dp(36)));
+
+        var titleStack = new LinearLayout(this)
+        {
+            Orientation = global::Android.Widget.Orientation.Vertical,
+        };
+        titleStack.SetGravity(GravityFlags.CenterHorizontal);
+
+        var title = new TextView(this)
+        {
+            Text = "选中歌词",
+            Gravity = GravityFlags.Center,
+        };
+        title.SetIncludeFontPadding(false);
+        title.SetTextColor(Color.White);
+        title.SetTextSize(ComplexUnitType.Sp, 14.5f);
+        UiHelpers.SetFontWeight(title, UiHelpers.FontWeightBold);
+        titleStack.AddView(title, new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WrapContent, ViewGroup.LayoutParams.WrapContent));
+
+        _shareCountView = new TextView(this)
+        {
+            Text = "已选择 0 行歌词",
+            Gravity = GravityFlags.Center,
+        };
+        _shareCountView.SetIncludeFontPadding(false);
+        _shareCountView.SetTextColor(Color.Argb(220, 255, 255, 255));
+        _shareCountView.SetTextSize(ComplexUnitType.Sp, 12f);
+        UiHelpers.SetFontWeight(_shareCountView, UiHelpers.FontWeightRegular);
+        titleStack.AddView(_shareCountView, new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WrapContent, ViewGroup.LayoutParams.WrapContent)
+        {
+            TopMargin = Dp(2),
+        });
+
+        header.AddView(titleStack, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WrapContent, 1f));
+        header.AddView(new View(this), new LinearLayout.LayoutParams(Dp(36), Dp(36)));
+        return header;
+    }
+
+    private LinearLayout BuildShareActionBar()
+    {
+        var pill = new LinearLayout(this)
+        {
+            Orientation = global::Android.Widget.Orientation.Horizontal,
+            Background = UiHelpers.RoundedRect(this, Color.White, 24f),
+            Clickable = true,
+            Focusable = true,
+            Elevation = Dp(6),
+            Visibility = ViewStates.Gone,
+        };
+        pill.SetGravity(GravityFlags.Center);
+        pill.SetPadding(Dp(36), 0, Dp(36), 0);
+        pill.Click += (_, _) => OpenLyricSharePreview();
+
+        var confirmLabel = new TextView(this)
+        {
+            Text = "继续",
+            Gravity = GravityFlags.Center,
+        };
+        confirmLabel.SetIncludeFontPadding(false);
+        confirmLabel.SetTextColor(Color.Rgb(18, 18, 18));
+        confirmLabel.SetTextSize(ComplexUnitType.Sp, 15f);
+        UiHelpers.SetFontWeight(confirmLabel, UiHelpers.FontWeightBold);
+        pill.AddView(confirmLabel);
+
         return pill;
     }
 
@@ -934,7 +1203,7 @@ public sealed class MainActivity : Activity
         _bluetoothRow = new LinearLayout(this)
         {
             Orientation = global::Android.Widget.Orientation.Horizontal,
-            Visibility = ViewStates.Gone,
+            Visibility = ViewStates.Visible,
             Clickable = true,
             Focusable = true,
         };
@@ -1054,6 +1323,36 @@ public sealed class MainActivity : Activity
         return tv;
     }
 
+    private (int LeftPad, int RightPad, int InnerColWidthPx) ResolveLyricsColumnMetrics(bool isTablet, int consoleWidth)
+    {
+        var rawW = Resources?.DisplayMetrics?.WidthPixels ?? 1080;
+        var dividerW = Math.Max(1, Dp(0.8f));
+        var useLiveWidth = _lastViewportWidthPx > 0 && _lyricsScrollView.Width > 0;
+        var availW = useLiveWidth
+            ? _lyricsScrollView.Width
+            : (_isLandscapeLayout ? Math.Max(Dp(isTablet ? 400 : 260), rawW - consoleWidth - dividerW) : rawW);
+
+        if (!isTablet)
+        {
+            var phoneLeft = Dp(_isLandscapeLayout ? 28 : 24) + (_isLandscapeLayout ? 0 : _insetLeft);
+            var phoneRight = Dp(24) + _insetRight;
+            return (phoneLeft, phoneRight, Math.Max(Dp(180), availW - phoneLeft - phoneRight));
+        }
+
+        var maxColW = Dp(_isLandscapeLayout ? 660 : 720);
+        var minSide = Dp(_isLandscapeLayout ? 44 : 36);
+        var sidePad = Math.Max(minSide, (availW - maxColW) / 2);
+        var leftPad = sidePad + (_isLandscapeLayout ? 0 : _insetLeft);
+        var rightPad = sidePad + _insetRight;
+        return (leftPad, rightPad, Math.Max(Dp(240), availW - leftPad - rightPad));
+    }
+
+    private (int LeftPad, int RightPad) ComputeLyricsHorizontalPadding(bool isTablet, int consoleWidth)
+    {
+        var (leftPad, rightPad, _) = ResolveLyricsColumnMetrics(isTablet, consoleWidth);
+        return (leftPad, rightPad);
+    }
+
     private void ApplySystemBarInsets(int left, int top, int right, int bottom)
     {
         _insetLeft = left;
@@ -1061,14 +1360,21 @@ public sealed class MainActivity : Activity
         _insetRight = right;
         _insetBottom = bottom;
 
+        var isTablet = IsTablet();
+        var consoleWidth = 0;
+
         if (_isLandscapeLayout)
         {
-            _footerView.SetPadding(Dp(16) + left, Dp(12) + top, Dp(14), Dp(10) + bottom);
+            (consoleWidth, var coverSize, _) = ComputeLandscapeConsoleMetrics(top, bottom);
+            var sidePad = Dp(isTablet ? 28 : 14);
+            var leftPad = Dp(isTablet ? 28 : 16) + left;
+            _footerView.SetPadding(leftPad, Dp(isTablet ? 20 : 12) + top, sidePad, Dp(isTablet ? 18 : 10) + bottom);
 
-            var dm = Resources?.DisplayMetrics;
-            var landH = Math.Min(dm?.WidthPixels ?? 1080, dm?.HeightPixels ?? 2200);
-            var usableH = Math.Max(Dp(230), landH - top - bottom - Dp(22));
-            var coverSize = Math.Clamp(usableH - Dp(190), Dp(68), Dp(168));
+            if (_footerView.LayoutParameters is LinearLayout.LayoutParams footerLp && footerLp.Width != consoleWidth)
+            {
+                footerLp.Width = consoleWidth;
+                _footerView.LayoutParameters = footerLp;
+            }
             if (_coverFrame.LayoutParameters is LinearLayout.LayoutParams coverLp && coverLp.Width != coverSize)
             {
                 coverLp.Width = coverSize;
@@ -1078,41 +1384,61 @@ public sealed class MainActivity : Activity
         }
         else
         {
-            _footerView.SetPadding(Dp(14) + left, Dp(6), Dp(14) + right, Dp(10) + bottom);
+            var (portLeft, portRight) = ComputePortraitConsolePadding(left, right);
+            _footerView.SetPadding(portLeft, Dp(isTablet ? 10 : 6), portRight, Dp(isTablet ? 14 : 10) + bottom);
         }
 
+        var (lyricsLeftPad, lyricsRightPad) = ComputeLyricsHorizontalPadding(isTablet, consoleWidth);
         if (_permissionBanner.LayoutParameters is LinearLayout.LayoutParams bannerLp)
         {
-            bannerLp.LeftMargin = Dp(_isLandscapeLayout ? 18 : 12) + (_isLandscapeLayout ? 0 : left);
-            bannerLp.TopMargin = top + Dp(8);
-            bannerLp.RightMargin = Dp(12) + right;
+            bannerLp.LeftMargin = isTablet
+                ? lyricsLeftPad
+                : Dp(_isLandscapeLayout ? 18 : 12) + (_isLandscapeLayout ? 0 : left);
+            bannerLp.TopMargin = top + Dp(isTablet ? 12 : 8);
+            bannerLp.RightMargin = isTablet ? lyricsRightPad : Dp(12) + right;
             _permissionBanner.LayoutParameters = bannerLp;
+        }
+
+        if (_shareHeaderBar is not null)
+        {
+            var headerLeftPad = (_isLandscapeLayout ? 0 : left) + Dp(isTablet ? 20 : 12);
+            var headerRightPad = right + Dp(isTablet ? 20 : 12);
+            _shareHeaderBar.SetPadding(headerLeftPad, top + Dp(isTablet ? 10 : 8), headerRightPad, Dp(isTablet ? 10 : 8));
         }
 
         if (_topFadeView.LayoutParameters is FrameLayout.LayoutParams fadeLp)
         {
-            fadeLp.Height = _permissionBanner.Visibility == ViewStates.Visible
-                ? Dp(24)
-                : top + Dp(34);
+            fadeLp.Height = _isShareSelecting || _permissionBanner.Visibility == ViewStates.Visible
+                ? Dp(18)
+                : top + Dp(isTablet ? 46 : 36);
             _topFadeView.LayoutParameters = fadeLp;
         }
 
         if (_bottomFadeView.LayoutParameters is FrameLayout.LayoutParams btmFadeLp)
         {
-            btmFadeLp.Height = _isLandscapeLayout ? Math.Max(Dp(34), bottom + Dp(24)) : Dp(34);
+            var baseFade = _isShareSelecting ? Dp(isTablet ? 64 : 52) : Dp(isTablet ? 52 : 36);
+            btmFadeLp.Height = _isLandscapeLayout
+                ? Math.Max(baseFade, bottom + Dp(_isShareSelecting ? 36 : 28))
+                : (_isShareSelecting ? Dp(52) : Dp(38));
             _bottomFadeView.LayoutParameters = btmFadeLp;
         }
 
         if (_resumePill.LayoutParameters is FrameLayout.LayoutParams pillLp)
         {
-            pillLp.BottomMargin = Dp(20) + (_isLandscapeLayout ? bottom : 0);
+            pillLp.BottomMargin = Dp(isTablet ? 26 : 20) + (_isLandscapeLayout ? bottom : 0);
             _resumePill.LayoutParameters = pillLp;
+        }
+
+        if (_shareActionBar.LayoutParameters is FrameLayout.LayoutParams shareLp)
+        {
+            shareLp.BottomMargin = Dp(isTablet ? 26 : 20) + (_isLandscapeLayout ? bottom : 0);
+            _shareActionBar.LayoutParameters = shareLp;
         }
 
         if (_rotateHintPill.LayoutParameters is FrameLayout.LayoutParams rotHintLp)
         {
-            rotHintLp.RightMargin = Dp(16) + right;
-            rotHintLp.BottomMargin = Dp(18) + (_isLandscapeLayout ? bottom : 0);
+            rotHintLp.RightMargin = Dp(isTablet ? 24 : 16) + right;
+            rotHintLp.BottomMargin = Dp(isTablet ? 24 : 18) + (_isLandscapeLayout ? bottom : 0);
             _rotateHintPill.LayoutParameters = rotHintLp;
         }
 
@@ -1121,13 +1447,31 @@ public sealed class MainActivity : Activity
 
     private void ApplyLyricsContainerPadding()
     {
-        var left = Dp(_isLandscapeLayout ? 28 : 24) + (_isLandscapeLayout ? 0 : _insetLeft);
-        var right = Dp(24) + _insetRight;
-        var top = _permissionBanner.Visibility == ViewStates.Visible
-            ? Dp(14)
-            : _insetTop + Dp(28);
+        var isTablet = IsTablet();
+        var consoleWidth = _isLandscapeLayout
+            ? ComputeLandscapeConsoleMetrics(_insetTop, _insetBottom).ConsoleWidth
+            : 0;
+        var (left, right) = ComputeLyricsHorizontalPadding(isTablet, consoleWidth);
+        int top;
+        int bottom;
         var halfView = _lyricsScrollView.Height > 0 ? _lyricsScrollView.Height / 2 : Dp(_isLandscapeLayout ? 160 : 220);
-        var bottom = Math.Max(halfView, _isLandscapeLayout ? _insetBottom + Dp(48) : 0);
+
+        if (_isShareSelecting)
+        {
+            var sharePadH = Dp(isTablet ? 16 : 12);
+            left = Math.Max(Dp(isTablet ? 16 : 10) + (_isLandscapeLayout ? 0 : _insetLeft), left - sharePadH);
+            right = Math.Max(Dp(isTablet ? 16 : 10) + _insetRight, right - sharePadH);
+            top = Dp(isTablet ? 10 : 6);
+            bottom = Math.Max(halfView, Dp(isTablet ? 110 : 96) + (_isLandscapeLayout ? _insetBottom : 0));
+        }
+        else
+        {
+            top = _permissionBanner.Visibility == ViewStates.Visible
+                ? Dp(14)
+                : _insetTop + Dp(isTablet ? 44 : 32);
+            bottom = Math.Max(halfView, _isLandscapeLayout ? _insetBottom + Dp(isTablet ? 60 : 48) : 0);
+        }
+
         if (_lyricsContainer.PaddingLeft != left
             || _lyricsContainer.PaddingTop != top
             || _lyricsContainer.PaddingRight != right
@@ -1244,6 +1588,35 @@ public sealed class MainActivity : Activity
         UpdateTransportAndButtons();
     }
 
+    private SurfaceOrientation GetCurrentDisplayRotation()
+    {
+        try
+        {
+            if (OperatingSystem.IsAndroidVersionAtLeast(30))
+                return GetDisplayRotationApi30();
+#pragma warning disable CA1422
+            return WindowManager?.DefaultDisplay?.Rotation ?? SurfaceOrientation.Rotation0;
+#pragma warning restore CA1422
+        }
+        catch
+        {
+            return SurfaceOrientation.Rotation0;
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    [global::System.Runtime.Versioning.SupportedOSPlatform("android30.0")]
+    private SurfaceOrientation GetDisplayRotationApi30() =>
+        Display?.Rotation ?? SurfaceOrientation.Rotation0;
+
+    private bool IsDeviceNaturalLandscape()
+    {
+        var rotation = GetCurrentDisplayRotation();
+        var rotIs90Or270 = rotation is SurfaceOrientation.Rotation90 or SurfaceOrientation.Rotation270;
+        var currentLandscape = DetectLandscape(Resources?.Configuration);
+        return currentLandscape ^ rotIs90Or270;
+    }
+
     private void HandleSensorOrientation(int orientation)
     {
         if (_disposed || !_isResumed || IsFinishing || IsDestroyed) return;
@@ -1253,13 +1626,18 @@ public sealed class MainActivity : Activity
             return;
         }
 
-        var isSideways = (orientation >= 55 && orientation <= 125) || (orientation >= 235 && orientation <= 305);
-        var isUpright = orientation >= 330 || orientation <= 30;
-        if (!isSideways && !isUpright)
+        // 部分平板的硬件自然方向（0°）就是横屏，需结合显示旋转角换算真实的横竖持握目标。
+        var naturalLandscape = IsDeviceNaturalLandscape();
+        var rawSideways = (orientation >= 55 && orientation <= 125) || (orientation >= 235 && orientation <= 305);
+        var rawUpright = (orientation >= 330 || orientation <= 30)
+            || (naturalLandscape && orientation >= 150 && orientation <= 210);
+        if (!rawSideways && !rawUpright)
         {
             _pendingSensorSideways = null;
             return;
         }
+
+        var isSideways = naturalLandscape ? rawUpright : rawSideways;
 
         var now = SystemClock.UptimeMillis();
         if (_pendingSensorSideways != isSideways)
@@ -1429,6 +1807,7 @@ public sealed class MainActivity : Activity
 
         if (songChanged)
         {
+            ExitShareSelectionMode(resumeAutoScroll: false);
             _track = track;
             App.ApplyTrackOffsetFor(track);
             _activeLineIndex = -1;
@@ -1497,19 +1876,33 @@ public sealed class MainActivity : Activity
             var prev = _activeLineIndex;
             _activeLineIndex = nextActive;
 
+            var prevDisplay = ResolveDisplayIndexForLine(prev);
+            var nextDisplay = ResolveDisplayIndexForLine(_activeLineIndex);
             foreach (var row in _rows)
             {
-                if (row.LineIndex == prev || row.LineIndex == _activeLineIndex)
-                    ApplyRowVisualState(row, animate: true);
-                else if ((prev < 0 || prev > _activeLineIndex) && row.LineIndex < _activeLineIndex)
-                    ApplyRowVisualState(row, animate: false);
+                if (_manualScroll)
+                {
+                    if (row.LineIndex == prev || row.LineIndex == _activeLineIndex)
+                        ApplyRowVisualState(row, animate: true, nextDisplay);
+                    else if ((prev < 0 || prev > _activeLineIndex) && row.LineIndex < _activeLineIndex)
+                        ApplyRowVisualState(row, animate: false, nextDisplay);
+                }
+                else
+                {
+                    var nearNew = nextDisplay >= 0 && (Math.Abs(row.DisplayIndex - nextDisplay) <= 5 || (nextDisplay < 3 && row.DisplayIndex <= 8));
+                    var nearOld = prevDisplay >= 0 && (Math.Abs(row.DisplayIndex - prevDisplay) <= 5 || (prevDisplay < 3 && row.DisplayIndex <= 8));
+                    if (nearNew || nearOld)
+                        ApplyRowVisualState(row, animate: true, nextDisplay);
+                    else if (row.Root.Alpha > 0.001f || prev < 0 || prev > _activeLineIndex)
+                        ApplyRowVisualState(row, animate: false, nextDisplay);
+                }
             }
 
-            if (!_manualScroll)
+            if (!_manualScroll && !_isShareSelecting)
                 FollowActiveLine(animate: true);
         }
 
-        if (_activeLineIndex >= 0 && App.Settings.CharacterKaraoke)
+        if (_activeLineIndex >= 0 && App.Settings.CharacterKaraoke && !_isShareSelecting)
         {
             var activeRow = _rows.FirstOrDefault(r => r.LineIndex == _activeLineIndex);
             if (activeRow is { KaraokeSegments.Count: > 0 })
@@ -1552,8 +1945,10 @@ public sealed class MainActivity : Activity
         _rows.Clear();
         _lyricsContainer.RemoveAllViews();
 
+        var isTablet = IsTablet();
         if (lyrics is null || lyrics.Lines.Count == 0)
         {
+            _emptyHintView.SetTextSize(ComplexUnitType.Sp, isTablet ? 34f : 24f);
             _emptyHintView.Text = FormatEmptyHint(status);
             _emptyHintView.SetTextColor(_subdued);
             _lyricsContainer.AddView(_emptyHintView, new LinearLayout.LayoutParams(
@@ -1562,11 +1957,9 @@ public sealed class MainActivity : Activity
         }
 
         _latinMetrics = IsMostlyLatin(lyrics);
-        var (lineScale, gapScale) = App.Settings.LineSpacingScales;
-        var mainSize = _isLandscapeLayout ? 25f : 24f;
-        var subSize = MathF.Max(14f, MathF.Round(mainSize * 0.56f));
-        var mainLineMult = (_latinMetrics ? 1.24f : 1.12f) * (float)lineScale;
-        var rowGapPx = Dp((float)Math.Max(10, mainSize * (_latinMetrics ? 0.92 : 0.72) * gapScale));
+        var (mainSize, subSize, mainLineMult, rowGapPx, rowRightPadPx) = ComputeLyricsTypography(lyrics, isTablet);
+        _appliedLyricsMainSp = mainSize;
+        _appliedLyricsGapPx = rowGapPx;
 
         for (var i = 0; i < lyrics.Lines.Count; i++)
         {
@@ -1582,47 +1975,167 @@ public sealed class MainActivity : Activity
                 Orientation = global::Android.Widget.Orientation.Vertical,
             };
             rowLayout.SetGravity(GravityFlags.Left);
-            rowLayout.SetPadding(0, 0, Dp(14), rowGapPx);
+
+            var contentWrap = new LinearLayout(this)
+            {
+                Orientation = global::Android.Widget.Orientation.Vertical,
+            };
+            contentWrap.SetGravity(GravityFlags.Left);
 
             var originalView = new TextView(this)
             {
                 Text = mainText,
                 Gravity = GravityFlags.Left,
             };
-            originalView.SetTextSize(ComplexUnitType.Sp, mainSize);
             UiHelpers.SetFontWeight(originalView, UiHelpers.FontWeightBold, useTitleFont: true);
-            originalView.SetLineSpacing(0f, mainLineMult);
 
             var translationView = new TextView(this)
             {
                 Gravity = GravityFlags.Left,
                 Visibility = ViewStates.Gone,
             };
-            translationView.SetTextSize(ComplexUnitType.Sp, subSize);
             UiHelpers.SetFontWeight(translationView, UiHelpers.FontWeightRegular);
             translationView.SetPadding(0, Dp(4), 0, 0);
+
+            contentWrap.AddView(originalView, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent));
+            contentWrap.AddView(translationView, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent));
 
             var holder = new LyricRowHolder
             {
                 LineIndex = i,
+                DisplayIndex = _rows.Count,
                 Root = rowLayout,
+                ContentWrap = contentWrap,
                 Original = originalView,
                 Translation = translationView,
                 RawText = mainText,
                 KaraokeSegments = segments,
             };
+            var effectiveGap = _isShareSelecting ? Dp(isTablet ? 6 : 5) : rowGapPx;
+            var effectiveRight = _isShareSelecting ? 0 : rowRightPadPx;
+            ApplyRowTypography(holder, mainSize, subSize, mainLineMult, effectiveGap, effectiveRight);
 
             var capturedLine = line;
-            rowLayout.Click += (_, _) => SeekToLine(capturedLine, lyrics);
-            rowLayout.AddView(originalView);
-            rowLayout.AddView(translationView);
+            rowLayout.LongClickable = true;
+            rowLayout.Click += (_, _) =>
+            {
+                if (_isShareSelecting)
+                    ToggleShareRowSelection(holder);
+                else if (rowLayout.Alpha > 0.05f)
+                    SeekToLine(capturedLine, lyrics);
+            };
+            rowLayout.LongClick += (_, e) =>
+            {
+                if (!_isShareSelecting && rowLayout.Alpha <= 0.05f) return;
+                e.Handled = true;
+                if (_isShareSelecting)
+                    ToggleShareRowSelection(holder);
+                else
+                    EnterShareSelectionMode(holder);
+            };
+            rowLayout.AddView(contentWrap, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent));
 
             _lyricsContainer.AddView(rowLayout, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent));
             _rows.Add(holder);
             ApplyRowTranslation(holder, line);
-            ApplyRowVisualState(holder, animate: false);
+            ApplyRowVisualState(holder, animate: false, activeDisplayIndex: -1);
         }
+    }
+
+    private (float MainSizeSp, float SubSizeSp, float MainLineMult, int RowGapPx, int RowRightPadPx) ComputeLyricsTypography(
+        Lyrics lyrics,
+        bool isTablet)
+    {
+        var (lineScale, gapScale) = App.Settings.LineSpacingScales;
+        var consoleWidth = _isLandscapeLayout
+            ? ComputeLandscapeConsoleMetrics(_insetTop, _insetBottom).ConsoleWidth
+            : 0;
+        var (_, _, innerColW) = ResolveLyricsColumnMetrics(isTablet, consoleWidth);
+        var dm = Resources?.DisplayMetrics;
+        var density = Math.Max(0.75f, dm?.Density ?? 1f);
+        var rawH = dm?.HeightPixels ?? 2200;
+        var useLiveHeight = _lastViewportHeightPx > 0 && _lyricsScrollView.Height > 0;
+        var availH = useLiveHeight
+            ? _lyricsScrollView.Height
+            : (_isLandscapeLayout ? rawH : Math.Max(Dp(260), rawH - Dp(isTablet ? 220 : 190)));
+        var rowRightPadDp = isTablet ? 20f : 14f;
+        var textColDp = Math.Max(180f, (innerColW / density) - rowRightPadDp);
+        var viewportHDp = Math.Max(220f, availH / density);
+
+        var mainSize = isTablet
+            ? MathF.Round(Math.Clamp(textColDp / 15.5f, 34f, 42f))
+            : (_isLandscapeLayout ? 25f : 24f);
+        var subSize = MathF.Max(isTablet ? 19f : 14f, MathF.Round(mainSize * 0.56f));
+        var mainLineMult = (_latinMetrics ? 1.24f : 1.12f) * (float)lineScale;
+
+        var hasTranslations = LyricsHasVisibleTranslations(lyrics);
+        var estimatedTextDp = mainSize * (hasTranslations ? 1.98f : 1.28f);
+        var baseGapDp = mainSize * (_latinMetrics ? 0.98f : 0.82f);
+        var idealWindowGapDp = (viewportHDp / 8.5f) - estimatedTextDp;
+        var unscaledGapDp = Math.Clamp(Math.Max(baseGapDp, idealWindowGapDp), baseGapDp, mainSize * 1.40f);
+        var rowGapPx = Dp((float)Math.Max(10, unscaledGapDp * gapScale));
+        return (mainSize, subSize, mainLineMult, rowGapPx, Dp(rowRightPadDp));
+    }
+
+    private bool LyricsHasVisibleTranslations(Lyrics lyrics)
+    {
+        if (!App.Settings.ShowTranslation) return false;
+        foreach (var line in lyrics.Lines)
+        {
+            if (line.Enabled && !string.IsNullOrWhiteSpace(ResolveLineTranslation(line)))
+                return true;
+        }
+        return false;
+    }
+
+    private static void ApplyRowTypography(
+        LyricRowHolder row,
+        float mainSizeSp,
+        float subSizeSp,
+        float mainLineMult,
+        int rowGapPx,
+        int rowRightPadPx)
+    {
+        row.Root.SetPadding(0, 0, rowRightPadPx, rowGapPx);
+        row.Original.SetTextSize(ComplexUnitType.Sp, mainSizeSp);
+        row.Original.SetLineSpacing(0f, mainLineMult);
+        row.Translation.SetTextSize(ComplexUnitType.Sp, subSizeSp);
+    }
+
+    private void RefreshLyricsTypographyIfNeeded()
+    {
+        if (_disposed || _renderedLyrics is null || _rows.Count == 0) return;
+        var isTablet = IsTablet();
+        var (mainSize, subSize, mainLineMult, rowGapPx, rowRightPadPx) = ComputeLyricsTypography(_renderedLyrics, isTablet);
+        if (MathF.Abs(mainSize - _appliedLyricsMainSp) < 0.5f && Math.Abs(rowGapPx - _appliedLyricsGapPx) < Dp(2))
+            return;
+
+        _appliedLyricsMainSp = mainSize;
+        _appliedLyricsGapPx = rowGapPx;
+        var effectiveGap = _isShareSelecting ? Dp(isTablet ? 6 : 5) : rowGapPx;
+        var effectiveRight = _isShareSelecting ? 0 : rowRightPadPx;
+        foreach (var row in _rows)
+            ApplyRowTypography(row, mainSize, subSize, mainLineMult, effectiveGap, effectiveRight);
+
+        if (!_manualScroll && !_isShareSelecting)
+            FollowActiveLine(animate: false);
+    }
+
+    private void ApplyShareRowSpacing(bool compact)
+    {
+        if (_disposed || _renderedLyrics is null || _rows.Count == 0) return;
+        var isTablet = IsTablet();
+        var (mainSize, subSize, mainLineMult, rowGapPx, rowRightPadPx) = ComputeLyricsTypography(_renderedLyrics, isTablet);
+        _appliedLyricsMainSp = mainSize;
+        _appliedLyricsGapPx = rowGapPx;
+        var effectiveGap = compact ? Dp(isTablet ? 6 : 5) : rowGapPx;
+        var effectiveRight = compact ? 0 : rowRightPadPx;
+        foreach (var row in _rows)
+            ApplyRowTypography(row, mainSize, subSize, mainLineMult, effectiveGap, effectiveRight);
     }
 
     private void RebuildTypographySizing()
@@ -1640,6 +2153,7 @@ public sealed class MainActivity : Activity
             if (row.LineIndex >= 0 && row.LineIndex < _renderedLyrics.Lines.Count)
                 ApplyRowTranslation(row, _renderedLyrics.Lines[row.LineIndex]);
         }
+        RefreshLyricsTypographyIfNeeded();
     }
 
     private void ApplyRowTranslation(LyricRowHolder row, LyricsLine line)
@@ -1675,24 +2189,157 @@ public sealed class MainActivity : Activity
         return tr;
     }
 
-    private void ApplyRowVisualState(LyricRowHolder row, bool animate)
+    private int ResolveDisplayIndexForLine(int lineIndex)
     {
+        if (lineIndex < 0 || _rows.Count == 0) return -1;
+        for (var i = 0; i < _rows.Count; i++)
+        {
+            if (_rows[i].LineIndex == lineIndex)
+                return _rows[i].DisplayIndex;
+        }
+        return -1;
+    }
+
+    private int ShareSelectedCount =>
+        _shareSelectStart >= 0 && _shareSelectEnd >= _shareSelectStart ? (_shareSelectEnd - _shareSelectStart + 1) : 0;
+
+    private bool IsRowShareSelected(int displayIndex) =>
+        _isShareSelecting && _shareSelectStart >= 0 && displayIndex >= _shareSelectStart && displayIndex <= _shareSelectEnd;
+
+    private bool IsRowShareSuggestAdjacent(int displayIndex) =>
+        _isShareSelecting && _shareSelectStart >= 0 && (displayIndex == _shareSelectStart - 1 || displayIndex == _shareSelectEnd + 1);
+
+    private float ComputeRowTargetAlpha(LyricRowHolder row, int activeDisplayIndex, bool isActive, bool isPast)
+    {
+        if (_isShareSelecting)
+        {
+            if (IsRowShareSelected(row.DisplayIndex)) return 1.0f;
+            if (IsRowShareSuggestAdjacent(row.DisplayIndex)) return 0.86f;
+            return 0.68f;
+        }
+
+        if (_manualScroll)
+            return isActive ? 1.0f : (isPast ? 0.45f : 0.72f);
+
+        if (activeDisplayIndex < 0)
+        {
+            return row.DisplayIndex switch
+            {
+                0 => 0.72f,
+                1 => 0.70f,
+                2 => 0.66f,
+                3 => 0.58f,
+                4 => 0.46f,
+                5 => 0.34f,
+                6 => 0.22f,
+                7 => 0.10f,
+                _ => 0f,
+            };
+        }
+
+        if (isActive) return 1.0f;
+
+        var dist = row.DisplayIndex - activeDisplayIndex;
+        if (dist < 0)
+        {
+            return (-dist) switch
+            {
+                1 => 0.50f,
+                2 => 0.38f,
+                3 => 0.26f,
+                4 => 0.12f,
+                _ => 0f,
+            };
+        }
+
+        var centerAlpha = dist switch
+        {
+            1 => 0.74f,
+            2 => 0.58f,
+            3 => 0.40f,
+            4 => 0.16f,
+            _ => 0f,
+        };
+
+        if (activeDisplayIndex < 3 && row.DisplayIndex <= 7)
+        {
+            var introFloor = row.DisplayIndex switch
+            {
+                1 => 0.74f,
+                2 => 0.62f,
+                3 => 0.50f,
+                4 => 0.38f,
+                5 => 0.28f,
+                6 => 0.18f,
+                7 => 0.10f,
+                _ => 0f,
+            };
+            return Math.Max(centerAlpha, introFloor);
+        }
+
+        return centerAlpha;
+    }
+
+    private void RefreshAllRowVisualStates(bool animate)
+    {
+        var activeDisplayIndex = ResolveDisplayIndexForLine(_activeLineIndex);
+        foreach (var row in _rows)
+            ApplyRowVisualState(row, animate, activeDisplayIndex);
+    }
+
+    private void ApplyRowVisualState(LyricRowHolder row, bool animate) =>
+        ApplyRowVisualState(row, animate, ResolveDisplayIndexForLine(_activeLineIndex));
+
+    private void ApplyRowVisualState(LyricRowHolder row, bool animate, int activeDisplayIndex)
+    {
+        var isTablet = IsTablet();
         var isActive = row.LineIndex == _activeLineIndex;
         var isPast = _activeLineIndex >= 0 && row.LineIndex < _activeLineIndex;
+        var isShareSelected = IsRowShareSelected(row.DisplayIndex);
+        var isShareSuggest = !isShareSelected && IsRowShareSuggestAdjacent(row.DisplayIndex);
 
-        var targetColor = isActive
-            ? Color.White
-            : isPast
-                ? LyricsPalette.BlendColor(_subdued, _background, 0.50)
-                : _subdued;
-        var targetAlpha = isActive ? 1.0f : (isPast ? 0.45f : 0.72f);
-        var targetScale = isActive ? 1.045f : 1.0f;
+        var suggestInk = LyricsPalette.BlendColor(_subdued, Color.White, 0.35);
+        var targetColor = _isShareSelecting
+            ? (isShareSelected ? Color.White : isShareSuggest ? suggestInk : _subdued)
+            : isActive
+                ? Color.White
+                : isPast
+                    ? LyricsPalette.BlendColor(_subdued, _background, 0.50)
+                    : _subdued;
+        var targetAlpha = ComputeRowTargetAlpha(row, activeDisplayIndex, isActive, isPast);
+        var targetScale = _isShareSelecting ? 1.0f : (isActive ? 1.045f : 1.0f);
+        var canInteract = _isShareSelecting || targetAlpha > 0.05f;
+        row.Root.Clickable = canInteract;
+        row.Root.LongClickable = canInteract;
 
-        if (!isActive && row.KaraokeSegments.Count > 0)
+        if (_isShareSelecting)
+        {
+            var padH = Dp(isTablet ? 16 : 12);
+            var padV = Dp(isTablet ? 12 : 9);
+            row.ContentWrap.SetPadding(padH, padV, padH, padV);
+            var pillRadius = isTablet ? 20f : 17f;
+            var selectedCardFill = LyricsPalette.BlendColor(_background, _subdued, 0.22);
+            var selectedCardBorder = Color.Argb(96, _subdued.R, _subdued.G, _subdued.B);
+            var suggestCardFill = Color.Argb(22, _subdued.R, _subdued.G, _subdued.B);
+            row.ContentWrap.Background = isShareSelected
+                ? UiHelpers.RoundedRect(this, selectedCardFill, pillRadius, selectedCardBorder, 1f)
+                : isShareSuggest
+                    ? UiHelpers.RoundedRect(this, suggestCardFill, pillRadius)
+                    : null;
+        }
+        else
+        {
+            if (row.ContentWrap.PaddingLeft != 0 || row.ContentWrap.PaddingTop != 0)
+                row.ContentWrap.SetPadding(0, 0, 0, 0);
+            if (row.ContentWrap.Background is not null)
+                row.ContentWrap.Background = null;
+        }
+
+        if ((_isShareSelecting || !isActive) && row.KaraokeSegments.Count > 0)
             row.Original.Text = row.RawText;
 
         row.Root.PivotX = 0f;
-        row.Root.PivotY = row.Original.Height > 0 ? row.Original.Height / 2f : Dp(16);
+        row.Root.PivotY = row.Original.Height > 0 ? row.Original.Height / 2f : Dp(IsTablet() ? 24 : 16);
 
         if (animate)
         {
@@ -1815,23 +2462,234 @@ public sealed class MainActivity : Activity
         if (_manualScroll) return;
         _manualScroll = true;
         _scrollAnimator?.Cancel();
-        _resumePill.Visibility = ViewStates.Visible;
+        if (!_isShareSelecting)
+            _resumePill.Visibility = ViewStates.Visible;
+        RefreshAllRowVisualStates(animate: true);
         StartUiLoopIfNeeded();
     }
 
     private void ResumeAutoScroll()
     {
+        if (!_manualScroll) return;
         _manualScroll = false;
         _resumePill.Visibility = ViewStates.Gone;
+        RefreshAllRowVisualStates(animate: true);
     }
 
     private void AutoSyncIfIdle()
     {
         var seconds = App.Settings.AutoSyncSeconds;
-        if (seconds <= 0 || !_manualScroll || _rows.Count == 0) return;
+        if (seconds <= 0 || !_manualScroll || _isShareSelecting || _rows.Count == 0) return;
         if (SystemClock.UptimeMillis() - _manualScrollAtMs < seconds * 1000L) return;
         ResumeAutoScroll();
         FollowActiveLine(animate: true);
+    }
+
+    private void EnterShareSelectionMode(LyricRowHolder initialRow)
+    {
+        if (_disposed || _rows.Count == 0 || _renderedLyrics is null) return;
+
+        var anchorOffset = initialRow.Root.Top - _lyricsScrollView.ScrollY;
+
+        AudioOutputSheetDialog.DismissIfShowing();
+        OffsetSheetDialog.DismissIfShowing();
+        HideRotateHintPill();
+        _scrollAnimator?.Cancel();
+        _manualScroll = false;
+        _resumePill.Visibility = ViewStates.Gone;
+
+        _isShareSelecting = true;
+        _shareSelectStart = initialRow.DisplayIndex;
+        _shareSelectEnd = initialRow.DisplayIndex;
+
+        initialRow.Root.PerformHapticFeedback(FeedbackConstants.LongPress);
+        RegisterShareBackCallback();
+        UpdateShareSelectionChrome();
+        ApplySystemBarInsets(_insetLeft, _insetTop, _insetRight, _insetBottom);
+        ApplyShareRowSpacing(compact: true);
+        RefreshAllRowVisualStates(animate: true);
+
+        initialRow.Root.Post(() =>
+        {
+            if (_disposed || !_isShareSelecting) return;
+            var headerOffset = _shareHeaderBar.Height > 0 ? _shareHeaderBar.Height : Dp(56);
+            var targetY = Math.Max(0, initialRow.Root.Top - Math.Max(Dp(24), anchorOffset - headerOffset));
+            _lyricsScrollView.ScrollTo(0, targetY);
+        });
+    }
+
+    private void ToggleShareRowSelection(LyricRowHolder row)
+    {
+        if (!_isShareSelecting) return;
+
+        var idx = row.DisplayIndex;
+        var prevStart = _shareSelectStart;
+        var prevEnd = _shareSelectEnd;
+        var count = ShareSelectedCount;
+
+        if (count == 0)
+        {
+            _shareSelectStart = idx;
+            _shareSelectEnd = idx;
+        }
+        else if (idx == _shareSelectStart - 1)
+        {
+            if (count >= MaxShareSelectionCount)
+            {
+                Toast.MakeText(this, $"最多可选择 {MaxShareSelectionCount} 行歌词", ToastLength.Short)?.Show();
+                return;
+            }
+            _shareSelectStart = idx;
+        }
+        else if (idx == _shareSelectEnd + 1)
+        {
+            if (count >= MaxShareSelectionCount)
+            {
+                Toast.MakeText(this, $"最多可选择 {MaxShareSelectionCount} 行歌词", ToastLength.Short)?.Show();
+                return;
+            }
+            _shareSelectEnd = idx;
+        }
+        else if (idx == _shareSelectStart && idx == _shareSelectEnd)
+        {
+            _shareSelectStart = -1;
+            _shareSelectEnd = -1;
+        }
+        else if (idx == _shareSelectStart)
+        {
+            _shareSelectStart++;
+        }
+        else if (idx == _shareSelectEnd)
+        {
+            _shareSelectEnd--;
+        }
+        else
+        {
+            // 点选非相邻行或内部行时，切换为以该行重新起选（与 Spotify 交互一致）
+            _shareSelectStart = idx;
+            _shareSelectEnd = idx;
+        }
+
+        UpdateShareSelectionChrome();
+        var activeDisplayIndex = ResolveDisplayIndexForLine(_activeLineIndex);
+        foreach (var item in _rows)
+        {
+            var wasAffected = prevStart >= 0 && item.DisplayIndex >= prevStart - 1 && item.DisplayIndex <= prevEnd + 1;
+            var isAffected = _shareSelectStart >= 0 && item.DisplayIndex >= _shareSelectStart - 1 && item.DisplayIndex <= _shareSelectEnd + 1;
+            if (wasAffected || isAffected)
+                ApplyRowVisualState(item, animate: true, activeDisplayIndex);
+        }
+    }
+
+    private void ExitShareSelectionMode(bool resumeAutoScroll)
+    {
+        if (!_isShareSelecting && _shareSelectStart < 0) return;
+
+        _isShareSelecting = false;
+        _shareSelectStart = -1;
+        _shareSelectEnd = -1;
+        UnregisterShareBackCallback();
+
+        if (_shareHeaderBar is not null)
+            _shareHeaderBar.Visibility = ViewStates.Gone;
+        if (_shareActionBar is not null)
+            _shareActionBar.Visibility = ViewStates.Gone;
+
+        if (resumeAutoScroll)
+        {
+            _manualScroll = false;
+            _resumePill.Visibility = ViewStates.Gone;
+        }
+
+        ApplySystemBarInsets(_insetLeft, _insetTop, _insetRight, _insetBottom);
+        ApplyShareRowSpacing(compact: false);
+        RefreshAllRowVisualStates(animate: true);
+        if (resumeAutoScroll)
+        {
+            RefreshFrameTick();
+            FollowActiveLine(animate: true);
+        }
+    }
+
+    private void UpdateShareSelectionChrome()
+    {
+        var count = ShareSelectedCount;
+        _shareHeaderBar.Visibility = _isShareSelecting ? ViewStates.Visible : ViewStates.Gone;
+        _shareActionBar.Visibility = _isShareSelecting ? ViewStates.Visible : ViewStates.Gone;
+        if (_isShareSelecting)
+        {
+            var pillBg = LyricsPalette.BlendColor(Color.White, _subdued, 0.16);
+            _shareActionBar.Background = UiHelpers.RoundedRect(this, pillBg, 24f);
+        }
+        _shareCountView.Text = $"已选择 {count} 行歌词";
+        var canConfirm = count > 0;
+        _shareActionBar.Enabled = canConfirm;
+        _shareActionBar.Alpha = canConfirm ? 1f : 0.45f;
+    }
+
+    private void OpenLyricSharePreview()
+    {
+        if (!_isShareSelecting || _renderedLyrics is null || ShareSelectedCount == 0)
+            return;
+
+        var selectedLines = _rows
+            .Where(r => r.DisplayIndex >= _shareSelectStart && r.DisplayIndex <= _shareSelectEnd)
+            .OrderBy(r => r.DisplayIndex)
+            .Select(r =>
+            {
+                string? tr = null;
+                if (r.LineIndex >= 0 && r.LineIndex < _renderedLyrics.Lines.Count)
+                    tr = ResolveLineTranslation(_renderedLyrics.Lines[r.LineIndex]);
+                return new ShareLyricLine(r.RawText, tr);
+            })
+            .ToList();
+
+        if (selectedLines.Count == 0) return;
+
+        LyricShareActivity.Launch(
+            this,
+            RequestCodeShareLyrics,
+            new LyricSharePayload(
+                _track?.Title,
+                _track?.Artist,
+                _coverBitmap,
+                _coverBackground,
+                selectedLines,
+                App.Settings.ShowTranslation));
+    }
+
+    private void RegisterShareBackCallback()
+    {
+        if (!OperatingSystem.IsAndroidVersionAtLeast(33)) return;
+        RegisterShareBackCallbackApi33();
+    }
+
+    private void UnregisterShareBackCallback()
+    {
+        if (!OperatingSystem.IsAndroidVersionAtLeast(33)) return;
+        UnregisterShareBackCallbackApi33();
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    [global::System.Runtime.Versioning.SupportedOSPlatform("android33.0")]
+    private void RegisterShareBackCallbackApi33()
+    {
+        if (_shareBackCallback is not null) return;
+        var cb = new ShareBackCallback(this);
+        _shareBackCallback = cb;
+        OnBackInvokedDispatcher.RegisterOnBackInvokedCallback(
+            global::Android.Window.IOnBackInvokedDispatcher.PriorityDefault,
+            cb);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    [global::System.Runtime.Versioning.SupportedOSPlatform("android33.0")]
+    private void UnregisterShareBackCallbackApi33()
+    {
+        if (_shareBackCallback is not ShareBackCallback cb) return;
+        _shareBackCallback = null;
+        try { OnBackInvokedDispatcher.UnregisterOnBackInvokedCallback(cb); }
+        catch { }
     }
 
     private async Task SeekToSecondsAsync(double seconds)
@@ -1862,6 +2720,7 @@ public sealed class MainActivity : Activity
         if (track is null)
         {
             _lastCoverKey = null;
+            _coverBitmap = null;
             _coverView.SetImageBitmap(null);
             _coverBackground = LyricsPalette.DefaultBackground;
             _coverSubdued = LyricsPalette.DefaultSubdued;
@@ -1872,6 +2731,7 @@ public sealed class MainActivity : Activity
         if (resetBeforeLoad)
         {
             _lastCoverKey = null;
+            _coverBitmap = null;
             _coverView.SetImageBitmap(null);
             _coverBackground = LyricsPalette.DefaultBackground;
             _coverSubdued = LyricsPalette.DefaultSubdued;
@@ -1933,6 +2793,7 @@ public sealed class MainActivity : Activity
 
     private void ApplyCoverBitmap(Bitmap bitmap)
     {
+        _coverBitmap = bitmap;
         _coverView.SetImageBitmap(bitmap);
         (_coverBackground, _coverSubdued) = LyricsPalette.FromCover(bitmap);
         ApplyActivePalette(animate: true);
@@ -2030,24 +2891,33 @@ public sealed class MainActivity : Activity
     {
         try
         {
-            var connected = App.BluetoothAudio.IsBluetoothAudioConnected;
-            var deviceName = App.BluetoothAudio.ConnectedDeviceName;
+            var active = App.BluetoothAudio.GetCurrentActiveOutput();
+            var iconKind = active.Kind switch
+            {
+                AudioOutputKind.Bluetooth => ClassicIconKind.BluetoothAudio,
+                AudioOutputKind.WiredOrUsb => ClassicIconKind.Headphones,
+                _ => ClassicIconKind.Speaker,
+            };
 
-            if (connected && !string.IsNullOrWhiteSpace(deviceName))
-            {
-                _bluetoothNameView.Text = deviceName;
-                _bluetoothRow.Visibility = ViewStates.Visible;
+            _bluetoothIcon.Configure(iconKind, Color.Rgb(230, 230, 230), iconFraction: 0.92f);
+            _bluetoothNameView.Text = string.IsNullOrWhiteSpace(active.Name)
+                ? App.BluetoothAudio.GetLocalDeviceDisplayName()
+                : active.Name;
+            _bluetoothRow.Visibility = ViewStates.Visible;
+
+            if (active.Kind == AudioOutputKind.Bluetooth)
                 MaybeRequestBluetoothPermission();
-            }
-            else
-            {
-                _bluetoothRow.Visibility = ViewStates.Gone;
-            }
         }
         catch (Exception ex)
         {
-            AndroidLog.Write($"[bluetooth] 刷新蓝牙 UI 失败: {ex.Message}");
-            try { _bluetoothRow.Visibility = ViewStates.Gone; } catch { }
+            AndroidLog.Write($"[bluetooth] 刷新音频输出 UI 失败: {ex.Message}");
+            try
+            {
+                _bluetoothIcon.Configure(ClassicIconKind.Speaker, Color.Rgb(230, 230, 230), iconFraction: 0.92f);
+                _bluetoothNameView.Text = App.BluetoothAudio.GetLocalDeviceDisplayName();
+                _bluetoothRow.Visibility = ViewStates.Visible;
+            }
+            catch { }
         }
     }
 
@@ -2086,12 +2956,16 @@ public sealed class MainActivity : Activity
     }
 
     private void OpenOffsetDialog() =>
-        OffsetSheetDialog.Show(this, _offsetHost, () =>
-        {
-            UpdateTransportAndButtons();
-            RefreshFrameTick();
-            FollowActiveLine(animate: true);
-        });
+        OffsetSheetDialog.Show(
+            this,
+            _offsetHost,
+            () =>
+            {
+                UpdateTransportAndButtons();
+                RefreshFrameTick();
+                FollowActiveLine(animate: true);
+            },
+            _isLandscapeLayout ? _footerView : null);
 
     private void OpenAudioOutputDialog() =>
         AudioOutputSheetDialog.Show(
