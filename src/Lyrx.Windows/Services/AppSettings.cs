@@ -48,6 +48,15 @@ public sealed class AppSettings
     public bool ClassicTopmost { get; set; }
     public string ClassicBackgroundMode { get; set; } = "dynamic";
     public string? ClassicLyricsFont { get; set; }
+    public string LyricShareStyle { get; set; } = "spotify";
+    public string LyricShareBackgroundMode { get; set; } = "gradient";
+    public double LyricShareFontScale { get; set; } = 1.0;
+    public bool LyricShareClipboardKeepBackdrop { get; set; } = true;
+    public string LyricShareCoverEffectPreset { get; set; } = "soft-blur";
+    public double? LyricShareCoverBlur { get; set; }
+    public double? LyricShareCoverDim { get; set; }
+    public double? LyricShareCoverGradientFade { get; set; }
+    public double? LyricShareCoverTint { get; set; }
 
     // ---- 覆盖层样式 (#RRGGBB) ----
     public string TextColor { get; set; } = "#FFFFFF";

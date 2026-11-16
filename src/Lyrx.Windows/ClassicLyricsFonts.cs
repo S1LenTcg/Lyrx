@@ -7,22 +7,54 @@ namespace Musebase.Windows;
 
 internal static class ClassicLyricsFonts
 {
-    public static FontFamily Family { get; } = new("Microsoft YaHei UI, Malgun Gothic, Yu Gothic UI, Segoe UI");
+    public static FontFamily SystemFamily { get; } = new("Microsoft YaHei UI, Malgun Gothic, Yu Gothic UI, Segoe UI");
     public static FontFamily Body { get; } = LoadLocalBody();
+    public static FontFamily Family => Body;
+    public static FontFamily SpotifyTitle { get; } = LoadLocalTitle();
+    public static bool HasBundledSpotifyMix { get; private set; }
     public static string DirectoryPath => Path.Combine(AppSettings.DataDirectory, "fonts");
 
     internal sealed record Choice(string? Id, string Label, FontFamily Font);
 
     private static FontFamily LoadLocalBody()
     {
-        if (!File.Exists(Path.Combine(AppContext.BaseDirectory, "local-fonts", "SpotifyMixUI-Regular.ttf")))
-            return Family;
-        return new FontFamily(new Uri(AppContext.BaseDirectory), $"./local-fonts/#Spotify Mix UI, {Family.Source}");
+        var fontsDir = Path.Combine(AppContext.BaseDirectory, "local-fonts");
+        if (!File.Exists(Path.Combine(fontsDir, "SpotifyMixUI-Regular.ttf")))
+        {
+            HasBundledSpotifyMix = false;
+            return SystemFamily;
+        }
+        HasBundledSpotifyMix = true;
+        var baseUri = new Uri(fontsDir + Path.DirectorySeparatorChar);
+        return new FontFamily(baseUri, $"./#Spotify Mix UI, {SystemFamily.Source}");
     }
+
+    private static FontFamily LoadLocalTitle()
+    {
+        var fontsDir = Path.Combine(AppContext.BaseDirectory, "local-fonts");
+        if (!File.Exists(Path.Combine(fontsDir, "SpotifyMixUITitle-700.ttf")))
+            return Body;
+        var baseUri = new Uri(fontsDir + Path.DirectorySeparatorChar);
+        return new FontFamily(baseUri, $"./#Spotify Mix UI Title Var Wide, ./#Spotify Mix UI, {SystemFamily.Source}");
+    }
+
+    public static FontFamily Resolve(string? fontId) =>
+        string.IsNullOrWhiteSpace(fontId)
+            ? Family
+            : GetChoices().FirstOrDefault(choice => string.Equals(choice.Id, fontId, StringComparison.Ordinal))?.Font ?? Family;
 
     public static IReadOnlyList<Choice> GetChoices()
     {
-        var choices = new List<Choice> { new(null, "Windows 默认字体", Family) };
+        var choices = new List<Choice>();
+        if (HasBundledSpotifyMix)
+        {
+            choices.Add(new(null, "Spotify Mix（默认）", Body));
+            choices.Add(new("windows-default", "Windows 默认字体", SystemFamily));
+        }
+        else
+        {
+            choices.Add(new(null, "Windows 默认字体", SystemFamily));
+        }
         try
         {
             if (Directory.Exists(DirectoryPath))

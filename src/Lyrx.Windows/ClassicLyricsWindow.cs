@@ -50,6 +50,17 @@ internal sealed class ClassicLyricsWindow : Window
     private readonly StackPanel _lines = new();
     private readonly ScrollViewer _scroll;
     private readonly Border _panel;
+    private readonly Border _footerBar;
+    private readonly Border _topFade;
+    private readonly Border _bottomFade;
+    private readonly GradientStop _topFadeOpaqueStop = new(Color.FromArgb(240, DefaultBackground.R, DefaultBackground.G, DefaultBackground.B), 0);
+    private readonly GradientStop _topFadeClearStop = new(Color.FromArgb(0, DefaultBackground.R, DefaultBackground.G, DefaultBackground.B), 1);
+    private readonly GradientStop _bottomFadeClearStop = new(Color.FromArgb(0, DefaultBackground.R, DefaultBackground.G, DefaultBackground.B), 0);
+    private readonly GradientStop _bottomFadeOpaqueStop = new(Color.FromArgb(240, DefaultBackground.R, DefaultBackground.G, DefaultBackground.B), 1);
+    private readonly Border _transportToast;
+    private readonly TextBlock _transportToastText;
+    private DispatcherTimer? _transportToastTimer;
+    private DispatcherTimer? _captionHideTimer;
     private readonly TextBlock _title = TrackLabel(Brushes.White, 14, 18);
     private readonly TextBlock _artist = TrackLabel(Muted, 12, 16);
     private readonly TextBlock _elapsed = TimeLabel(TextAlignment.Right);
@@ -63,19 +74,15 @@ internal sealed class ClassicLyricsWindow : Window
     private readonly Button _repeat;
     private readonly Button _resume;
     private readonly Button _translate;
+    private readonly Button _shareBtn;
     private readonly Button _fullscreen;
     private readonly Border _captionBar;
+    private readonly StackPanel _captionButtonsPanel;
     private readonly Action _onToggleTranslation;
     private readonly WindowChrome _chrome;
+    private const int MaxShareSelectionCount = 6;
+
     private readonly Dictionary<int, LyricRow> _rows = new();
-    private WindowsAudioOutputMonitor _audioMonitor = null!;
-    private bool _audioMonitorOwned = true;
-    private readonly Button _audioOutputBtn = null!;
-    private readonly ClassicTransportGlyph _audioOutputIcon = null!;
-    private readonly TextBlock _audioOutputLabel = null!;
-    private readonly AudioOutputPopupController _audioPopup = null!;
-    private bool _lastAudioPlaying;
-    private bool _audioMonitorStarted;
     private TrackInfo? _track;
     private Lyrics? _lyrics;
     private LyricsStatusKind? _status;
@@ -86,6 +93,7 @@ internal sealed class ClassicLyricsWindow : Window
     private bool _coverWaitingOnlineFallback;
     private bool _coverTriedArtworkUrl;
     private long _coverThumbnailVersion = -1;
+    private byte[]? _coverBytes;
     private int _activeIndex = -1;
     private Color _subdued = DefaultSubdued;
     private Color _background = DefaultBackground;
@@ -94,22 +102,40 @@ internal sealed class ClassicLyricsWindow : Window
     private bool _manualScroll;
     private long _manualScrollAt;
     private bool _resumeScrollPending;
-    private bool _transportPending;
+    private bool _captionVisible;
+    private Point? _pendingWindowDragStart;
+    private bool _mouseDownStartedOutsideRow;
+    private int? _pressedRowIndex;
+    private long _suppressRowClickUntilTick;
     private double? _pendingSeekSeconds;
+    private int? _pendingSeekLineIndex;
     private long _pendingSeekDeadlineTick;
     private bool _seekInFlight;
     private long _seekGeneration;
     private bool _isFullscreen;
     private Rect _restoreBounds;
     private bool _wasMaximized;
+    private Action? _relayoutFooter;
     private bool _isAnimatingTranslation;
     private bool _waitingForTranslationAnimation;
-    private bool _latinMetrics;
     private bool _chineseLyrics;
     private double _lineHeightScale = 1.0;
     private double _rowGapScale = 1.0;
     private LyricRow? _translationAnchorRow;
     private double _translationAnchorViewportY;
+
+    private bool _isShareSelecting;
+    private readonly HashSet<int> _selectedShareLines = new();
+    private Lyrics? _shareSelectionLyrics;
+    private LyricShareWindow? _shareWindow;
+    private DispatcherTimer? _shareLimitHintTimer;
+    private readonly Border _shareHeaderBar = null!;
+    private readonly Button _shareCancelBtn = null!;
+    private readonly TextBlock _shareCountText = null!;
+    private readonly TextBlock _shareLimitHintText = null!;
+    private readonly Border _shareActionBar = null!;
+    private readonly Button _shareContinueBtn = null!;
+    private int? _hoveredShareLineIndex;
 
     public event Action? ViewStateChanged;
 
@@ -154,14 +180,22 @@ internal sealed class ClassicLyricsWindow : Window
 
         var layout = new DockPanel();
         var lyricsView = new Grid();
-        var footer = new Grid { Margin = new Thickness(12, 0, 12, 0), UseLayoutRounding = true };
+        var footer = new Grid { Margin = new Thickness(0), UseLayoutRounding = true };
         footer.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         footer.ColumnDefinitions.Add(new ColumnDefinition());
         footer.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         footer.RowDefinitions.Add(new RowDefinition());
         footer.RowDefinitions.Add(new RowDefinition());
-        DockPanel.SetDock(footer, Dock.Bottom);
-        layout.Children.Add(footer);
+        _footerBar = new Border
+        {
+            Child = footer,
+            Background = Chrome,
+            BorderBrush = CreateOffsetAlphaBrush(24, 255, 255, 255),
+            BorderThickness = new Thickness(0, 1, 0, 0),
+            UseLayoutRounding = true,
+        };
+        DockPanel.SetDock(_footerBar, Dock.Bottom);
+        layout.Children.Add(_footerBar);
 
         var trackInfo = new DockPanel { VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 12, 0), ClipToBounds = true };
         var coverContent = new Grid();
@@ -198,74 +232,66 @@ internal sealed class ClassicLyricsWindow : Window
             VerticalAlignment = VerticalAlignment.Center,
             Margin = new Thickness(8, 0, 0, 0),
         };
-        _audioMonitor = new WindowsAudioOutputMonitor();
-        (_audioOutputBtn, _audioOutputIcon, _audioOutputLabel) = CreateAudioOutputTriggerButton();
-        _audioPopup = new AudioOutputPopupController(
-            this,
-            _audioMonitor,
-            footer,
-            _audioOutputBtn,
-            lyricsView,
-            onOpened: () =>
-            {
-                _offsetPopup.IsOpen = false;
-                _audioOutputBtn.IsHitTestVisible = false;
-            },
-            onClosed: () =>
-            {
-                Dispatcher.BeginInvoke(
-                    System.Windows.Threading.DispatcherPriority.Background,
-                    () => _audioOutputBtn.IsHitTestVisible = true);
-            });
-        SubscribeAudioMonitorEvents(_audioMonitor);
-        _audioOutputBtn.Click += (_, _) =>
-        {
-            if (_offsetPopup.IsOpen) _offsetPopup.IsOpen = false;
-            RefreshAudioPopupOutputs();
-            _audioPopup.Toggle();
-        };
         _adjustScopePerTrack = _settings.ClassicOffsetPerTrack;
         _offsetScopeWasPerTrack = _adjustScopePerTrack;
         _offsetBtn = CreateOffsetTriggerButton();
         _offsetPopup = CreateOffsetPopup();
-        _offsetPopup.Opened += (_, _) => _audioPopup.Close();
         UpdateOffsetButton();
         _translate = ChromeButton(ClassicTransportIcon.Translate, "切换双语歌词", ToggleTranslation);
         UpdateTranslateButton();
+        _shareBtn = ChromeButton(ClassicTransportIcon.Share, "分享歌词…", ToggleShareSelectionFromButton);
+        UpdateShareButton();
         var settingsBtn = ChromeButton(ClassicTransportIcon.Settings, "设置", openSettings);
-        windowControls.Children.Add(_audioOutputBtn);
+        _fullscreen = ChromeButton(ClassicTransportIcon.Fullscreen, "全屏 (F11)", ToggleFullscreen);
+        _fullscreen.Margin = new Thickness(5, 0, 2, 0);
         windowControls.Children.Add(_offsetBtn);
         windowControls.Children.Add(_translate);
+        windowControls.Children.Add(_shareBtn);
         windowControls.Children.Add(settingsBtn);
+        windowControls.Children.Add(_fullscreen);
         Grid.SetColumn(windowControls, 2);
         footer.Children.Add(windowControls);
 
-        var minimize = ChromeButton(ClassicTransportIcon.Minimize, "最小化", () => WindowState = WindowState.Minimized, height: 32);
+        var captionInk = CreateOffsetAlphaBrush(244, 255, 255, 255);
+        var minimize = ChromeButton(
+            ClassicTransportIcon.Minimize,
+            "最小化",
+            () => WindowState = WindowState.Minimized,
+            height: 28,
+            width: 32,
+            glyphSize: 16,
+            cornerRadius: 14,
+            foreground: captionInk,
+            hoverBackground: CreateOffsetAlphaBrush(42, 255, 255, 255));
         minimize.Margin = new Thickness(0);
-        _fullscreen = ChromeButton(ClassicTransportIcon.Fullscreen, "全屏 (F11)", ToggleFullscreen, height: 32);
-        _fullscreen.Margin = new Thickness(16, 0, 16, 0);
-        var close = ChromeButton(ClassicTransportIcon.Close, "关闭", Close, height: 32);
-        close.Margin = new Thickness(0);
-        var captionButtons = new StackPanel { Orientation = Orientation.Horizontal };
-        captionButtons.Children.Add(minimize);
-        captionButtons.Children.Add(_fullscreen);
-        captionButtons.Children.Add(close);
-        _captionBar = new Border
+        var close = ChromeButton(
+            ClassicTransportIcon.Close,
+            "关闭",
+            Close,
+            height: 28,
+            width: 32,
+            glyphSize: 16,
+            cornerRadius: 14,
+            foreground: captionInk,
+            hoverBackground: CreateOffsetAlphaBrush(195, 232, 54, 68));
+        close.Margin = new Thickness(2, 0, 0, 0);
+        _captionButtonsPanel = new StackPanel
         {
-            Child = captionButtons,
-            Background = Brushes.Transparent,
-            HorizontalAlignment = HorizontalAlignment.Right,
-            VerticalAlignment = VerticalAlignment.Top,
-            Margin = new Thickness(0, 10, 12, 0),
+            Orientation = Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
         };
+        _captionButtonsPanel.Children.Add(minimize);
+        _captionButtonsPanel.Children.Add(close);
+        _captionBar = BuildLiquidGlassCaptionCapsule(_captionButtonsPanel);
         Panel.SetZIndex(_captionBar, 20);
 
         var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Center };
-        _shuffle = TransportButton(ClassicTransportIcon.Shuffle, "随机播放", _player.ToggleShuffleAsync);
+        _shuffle = TransportButton(ClassicTransportIcon.Shuffle, "随机播放", _player.ToggleShuffleAsync, onRejected: () => ShowTransportFeedback("当前播放器未开放系统随机控制"));
         _previous = TransportButton(ClassicTransportIcon.Previous, "上一首", _player.SkipPreviousAsync);
         _play = TransportButton(ClassicTransportIcon.Play, "播放", _player.TogglePlayPauseAsync, round: true);
         _next = TransportButton(ClassicTransportIcon.Next, "下一首", _player.SkipNextAsync);
-        _repeat = TransportButton(ClassicTransportIcon.Repeat, "单曲循环", _player.ToggleRepeatOneAsync);
+        _repeat = TransportButton(ClassicTransportIcon.Repeat, "顺序播放", _player.ToggleRepeatModeAsync, onRejected: () => ShowTransportFeedback("当前播放器未开放系统循环控制"));
         buttons.Children.Add(_shuffle);
         buttons.Children.Add(_previous);
         buttons.Children.Add(_play);
@@ -275,6 +301,11 @@ internal sealed class ClassicLyricsWindow : Window
         transport.Children.Add(buttons);
 
         // 底部进度条：支持鼠标悬停、拖拽、点击与键盘步进跳转播放（或校准时钟）
+        _progress.ValueChanged += (_, _) =>
+        {
+            if (_progress.IsUserSeeking)
+                Refresh();
+        };
         _progress.SeekRequested += seconds => _ = SeekToSecondsAsync(seconds);
         var timeline = new Grid { Margin = new Thickness(0, 4, 0, 0) };
         timeline.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(46) });
@@ -290,19 +321,31 @@ internal sealed class ClassicLyricsWindow : Window
         void LayoutFooter(double width)
         {
             var compact = width < 600;
-            footer.Margin = compact ? new Thickness(8, 2, 8, 8) : new Thickness(12, 0, 12, 0);
-            var coverSize = compact ? 44 : 56;
+            var fullscreenBar = !compact && _isFullscreen;
+            _footerBar.Padding = compact
+                ? new Thickness(12, 8, 12, 10)
+                : fullscreenBar
+                    ? new Thickness(26, 10, 26, 12)
+                    : new Thickness(18, 8, 18, 8);
+            _captionBar.Margin = compact
+                ? new Thickness(0, 12, 12, 0)
+                : fullscreenBar
+                    ? new Thickness(0, 20, 26, 0)
+                    : new Thickness(0, 16, 18, 0);
+            footer.Margin = new Thickness(0);
+            var coverSize = compact ? 44 : fullscreenBar ? 64 : 56;
             coverFrame.Width = coverSize;
             coverFrame.Height = coverSize;
             coverContent.Clip = new RectangleGeometry(new Rect(0, 0, coverSize, coverSize), 4, 4);
-            var transportWidth = compact ? 0 : Math.Clamp(width * 0.44, 280, 722);
-            footer.Height = compact ? 118 : 78;
+            var innerWidth = Math.Max(0, width - _footerBar.Padding.Left - _footerBar.Padding.Right);
+            var transportWidth = compact ? 0 : Math.Clamp(innerWidth * 0.44, 280, 722);
+            _footerBar.Height = compact ? 124 : fullscreenBar ? 102 : 84;
             footer.RowDefinitions[0].Height = compact ? new GridLength(56) : new GridLength(1, GridUnitType.Star);
             footer.RowDefinitions[1].Height = compact ? new GridLength(1, GridUnitType.Star) : new GridLength(0);
             footer.ColumnDefinitions[1].Width = compact
                 ? new GridLength(0)
                 : new GridLength(transportWidth);
-            footer.ColumnDefinitions[2].MinWidth = compact ? 0 : 176;
+            footer.ColumnDefinitions[2].MinWidth = compact ? 0 : 232;
             footer.ColumnDefinitions[2].Width = compact
                 ? GridLength.Auto
                 : new GridLength(1, GridUnitType.Star);
@@ -312,37 +355,14 @@ internal sealed class ClassicLyricsWindow : Window
             Grid.SetRow(transport, compact ? 1 : 0);
             Grid.SetColumn(transport, compact ? 0 : 1);
             Grid.SetColumnSpan(transport, compact ? 3 : 1);
-
-            var col2Est = Math.Max(176.0, (width - 24 - transportWidth) / 2.0);
-            var availForLabel = col2Est - 8 - 138 - 38;
-            var showLabel = !compact && width >= 820 && availForLabel >= 56;
-            _audioOutputBtn.HorizontalAlignment = HorizontalAlignment.Center;
-            _audioOutputBtn.VerticalAlignment = VerticalAlignment.Center;
-            _audioOutputBtn.Height = 36;
-            _audioOutputBtn.MinWidth = 32;
-            _audioOutputBtn.Margin = new Thickness(1, 0, 1, 0);
-            if (showLabel)
-            {
-                _audioOutputBtn.Width = double.NaN;
-                _audioOutputBtn.Padding = new Thickness(6, 0, 6, 0);
-                _audioOutputLabel.Visibility = Visibility.Visible;
-                _audioOutputLabel.MaxWidth = Math.Clamp(availForLabel, 56, 175);
-            }
-            else
-            {
-                _audioOutputBtn.Width = 32;
-                _audioOutputBtn.Padding = new Thickness(0);
-                _audioOutputLabel.Visibility = Visibility.Collapsed;
-            }
-            UpdateAudioOutputTriggerIcon();
-
-            if (_audioPopup.IsOpen)
-            {
-                _audioPopup.SyncPopupBoundsAndPlacement();
-            }
         }
-        LayoutFooter(Width - footer.Margin.Left - footer.Margin.Right);
-        footer.SizeChanged += (_, e) => { if (e.WidthChanged) LayoutFooter(e.NewSize.Width); };
+        _relayoutFooter = () =>
+        {
+            var hostW = layout.ActualWidth > 0 ? layout.ActualWidth : Width;
+            LayoutFooter(Math.Max(0, hostW));
+        };
+        LayoutFooter(Width);
+        _footerBar.SizeChanged += (_, e) => { if (e.WidthChanged) LayoutFooter(e.NewSize.Width); };
 
         _scroll = new ScrollViewer
         {
@@ -411,6 +431,55 @@ internal sealed class ClassicLyricsWindow : Window
         syncMenu.Items.Add(trackGroup);
         _resume.ContextMenu = syncMenu;
         lyricsView.Children.Add(_resume);
+        (_shareHeaderBar, _shareCancelBtn, _shareCountText, _shareLimitHintText) = BuildShareHeaderBar();
+        (_shareActionBar, _shareContinueBtn) = BuildShareActionBar();
+        _topFade = new Border
+        {
+            Height = 28,
+            VerticalAlignment = VerticalAlignment.Top,
+            IsHitTestVisible = false,
+            Background = new LinearGradientBrush(
+                new GradientStopCollection { _topFadeOpaqueStop, _topFadeClearStop },
+                new Point(0, 0), new Point(0, 1)),
+        };
+        Panel.SetZIndex(_topFade, 6);
+        _bottomFade = new Border
+        {
+            Height = 44,
+            VerticalAlignment = VerticalAlignment.Bottom,
+            IsHitTestVisible = false,
+            Background = new LinearGradientBrush(
+                new GradientStopCollection { _bottomFadeClearStop, _bottomFadeOpaqueStop },
+                new Point(0, 0), new Point(0, 1)),
+        };
+        Panel.SetZIndex(_bottomFade, 6);
+        _transportToastText = new TextBlock
+        {
+            Foreground = Brushes.White,
+            FontSize = 12.5,
+            FontWeight = FontWeights.SemiBold,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        _transportToast = new Border
+        {
+            Child = _transportToastText,
+            Background = CreateOffsetAlphaBrush(225, 24, 24, 26),
+            BorderBrush = CreateOffsetAlphaBrush(42, 255, 255, 255),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(16),
+            Padding = new Thickness(14, 7, 14, 7),
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Bottom,
+            Margin = new Thickness(0, 0, 0, 18),
+            Visibility = Visibility.Collapsed,
+            IsHitTestVisible = false,
+        };
+        Panel.SetZIndex(_transportToast, 19);
+        lyricsView.Children.Add(_topFade);
+        lyricsView.Children.Add(_bottomFade);
+        lyricsView.Children.Add(_transportToast);
+        lyricsView.Children.Add(_shareHeaderBar);
+        lyricsView.Children.Add(_shareActionBar);
         lyricsView.Children.Add(_captionBar);
         _resume.Click += (_, _) =>
         {
@@ -462,25 +531,28 @@ internal sealed class ClassicLyricsWindow : Window
             if (PresentationSource.FromVisual(this) is HwndSource source)
                 source.AddHook(WndProc);
         };
-        Loaded += (_, _) => { UpdatePanelFrame(); ApplyActivePalette(); StartAudioMonitorIfNeeded(); Refresh(); _timer.Start(); };
+        Loaded += (_, _) => { UpdatePanelFrame(); ApplyActivePalette(); Refresh(); _timer.Start(); };
         Closed += (_, _) =>
         {
             _timer.Stop();
+            _shareLimitHintTimer?.Stop();
+            _transportToastTimer?.Stop();
+            _captionHideTimer?.Stop();
             _progress.CancelPendingSeek();
             CancelCoverLoad();
-            _audioPopup.Close();
-            UnsubscribeAudioMonitorEvents(_audioMonitor);
-            if (_audioMonitorOwned) _audioMonitor.Dispose();
+            if (_shareWindow is { IsLoaded: true })
+            {
+                try { _shareWindow.Close(); } catch { }
+            }
             SavePlacement();
         };
         PreviewKeyDown += (_, e) =>
         {
             if (HandleOffsetKeyDown(e)) return;
             var key = e.Key == Key.System ? e.SystemKey : e.Key;
-            if (key == Key.Escape && _audioPopup.IsOpen)
+            if (key == Key.Escape && _isShareSelecting)
             {
-                _audioPopup.Close();
-                _audioOutputBtn.Focus();
+                ExitShareSelectionMode(resumeAutoScroll: true);
                 e.Handled = true;
                 return;
             }
@@ -495,19 +567,68 @@ internal sealed class ClassicLyricsWindow : Window
                 e.Handled = true;
             }
         };
+        PreviewMouseMove += (_, e) =>
+        {
+            var pos = e.GetPosition(this);
+            var inCaptionRevealZone = !_isShareSelecting
+                && (pos.Y >= 0 && pos.Y <= 44 || (pos.Y <= 86 && pos.X >= Math.Max(0, ActualWidth - 200)) || _captionBar.IsMouseOver);
+            if (inCaptionRevealZone)
+                RevealCaptionBar();
+            else
+                ScheduleCaptionBarHide();
+
+            if (_pendingWindowDragStart is { } origin)
+            {
+                if (e.LeftButton != MouseButtonState.Pressed)
+                {
+                    _pendingWindowDragStart = null;
+                }
+                else if (Math.Abs(pos.X - origin.X) >= SystemParameters.MinimumHorizontalDragDistance
+                    || Math.Abs(pos.Y - origin.Y) >= SystemParameters.MinimumVerticalDragDistance)
+                {
+                    _pendingWindowDragStart = null;
+                    if (!_isFullscreen && WindowState == WindowState.Normal)
+                    {
+                        try { DragMove(); } catch { }
+                    }
+                }
+            }
+        };
+        MouseLeave += (_, _) =>
+        {
+            _pendingWindowDragStart = null;
+            ScheduleCaptionBarHide(delayMs: 120);
+        };
         PreviewMouseLeftButtonDown += (_, e) =>
         {
-            if (IsInteractiveTarget(e.OriginalSource as DependencyObject)) return;
+            var source = e.OriginalSource as DependencyObject;
+            var row = FindAncestorLyricRow(source);
+            if (IsInteractiveTarget(source))
+            {
+                _pendingWindowDragStart = null;
+                _mouseDownStartedOutsideRow = row is null;
+                return;
+            }
+            _mouseDownStartedOutsideRow = true;
+            _pressedRowIndex = null;
             if (e.ClickCount == 2)
             {
+                _pendingWindowDragStart = null;
+                _suppressRowClickUntilTick = Environment.TickCount64 + 180;
                 ToggleFullscreen();
                 e.Handled = true;
                 return;
             }
             if (!_isFullscreen && WindowState == WindowState.Normal && e.LeftButton == MouseButtonState.Pressed)
+                _pendingWindowDragStart = e.GetPosition(this);
+        };
+        PreviewMouseLeftButtonUp += (_, e) =>
+        {
+            _pendingWindowDragStart = null;
+            if (FindAncestorLyricRow(e.OriginalSource as DependencyObject) is null)
             {
-                DragMove();
-                e.Handled = true;
+                _pressedRowIndex = null;
+                _mouseDownStartedOutsideRow = false;
             }
         };
     }
@@ -535,7 +656,12 @@ internal sealed class ClassicLyricsWindow : Window
         return label;
     }
 
-    private Button TransportButton(ClassicTransportIcon glyph, string label, Func<Task<bool>> action, bool round = false)
+    private Button TransportButton(
+        ClassicTransportIcon glyph,
+        string label,
+        Func<Task<bool>> action,
+        bool round = false,
+        Action? onRejected = null)
     {
         var icon = new ClassicTransportGlyph(glyph);
         var button = new Button
@@ -555,17 +681,30 @@ internal sealed class ClassicLyricsWindow : Window
         icon.SetBinding(ClassicTransportGlyph.TintProperty, new Binding(nameof(Button.Foreground)) { Source = button });
         AutomationProperties.SetName(button, label);
         ToolTipService.SetShowOnDisabled(button, true);
+        var buttonPending = false;
         button.Click += async (_, _) =>
         {
-            if (_transportPending) return;
-            _transportPending = true;
-            try { await action(); }
-            finally { _transportPending = false; Refresh(); }
+            if (buttonPending) return;
+            buttonPending = true;
+            try
+            {
+                var task = action();
+                var completed = await Task.WhenAny(task, Task.Delay(1500));
+                if (ReferenceEquals(completed, task))
+                {
+                    if (!await task) onRejected?.Invoke();
+                }
+            }
+            finally
+            {
+                buttonPending = false;
+                Refresh();
+            }
         };
         return button;
     }
 
-    private static ControlTemplate TransportTemplate(double cornerRadius)
+    private static ControlTemplate TransportTemplate(double cornerRadius, Brush? hoverBackground = null)
     {
         var border = new FrameworkElementFactory(typeof(Border));
         border.SetBinding(Border.BackgroundProperty, new Binding(nameof(Button.Background)) { RelativeSource = RelativeSource.TemplatedParent });
@@ -582,6 +721,8 @@ internal sealed class ClassicLyricsWindow : Window
         var hover = new Trigger { Property = IsMouseOverProperty, Value = true };
         if (cornerRadius >= 18) hover.Setters.Add(new Setter(OpacityProperty, 0.86));
         else hover.Setters.Add(new Setter(ForegroundProperty, Brushes.White));
+        if (hoverBackground is not null)
+            hover.Setters.Add(new Setter(BackgroundProperty, hoverBackground));
         template.Triggers.Add(hover);
         return template;
     }
@@ -601,6 +742,7 @@ internal sealed class ClassicLyricsWindow : Window
         UpdateOffsetButton();
         if (songChanged)
         {
+            ExitShareSelectionMode(resumeAutoScroll: false);
             _track = track;
             _coordinator.TrackOffsetSeconds = _settings.GetTrackOffset(TrackOffsetKey(track));
             UpdateOffsetButton();
@@ -617,6 +759,7 @@ internal sealed class ClassicLyricsWindow : Window
             _coverWaitingOnlineFallback = false;
             _coverTriedArtworkUrl = false;
             _coverThumbnailVersion = _player.ThumbnailVersion;
+            _coverBytes = null;
             _title.Text = track?.Title ?? "等待播放";
             _artist.Text = track?.Artist ?? "";
             _cover.Source = null;
@@ -689,6 +832,7 @@ internal sealed class ClassicLyricsWindow : Window
                 || Math.Abs(liveSeconds - pendingTarget) <= 1.2)
             {
                 _pendingSeekSeconds = null;
+                _pendingSeekLineIndex = null;
             }
         }
 
@@ -712,50 +856,63 @@ internal sealed class ClassicLyricsWindow : Window
             _remaining.Text = total is { } remTotal ? $"−{FormatTime(remTotal - cur)}" : "–:––";
         }
 
-        SyncAudioTrackMetadata();
-        if (lyrics is null || position is null) return;
+        if (lyrics is null || (position is null && !_progress.IsUserSeeking && _pendingSeekSeconds is null)) return;
 
-        var adjusted = position.Value.TotalSeconds + lyrics.TimeDelay + _coordinator.ManualOffsetSeconds + _coordinator.TrackOffsetSeconds;
+        var effectiveSeconds = _progress.IsUserSeeking
+            ? _progress.Value
+            : (_pendingSeekSeconds is { } pending
+                ? Math.Clamp(pending, 0, _progress.Maximum)
+                : position!.Value.TotalSeconds);
+        var adjustEpsilon = _pendingSeekSeconds is not null ? 1e-4 : 0.0;
+        var adjusted = effectiveSeconds + adjustEpsilon + lyrics.TimeDelay + _coordinator.ManualOffsetSeconds + _coordinator.TrackOffsetSeconds;
         var (active, _) = lyrics.LineIndexesAt(adjusted);
-        var index = active ?? -1;
+        var index = _pendingSeekSeconds is not null && _pendingSeekLineIndex is { } pendingIdx && _rows.ContainsKey(pendingIdx)
+            ? pendingIdx
+            : (active ?? -1);
         if (_activeIndex != index)
         {
             var previousIndex = _activeIndex;
             _activeIndex = index;
-            var isSequentialStep = previousIndex >= 0 && (index == previousIndex + 1);
-
-            if (!isSequentialStep)
+            if (!_isShareSelecting)
             {
-                // 任意跳转 / 切歌 / 拖拽进度：瞬时对齐所有行，防止动画冲突与抽搐（鬼畜）
-                CancelScrollAnimation();
-                foreach (var (rowIndex, row) in _rows)
+                if (previousIndex < 0)
                 {
-                    SetRowVisual(row, rowIndex, animate: false);
-                    AutomationProperties.SetItemStatus(row, rowIndex == index ? "当前歌词" : "");
+                    // 初次加载或切歌后定位首行：直接对齐避免整页大跨度飞跃
+                    CancelScrollAnimation();
+                    foreach (var (rowIndex, row) in _rows)
+                    {
+                        SetRowVisual(row, rowIndex, animate: false);
+                        AutomationProperties.SetItemStatus(row, rowIndex == index ? "当前歌词" : "");
+                    }
+                    if (!_manualScroll && !_isAnimatingTranslation)
+                        FollowActiveLine(animate: false);
                 }
-                if (!_manualScroll && !_isAnimatingTranslation)
-                    FollowActiveLine(animate: false);
-            }
-            else
-            {
-                // 正常单句过渡：丝滑过渡（上一句淡出收拢，当前句呼吸放大点亮）
-                SetRowVisual(_rows.GetValueOrDefault(previousIndex), previousIndex, animate: true);
-                if (_rows.TryGetValue(index, out var currentRow))
+                else
                 {
-                    SetRowVisual(currentRow, index, animate: true);
-                    AutomationProperties.SetItemStatus(currentRow, "当前歌词");
+                    // 同曲内单句切换、点击歌词跳转、点击或拖动进度条：统一使用平滑过渡动画
+                    if (_rows.TryGetValue(previousIndex, out var previousRow))
+                    {
+                        SetRowVisual(previousRow, previousIndex, animate: true);
+                        AutomationProperties.SetItemStatus(previousRow, "");
+                    }
+                    if (_rows.TryGetValue(index, out var currentRow))
+                    {
+                        SetRowVisual(currentRow, index, animate: true);
+                        AutomationProperties.SetItemStatus(currentRow, "当前歌词");
+                    }
+                    if (!_manualScroll && !_isAnimatingTranslation)
+                        FollowActiveLine(animate: true, fast: _progress.IsDragging);
                 }
-                if (!_manualScroll && !_isAnimatingTranslation)
-                    FollowActiveLine(animate: true);
             }
             _resumeScrollPending = false;
         }
-        else if (_resumeScrollPending && !_manualScroll && !_isAnimatingTranslation)
+        else if (!_isShareSelecting && _resumeScrollPending && !_manualScroll && !_isAnimatingTranslation)
         {
             FollowActiveLine(animate: false);
         }
 
-        if (_activeIndex >= 0
+        if (!_isShareSelecting
+            && _activeIndex >= 0
             && _activeIndex < lyrics.Lines.Count
             && _rows.TryGetValue(_activeIndex, out var activeRow))
         {
@@ -769,24 +926,31 @@ internal sealed class ClassicLyricsWindow : Window
         _previous.IsEnabled = state.Controls.CanPrevious;
         _play.IsEnabled = state.Controls.CanPlayPause;
         _next.IsEnabled = state.Controls.CanNext;
-        _shuffle.IsEnabled = state.Shuffle.HasValue;
-        _repeat.IsEnabled = state.Repeat.HasValue;
+        _shuffle.IsEnabled = state.CanShuffle;
+        _repeat.IsEnabled = state.CanRepeat;
         var repeatOne = state.Repeat == MediaPlaybackAutoRepeatMode.Track;
         var repeatList = state.Repeat == MediaPlaybackAutoRepeatMode.List;
         ((ClassicTransportGlyph)_play.Content).SetState(state.IsPlaying ? ClassicTransportIcon.Pause : ClassicTransportIcon.Play);
         ((ClassicTransportGlyph)_shuffle.Content).SetState(ClassicTransportIcon.Shuffle, state.Shuffle == true);
         ((ClassicTransportGlyph)_repeat.Content).SetState(repeatOne ? ClassicTransportIcon.RepeatOne : ClassicTransportIcon.Repeat, repeatOne || repeatList);
         SetButtonLabel(_play, state.IsPlaying ? "暂停" : "播放");
-        SetButtonLabel(_shuffle, state.Shuffle switch { true => "关闭随机播放", false => "开启随机播放", _ => "当前播放器未提供随机播放控制" });
-        SetButtonLabel(_repeat, state.Repeat switch
-        {
-            MediaPlaybackAutoRepeatMode.Track => "关闭单曲循环",
-            MediaPlaybackAutoRepeatMode.List => "正在列表循环，点击切换为单曲循环",
-            MediaPlaybackAutoRepeatMode.None => "开启单曲循环",
-            _ => "当前播放器未提供循环控制",
-        });
-        _lastAudioPlaying = state.IsPlaying;
-        SyncAudioTrackMetadata();
+        SetButtonLabel(_shuffle, !state.CanShuffle
+            ? "当前播放器未开放系统随机控制"
+            : state.Shuffle switch
+            {
+                true => "关闭随机播放",
+                false => "开启随机播放",
+                _ => "开启随机播放",
+            });
+        SetButtonLabel(_repeat, !state.CanRepeat
+            ? "当前播放器未开放系统循环控制"
+            : state.Repeat switch
+            {
+                MediaPlaybackAutoRepeatMode.Track => "单曲循环（点击切换为顺序播放）",
+                MediaPlaybackAutoRepeatMode.List => "列表循环（点击切换为单曲循环）",
+                MediaPlaybackAutoRepeatMode.None => "顺序播放（点击切换为列表循环）",
+                _ => "顺序播放（点击切换为列表循环）",
+            });
     }
 
     private static void SetButtonLabel(Button button, string text)
@@ -794,204 +958,6 @@ internal sealed class ClassicLyricsWindow : Window
         if (Equals(button.ToolTip, text)) return;
         button.ToolTip = text;
         AutomationProperties.SetName(button, text);
-    }
-
-    internal Button AudioOutputButtonForTest => _audioOutputBtn;
-    internal AudioOutputPopupController AudioPopupForTest => _audioPopup;
-    internal WindowsAudioOutputMonitor AudioMonitorForTest => _audioMonitor;
-
-    internal void AttachAudioMonitorForTest(WindowsAudioOutputMonitor monitor, bool owned = false)
-    {
-        if (ReferenceEquals(_audioMonitor, monitor))
-        {
-            _audioMonitorOwned = owned;
-            return;
-        }
-
-        UnsubscribeAudioMonitorEvents(_audioMonitor);
-        if (_audioMonitorOwned)
-        {
-            _audioMonitor.Dispose();
-        }
-
-        _audioMonitor = monitor;
-        _audioMonitorOwned = owned;
-        _audioPopup.SetMonitor(monitor);
-        SubscribeAudioMonitorEvents(monitor);
-        _audioMonitorStarted = true;
-        monitor.Start();
-        SyncAudioOutputTrigger();
-    }
-
-    private (Button Button, ClassicTransportGlyph Icon, TextBlock Label) CreateAudioOutputTriggerButton()
-    {
-        var borderFactory = new FrameworkElementFactory(typeof(Border));
-        borderFactory.Name = "AudioBtnBg";
-        borderFactory.SetValue(Border.CornerRadiusProperty, new CornerRadius(16));
-        borderFactory.SetValue(Border.BackgroundProperty, Brushes.Transparent);
-        var presenter = new FrameworkElementFactory(typeof(ContentPresenter));
-        presenter.SetValue(FrameworkElement.HorizontalAlignmentProperty, HorizontalAlignment.Center);
-        presenter.SetValue(FrameworkElement.VerticalAlignmentProperty, VerticalAlignment.Center);
-        borderFactory.AppendChild(presenter);
-
-        var template = new ControlTemplate(typeof(Button)) { VisualTree = borderFactory };
-
-        var idleFg = AudioOutputVisualHelper.CreateFrozenBrush(Color.FromRgb(0xE6, 0xE6, 0xE6));
-
-        var style = new Style(typeof(Button));
-        style.Setters.Add(new Setter(Control.ForegroundProperty, idleFg));
-        var styleHover = new Trigger { Property = UIElement.IsMouseOverProperty, Value = true };
-        styleHover.Setters.Add(new Setter(Control.ForegroundProperty, Brushes.White));
-        style.Triggers.Add(styleHover);
-        var stylePress = new Trigger { Property = ButtonBase.IsPressedProperty, Value = true };
-        stylePress.Setters.Add(new Setter(Control.ForegroundProperty, Brushes.White));
-        style.Triggers.Add(stylePress);
-
-        var icon = new ClassicTransportGlyph(ClassicTransportIcon.Speaker)
-        {
-            Width = 17,
-            Height = 17,
-            VerticalAlignment = VerticalAlignment.Center,
-            IsHitTestVisible = false,
-        };
-
-        var label = new TextBlock
-        {
-            Text = "扬声器",
-            FontSize = 12,
-            TextTrimming = TextTrimming.CharacterEllipsis,
-            TextWrapping = TextWrapping.NoWrap,
-            Margin = new Thickness(6, 0, 0, 0),
-            VerticalAlignment = VerticalAlignment.Center,
-        };
-
-        var stack = new StackPanel
-        {
-            Orientation = Orientation.Horizontal,
-            VerticalAlignment = VerticalAlignment.Center,
-            HorizontalAlignment = HorizontalAlignment.Center,
-        };
-        stack.Children.Add(icon);
-        stack.Children.Add(label);
-
-        var button = new Button
-        {
-            Height = 32,
-            MinWidth = 32,
-            Cursor = Cursors.Hand,
-            Focusable = true,
-            FocusVisualStyle = null,
-            BorderThickness = new Thickness(0),
-            Padding = new Thickness(8, 0, 8, 0),
-            Background = Brushes.Transparent,
-            Style = style,
-            Template = template,
-            Content = stack,
-        };
-        icon.SetBinding(ClassicTransportGlyph.TintProperty, new System.Windows.Data.Binding(nameof(Control.Foreground)) { Source = button });
-        return (button, icon, label);
-    }
-
-    private void StartAudioMonitorIfNeeded()
-    {
-        if (!_audioMonitorStarted)
-        {
-            _audioMonitorStarted = true;
-            _audioMonitor.Start();
-        }
-        SyncAudioOutputTrigger();
-    }
-
-    private void SubscribeAudioMonitorEvents(WindowsAudioOutputMonitor monitor)
-    {
-        monitor.OutputStateChanged += OnAudioMonitorOutputChanged;
-        monitor.VolumeStateChanged += OnAudioMonitorVolumeChanged;
-    }
-
-    private void UnsubscribeAudioMonitorEvents(WindowsAudioOutputMonitor monitor)
-    {
-        monitor.OutputStateChanged -= OnAudioMonitorOutputChanged;
-        monitor.VolumeStateChanged -= OnAudioMonitorVolumeChanged;
-    }
-
-    private void OnAudioMonitorOutputChanged()
-    {
-        if (Dispatcher.CheckAccess())
-        {
-            SyncAudioOutputTrigger();
-            return;
-        }
-        _ = Dispatcher.BeginInvoke(SyncAudioOutputTrigger);
-    }
-
-    private void OnAudioMonitorVolumeChanged(AudioVolumeState volume)
-    {
-        if (Dispatcher.CheckAccess())
-        {
-            ApplyAudioMonitorVolume(volume);
-            return;
-        }
-        _ = Dispatcher.BeginInvoke(() => ApplyAudioMonitorVolume(volume));
-    }
-
-    private void SyncAudioOutputTrigger()
-    {
-        var active = _audioMonitor.GetCurrentActiveOutput();
-        var vol = _audioMonitor.GetVolumeState();
-        UpdateAudioOutputTriggerIcon(active, vol);
-        if (!string.Equals(_audioOutputLabel.Text, active.Name, StringComparison.Ordinal))
-        {
-            _audioOutputLabel.Text = active.Name;
-        }
-        SetButtonLabel(_audioOutputBtn, $"音频输出：{active.Name}（{vol.Percent}%{(vol.IsMuted ? "，已静音" : "")}）");
-
-        if (_audioPopup.IsOpen)
-        {
-            RefreshAudioPopupOutputs();
-        }
-    }
-
-    private void ApplyAudioMonitorVolume(AudioVolumeState volume)
-    {
-        var active = _audioMonitor.GetCurrentActiveOutput();
-        UpdateAudioOutputTriggerIcon(active, volume);
-        SetButtonLabel(_audioOutputBtn, $"音频输出：{active.Name}（{volume.Percent}%{(volume.IsMuted ? "，已静音" : "")}）");
-        if (_audioPopup.IsOpen)
-        {
-            _audioPopup.UpdateVolume(volume);
-        }
-    }
-
-    private void UpdateAudioOutputTriggerIcon(AudioOutputDevice? active = null, AudioVolumeState? volume = null)
-    {
-        var resolvedVolume = volume ?? _audioMonitor.GetVolumeState();
-        if (_audioOutputLabel.Visibility != Visibility.Visible)
-        {
-            _audioOutputIcon.SetState(resolvedVolume.IsMuted
-                ? ClassicTransportIcon.MutedSpeaker
-                : ClassicTransportIcon.Speaker);
-            return;
-        }
-
-        var resolvedActive = active ?? _audioMonitor.GetCurrentActiveOutput();
-        _audioOutputIcon.SetState(AudioOutputVisualHelper.ResolveIcon(
-            resolvedActive.Kind,
-            resolvedVolume.IsMuted && resolvedActive.Kind == AudioOutputKind.Speaker));
-    }
-
-    private void RefreshAudioPopupOutputs()
-    {
-        SyncAudioTrackMetadata();
-        _audioPopup.UpdatePalette(_background);
-        _audioPopup.UpdateOutputs(
-            _audioMonitor.GetCurrentActiveOutput(),
-            _audioMonitor.GetAvailableOutputs(),
-            _audioMonitor.GetVolumeState());
-    }
-
-    private void SyncAudioTrackMetadata()
-    {
-        _audioPopup.UpdateTrack(_title.Text, _artist.Text, _cover.Source, _lastAudioPlaying);
     }
 
     public void ReloadLyricsDisplay()
@@ -1233,6 +1199,9 @@ internal sealed class ClassicLyricsWindow : Window
 
     private void RenderLyrics(bool preserveScroll = false)
     {
+        if (_isShareSelecting && !ReferenceEquals(_lyrics, _shareSelectionLyrics))
+            ExitShareSelectionMode(resumeAutoScroll: false);
+
         CancelScrollAnimation();
         var savedActive = preserveScroll ? _activeIndex : -1;
         var savedManual = preserveScroll && _manualScroll;
@@ -1253,7 +1222,6 @@ internal sealed class ClassicLyricsWindow : Window
         _rowGapScale = gapScale;
         if (_lyrics is { } lyrics)
         {
-            _latinMetrics = IsMostlyLatin(lyrics);
             _chineseLyrics = IsMostlyChinese(lyrics);
             for (var i = 0; i < lyrics.Lines.Count; i++)
             {
@@ -1263,14 +1231,43 @@ internal sealed class ClassicLyricsWindow : Window
                 var timeTags = string.IsNullOrWhiteSpace(line.Content) ? null : line.Attachments.GetInlineTimeTags();
                 var subText = ExtractTranslation(line);
                 var row = NewLine(mainText, subText, progress, timeTags);
+                row.SetShareMode(_isShareSelecting);
+                var capturedIndex = i;
                 var linePos = line.Position;
                 row.Cursor = Cursors.Hand;
+                row.ContextMenu = CreateRowContextMenu(capturedIndex);
+                row.MouseEnter += (_, _) => OnLyricRowMouseEnter(capturedIndex);
+                row.MouseLeave += (_, _) => OnLyricRowMouseLeave(capturedIndex);
+                row.MouseLeftButtonDown += (_, e) =>
+                {
+                    if (e.ClickCount >= 2)
+                    {
+                        _pressedRowIndex = null;
+                        _mouseDownStartedOutsideRow = true;
+                        return;
+                    }
+                    _pressedRowIndex = capturedIndex;
+                    _mouseDownStartedOutsideRow = false;
+                };
                 row.MouseLeftButtonUp += (_, e) =>
                 {
+                    e.Handled = true;
+                    var suppress = e.ClickCount >= 2
+                        || _mouseDownStartedOutsideRow
+                        || Environment.TickCount64 < _suppressRowClickUntilTick
+                        || (_pressedRowIndex is { } downIndex && downIndex != capturedIndex);
+                    _pressedRowIndex = null;
+                    _mouseDownStartedOutsideRow = false;
+                    if (suppress) return;
+
+                    if (_isShareSelecting)
+                    {
+                        ToggleShareRowSelection(capturedIndex);
+                        return;
+                    }
                     var seekSeconds = linePos - lyrics.TimeDelay - _coordinator.ManualOffsetSeconds - _coordinator.TrackOffsetSeconds;
                     if (seekSeconds < 0) seekSeconds = 0;
-                    e.Handled = true;
-                    _ = SeekToSecondsAsync(seekSeconds);
+                    _ = SeekToSecondsAsync(seekSeconds, targetLineIndex: capturedIndex);
                 };
                 _rows.Add(i, row);
                 _lines.Children.Add(row);
@@ -1279,6 +1276,8 @@ internal sealed class ClassicLyricsWindow : Window
 
         if (_rows.Count == 0)
         {
+            if (_isShareSelecting)
+                ExitShareSelectionMode(resumeAutoScroll: false);
             var message = _track is null ? "在你的播放器中播放一首歌" : _status switch
             {
                 LyricsStatusKind.NotFound or LyricsStatusKind.Wrong => "这首歌暂无同步歌词",
@@ -1289,6 +1288,11 @@ internal sealed class ClassicLyricsWindow : Window
             emptyRow.Opacity = 1.0;
             _lines.Children.Add(emptyRow);
         }
+        else if (_isShareSelecting)
+        {
+            foreach (var (rowIndex, row) in _rows)
+                SetRowVisual(row, rowIndex, animate: false);
+        }
         else if (preserveScroll && _activeIndex >= 0)
         {
             foreach (var (rowIndex, row) in _rows)
@@ -1297,36 +1301,17 @@ internal sealed class ClassicLyricsWindow : Window
                 _ = Dispatcher.BeginInvoke(DispatcherPriority.Loaded, () => FollowActiveLine(animate: false));
         }
         ResizeLyrics();
+        UpdateShareButton();
     }
 
     private LyricRow NewLine(string text, string? translation = null, double progress = 0d, InlineTimeTags? timeTags = null)
     {
-        var row = new LyricRow(text, translation, _subdued, progress, _latinMetrics, timeTags)
+        var row = new LyricRow(text, translation, _subdued, progress, timeTags)
         {
             LineHeightScale = _lineHeightScale,
             GapScale = _rowGapScale,
         };
         return row;
-    }
-
-    /// <summary>
-    /// 判断整首歌词是否以拉丁字母为主。英文歌用更松的行高/行距，
-    /// 中文、日文、韩文等方块字保持紧凑那套；中英混排时按字数占比取胜的一方。
-    /// </summary>
-    private static bool IsMostlyLatin(Lyrics lyrics)
-    {
-        var latin = 0;
-        var wide = 0;
-        foreach (var line in lyrics.Lines)
-        {
-            if (!line.Enabled) continue;
-            foreach (var c in line.Content)
-            {
-                if (c >= '\u2E80') wide++;            // CJK 汉字、假名、谚文、全角标点
-                else if (char.IsLetter(c)) latin++;
-            }
-        }
-        return latin > wide;
     }
 
     private static bool IsMostlyChinese(Lyrics lyrics)
@@ -1361,25 +1346,47 @@ internal sealed class ClassicLyricsWindow : Window
         var width = _scroll.ActualWidth;
         if (width <= 0) return;
         var side = width < 600 ? 24 : width < 900 ? 40 : Math.Max(64, (width - 1024) / 2);
-        var top = width < 600 ? 48 : 64;
-        _lines.Margin = new Thickness(side, top, side, _scroll.ActualHeight / 2);
+        var top = width < 600 ? 36 : 64;
+        if (_isShareSelecting)
+        {
+            side = Math.Max(16, side - 12);
+            top = Math.Max(top, 78);
+        }
+        var bottom = _isShareSelecting
+            ? Math.Max(104, _scroll.ActualHeight / 2)
+            : _scroll.ActualHeight / 2;
+        _lines.Margin = new Thickness(side, top, side, bottom);
         var size = CurrentMainFontSize();
         foreach (LyricRow line in _lines.Children)
             line.ApplySizing(size);
-        if (_activeIndex >= 0 && !_isAnimatingTranslation) _resumeScrollPending = true;
+        if (_activeIndex >= 0 && !_isAnimatingTranslation && !_isShareSelecting) _resumeScrollPending = true;
     }
 
-    private async Task SeekToSecondsAsync(double seconds)
+    private async Task SeekToSecondsAsync(double seconds, int? targetLineIndex = null)
     {
         var generation = ++_seekGeneration;
         var requestedTrack = _track;
+        var maxSeconds = _progress.Maximum > 0 ? _progress.Maximum : seconds;
+        var clampedSeconds = Math.Clamp(seconds, 0, Math.Max(0, maxSeconds));
         _seekInFlight = true;
-        _pendingSeekSeconds = seconds;
-        _pendingSeekDeadlineTick = Environment.TickCount64 + 600;
+        _pendingSeekSeconds = clampedSeconds;
+        _pendingSeekLineIndex = targetLineIndex;
+        _pendingSeekDeadlineTick = Environment.TickCount64 + 800;
+
+        var previousActive = _activeIndex;
+        _manualScroll = false;
+        _resume.Visibility = Visibility.Collapsed;
+        _resumeScrollPending = false;
+        if (!_progress.IsUserSeeking && Math.Abs(_progress.Value - clampedSeconds) > 0.02)
+            _progress.AnimateToValue(clampedSeconds);
+        Refresh();
+        if (generation == _seekGeneration && _activeIndex == previousActive && !_isShareSelecting && !_manualScroll && !_isAnimatingTranslation)
+            FollowActiveLine(animate: true, fast: _progress.IsDragging);
+
         var succeeded = false;
         try
         {
-            succeeded = await _player.SeekAsync(TimeSpan.FromSeconds(seconds));
+            succeeded = await _player.SeekAsync(TimeSpan.FromSeconds(clampedSeconds));
         }
         finally
         {
@@ -1389,9 +1396,11 @@ internal sealed class ClassicLyricsWindow : Window
                 if (succeeded && SameTrackIdentity(_track, requestedTrack))
                     _pendingSeekDeadlineTick = Math.Min(_pendingSeekDeadlineTick, Environment.TickCount64 + 300);
                 else
+                {
                     _pendingSeekSeconds = null;
+                    _pendingSeekLineIndex = null;
+                }
             }
-            ResumeAutoScroll();
             Refresh();
         }
     }
@@ -1402,7 +1411,8 @@ internal sealed class ClassicLyricsWindow : Window
         CancelScrollAnimation();
         _manualScroll = true;
         _manualScrollAt = Environment.TickCount64;
-        _resume.Visibility = Visibility.Visible;
+        if (!_isShareSelecting)
+            _resume.Visibility = Visibility.Visible;
         _resumeScrollPending = true;
     }
 
@@ -1414,7 +1424,7 @@ internal sealed class ClassicLyricsWindow : Window
     private void AutoSyncIfIdle()
     {
         var seconds = _settings.AutoSyncSeconds;
-        if (seconds <= 0 || !_manualScroll || _rows.Count == 0) return;
+        if (seconds <= 0 || !_manualScroll || _isShareSelecting || _rows.Count == 0) return;
         if (Environment.TickCount64 - _manualScrollAt < seconds * 1000L) return;
 
         _coordinator.RefreshCurrentLine();
@@ -1430,7 +1440,7 @@ internal sealed class ClassicLyricsWindow : Window
         if (_resume.IsKeyboardFocused) _scroll.Focus();
     }
 
-    private void FollowActiveLine(bool animate = true)
+    private void FollowActiveLine(bool animate = true, bool fast = false)
     {
         _resumeScrollPending = false;
         if (!_rows.TryGetValue(_activeIndex, out var active))
@@ -1449,12 +1459,24 @@ internal sealed class ClassicLyricsWindow : Window
 
         if (animate && SystemParameters.ClientAreaAnimation)
         {
-            var durationSeconds = Math.Clamp(0.45 + Math.Min(distance / 1500.0, 0.20), 0.45, 0.65);
-            var duration = TimeSpan.FromSeconds(durationSeconds);
-            var animation = new DoubleAnimationUsingKeyFrames();
-            animation.KeyFrames.Add(new LinearDoubleKeyFrame(start, KeyTime.FromTimeSpan(TimeSpan.Zero)));
-            animation.KeyFrames.Add(new SplineDoubleKeyFrame(offset, KeyTime.FromTimeSpan(duration), ScrollSpline));
-            BeginAnimation(FollowOffsetProperty, animation);
+            if (fast)
+            {
+                var fastSeconds = Math.Clamp(0.18 + Math.Min(distance / 4000.0, 0.08), 0.18, 0.26);
+                var animation = new DoubleAnimation(start, offset, TimeSpan.FromSeconds(fastSeconds))
+                {
+                    EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseOut },
+                };
+                BeginAnimation(FollowOffsetProperty, animation);
+            }
+            else
+            {
+                var durationSeconds = Math.Clamp(0.42 + Math.Min(distance / 1800.0, 0.18), 0.42, 0.60);
+                var duration = TimeSpan.FromSeconds(durationSeconds);
+                var animation = new DoubleAnimationUsingKeyFrames();
+                animation.KeyFrames.Add(new LinearDoubleKeyFrame(start, KeyTime.FromTimeSpan(TimeSpan.Zero)));
+                animation.KeyFrames.Add(new SplineDoubleKeyFrame(offset, KeyTime.FromTimeSpan(duration), ScrollSpline));
+                BeginAnimation(FollowOffsetProperty, animation);
+            }
         }
         else
         {
@@ -1550,12 +1572,14 @@ internal sealed class ClassicLyricsWindow : Window
             _coverThumbnailVersion = smtcThumbVersion;
             if (bytes is null)
             {
+                _coverBytes = null;
                 _cover.Source = null;
                 _coverFromSmtc = false;
                 ResetCoverPalette();
                 return;
             }
 
+            _coverBytes = bytes;
             using var stream = new MemoryStream(bytes);
             var cover = new BitmapImage();
             cover.BeginInit();
@@ -1576,6 +1600,7 @@ internal sealed class ClassicLyricsWindow : Window
         }
         catch (Exception error) when (error is ArgumentException or NotSupportedException or InvalidOperationException or IOException)
         {
+            _coverBytes = null;
             _cover.Source = null;
             _coverFromSmtc = false;
             ResetCoverPalette();
@@ -1599,19 +1624,21 @@ internal sealed class ClassicLyricsWindow : Window
     private void ApplyPalette(Color background, Color subdued)
     {
         _background = background;
-        _audioPopup.UpdatePalette(background);
         _subdued = subdued;
         var brush = (SolidColorBrush)_panel.Background;
         brush.BeginAnimation(SolidColorBrush.ColorProperty, null);
         var current = brush.Color;
         brush.Color = background;
-        if (SystemParameters.ClientAreaAnimation && current != background)
+        var animatePalette = SystemParameters.ClientAreaAnimation && current != background;
+        if (animatePalette)
             brush.BeginAnimation(SolidColorBrush.ColorProperty, new ColorAnimation(current, background, TimeSpan.FromMilliseconds(250))
             {
                 EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseOut },
                 FillBehavior = FillBehavior.Stop,
             });
+        UpdateEdgeFades(current, background, animatePalette);
         foreach (var (index, row) in _rows) SetRowVisual(row, index, animate: false);
+        if (_isShareSelecting) UpdateShareSelectionChrome();
         if (_rows.Count == 0 && _lines.Children.Count > 0 && _lines.Children[0] is LyricRow emptyRow)
         {
             emptyRow.Opacity = 1.0;
@@ -1619,16 +1646,32 @@ internal sealed class ClassicLyricsWindow : Window
         }
     }
 
+    private void UpdateEdgeFades(Color from, Color to, bool animate)
+    {
+        AnimateFadeStop(_topFadeOpaqueStop, Color.FromArgb(240, from.R, from.G, from.B), Color.FromArgb(240, to.R, to.G, to.B), animate);
+        AnimateFadeStop(_topFadeClearStop, Color.FromArgb(0, from.R, from.G, from.B), Color.FromArgb(0, to.R, to.G, to.B), animate);
+        AnimateFadeStop(_bottomFadeClearStop, Color.FromArgb(0, from.R, from.G, from.B), Color.FromArgb(0, to.R, to.G, to.B), animate);
+        AnimateFadeStop(_bottomFadeOpaqueStop, Color.FromArgb(240, from.R, from.G, from.B), Color.FromArgb(240, to.R, to.G, to.B), animate);
+    }
+
+    private static void AnimateFadeStop(GradientStop stop, Color from, Color to, bool animate)
+    {
+        stop.BeginAnimation(GradientStop.ColorProperty, null);
+        stop.Color = to;
+        if (animate)
+        {
+            stop.BeginAnimation(GradientStop.ColorProperty, new ColorAnimation(from, to, TimeSpan.FromMilliseconds(250))
+            {
+                EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseOut },
+                FillBehavior = FillBehavior.Stop,
+            });
+        }
+    }
+
     private Color KaraokeUnlitColor() => BlendColor(_background, _subdued, 0.70);
 
-    private static Color BlendColor(Color from, Color to, double amount)
-    {
-        var t = Math.Clamp(amount, 0.0, 1.0);
-        return Color.FromRgb(
-            (byte)Math.Round(from.R + (to.R - from.R) * t),
-            (byte)Math.Round(from.G + (to.G - from.G) * t),
-            (byte)Math.Round(from.B + (to.B - from.B) * t));
-    }
+    private static Color BlendColor(Color from, Color to, double amount) =>
+        ClassicLyricsPalette.BlendColor(from, to, amount);
 
     private Color RowColor(int index)
     {
@@ -1641,6 +1684,13 @@ internal sealed class ClassicLyricsWindow : Window
     private void SetRowVisual(LyricRow? row, int index, bool animate, bool isHovered = false)
     {
         if (row is null) return;
+        if (_isShareSelecting)
+        {
+            var isSelected = _selectedShareLines.Contains(index);
+            var shareHover = _hoveredShareLineIndex == index;
+            row.UpdateShareVisualState(isSelected, shareHover, _background, _subdued, animate);
+            return;
+        }
         var isActive = index == _activeIndex;
         var isPast = index < _activeIndex;
         var color = isHovered ? Colors.White : RowColor(index);
@@ -1753,7 +1803,8 @@ internal sealed class ClassicLyricsWindow : Window
             Content = content,
             MinWidth = 32,
             Height = 36,
-            Margin = new Thickness(1, 0, 1, 0),
+            Padding = new Thickness(6, 0, 6, 0),
+            Margin = new Thickness(4, 0, 6, 0),
             Foreground = Muted,
             Background = Brushes.Transparent,
             BorderBrush = Brushes.Transparent,
@@ -2206,27 +2257,157 @@ internal sealed class ClassicLyricsWindow : Window
         return $"{prefix}{formatted}s";
     }
 
-    private Button ChromeButton(ClassicTransportIcon glyph, string label, Action onClick, double height = 36)
+    private Button ChromeButton(
+        ClassicTransportIcon glyph,
+        string label,
+        Action onClick,
+        double height = 36,
+        double width = 32,
+        double? glyphSize = null,
+        double cornerRadius = 4,
+        Brush? foreground = null,
+        Brush? hoverBackground = null)
     {
         var icon = new ClassicTransportGlyph(glyph);
+        if (glyphSize is { } gs)
+        {
+            icon.Width = gs;
+            icon.Height = gs;
+        }
         var button = new Button
         {
             Content = icon,
-            Width = 32,
+            Width = width,
             Height = height,
-            Margin = new Thickness(1, 0, 1, 0),
-            Foreground = Muted,
+            Margin = new Thickness(5, 0, 5, 0),
+            Foreground = foreground ?? Muted,
             Background = Brushes.Transparent,
             BorderBrush = Brushes.Transparent,
             ToolTip = label,
-            Template = TransportTemplate(cornerRadius: 4),
+            Template = TransportTemplate(cornerRadius: cornerRadius, hoverBackground: hoverBackground),
             Cursor = Cursors.Hand,
             FocusVisualStyle = null,
+            UseLayoutRounding = true,
+            SnapsToDevicePixels = true,
         };
         icon.SetBinding(ClassicTransportGlyph.TintProperty, new Binding(nameof(Button.Foreground)) { Source = button });
         AutomationProperties.SetName(button, label);
         button.Click += (_, _) => onClick();
         return button;
+    }
+
+    private Border BuildLiquidGlassCaptionCapsule(StackPanel buttonsPanel)
+    {
+        var textureImage = new Image
+        {
+            Source = LiquidGlassCapsule.Texture,
+            Width = LiquidGlassCapsule.TextureDipWidth,
+            Height = LiquidGlassCapsule.TextureDipHeight,
+            Margin = new Thickness(
+                -LiquidGlassCapsule.PadLeft,
+                -LiquidGlassCapsule.PadTop,
+                -LiquidGlassCapsule.PadRight,
+                -LiquidGlassCapsule.PadBottom),
+            Stretch = Stretch.Fill,
+            IsHitTestVisible = false,
+            SnapsToDevicePixels = true,
+        };
+        RenderOptions.SetBitmapScalingMode(textureImage, BitmapScalingMode.HighQuality);
+
+        var capsuleHost = new Grid
+        {
+            Width = LiquidGlassCapsule.CapsuleWidth,
+            Height = LiquidGlassCapsule.CapsuleHeight,
+            UseLayoutRounding = true,
+        };
+        capsuleHost.Children.Add(textureImage);
+        capsuleHost.Children.Add(buttonsPanel);
+
+        return new Border
+        {
+            Child = capsuleHost,
+            Width = LiquidGlassCapsule.CapsuleWidth,
+            Height = LiquidGlassCapsule.CapsuleHeight,
+            Background = Brushes.Transparent,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            VerticalAlignment = VerticalAlignment.Top,
+            Margin = new Thickness(0, 16, 18, 0),
+            Opacity = 0,
+            IsHitTestVisible = false,
+            UseLayoutRounding = true,
+        };
+    }
+
+    private void RevealCaptionBar(bool animate = true)
+    {
+        _captionHideTimer?.Stop();
+        if (_isShareSelecting)
+        {
+            HideCaptionBar(animate: false);
+            return;
+        }
+        SetCaptionBarVisible(true, animate);
+    }
+
+    private void ScheduleCaptionBarHide(int delayMs = 450)
+    {
+        if (!_captionVisible) return;
+        _captionHideTimer ??= new DispatcherTimer();
+        _captionHideTimer.Stop();
+        _captionHideTimer.Interval = TimeSpan.FromMilliseconds(delayMs);
+        _captionHideTimer.Tick -= OnCaptionHideTimerTick;
+        _captionHideTimer.Tick += OnCaptionHideTimerTick;
+        _captionHideTimer.Start();
+    }
+
+    private void OnCaptionHideTimerTick(object? sender, EventArgs e)
+    {
+        _captionHideTimer?.Stop();
+        if (_captionBar.IsMouseOver && !_isShareSelecting) return;
+        HideCaptionBar(animate: true);
+    }
+
+    private void HideCaptionBar(bool animate = true)
+    {
+        _captionHideTimer?.Stop();
+        SetCaptionBarVisible(false, animate);
+    }
+
+    private void SetCaptionBarVisible(bool visible, bool animate)
+    {
+        if (_captionVisible == visible && _captionBar.IsHitTestVisible == visible) return;
+        _captionVisible = visible;
+        _captionBar.IsHitTestVisible = visible;
+        _captionBar.BeginAnimation(OpacityProperty, null);
+        var targetOpacity = visible ? 1.0 : 0.0;
+        if (animate && SystemParameters.ClientAreaAnimation)
+        {
+            _captionBar.BeginAnimation(OpacityProperty, new DoubleAnimation(targetOpacity, TimeSpan.FromMilliseconds(160))
+            {
+                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
+            });
+        }
+        else
+        {
+            _captionBar.Opacity = targetOpacity;
+        }
+    }
+
+    private void ShowTransportFeedback(string message)
+    {
+        _transportToastText.Text = message;
+        _transportToast.Visibility = Visibility.Visible;
+        _transportToastTimer ??= new DispatcherTimer { Interval = TimeSpan.FromSeconds(2.4) };
+        _transportToastTimer.Stop();
+        _transportToastTimer.Tick -= OnTransportToastTimerTick;
+        _transportToastTimer.Tick += OnTransportToastTimerTick;
+        _transportToastTimer.Start();
+    }
+
+    private void OnTransportToastTimerTick(object? sender, EventArgs e)
+    {
+        _transportToastTimer?.Stop();
+        _transportToast.Visibility = Visibility.Collapsed;
     }
 
     /// <summary>歌词面板上、左、右三条边缘留白宽度（0 表示完全贴边占满）。</summary>
@@ -2247,6 +2428,7 @@ internal sealed class ClassicLyricsWindow : Window
     private void SetFullscreen(bool fullscreen)
     {
         if (_isFullscreen == fullscreen) return;
+        _pressedRowIndex = null;
         _isFullscreen = fullscreen;
         if (fullscreen)
         {
@@ -2272,6 +2454,7 @@ internal sealed class ClassicLyricsWindow : Window
             UpdatePanelFrame();
         }
         UpdateWindowCornerPreference();
+        _relayoutFooter?.Invoke();
         ((ClassicTransportGlyph)_fullscreen.Content).SetState(
             fullscreen ? ClassicTransportIcon.ExitFullscreen : ClassicTransportIcon.Fullscreen);
         SetButtonLabel(_fullscreen, fullscreen ? "退出全屏 (F11 / Esc)" : "全屏 (F11)");
@@ -2370,12 +2553,510 @@ internal sealed class ClassicLyricsWindow : Window
     [DllImport("dwmapi.dll")]
     private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
 
+    internal bool IsShareSelectingForTest => _isShareSelecting;
+    internal IReadOnlyList<int> SelectedShareLineIndicesForTest => _selectedShareLines.OrderBy(i => i).ToList();
+    internal string ShareCountTextForTest => _shareCountText.Text;
+    internal string ShareLimitHintForTest => _shareLimitHintText.Visibility == Visibility.Visible ? _shareLimitHintText.Text : "";
+    internal bool CanContinueShareForTest => _shareContinueBtn.IsEnabled;
+    internal bool IsShareButtonEnabledForTest => _shareBtn.IsEnabled;
+    internal bool IsCaptionBarVisibleForTest => _captionVisible && _captionBar.Opacity > 0.5 && _captionBar.IsHitTestVisible;
+    internal void SetCaptionBarRevealForTest(bool visible) => SetCaptionBarVisible(visible, animate: false);
+    internal void TriggerShareButtonForTest() => ToggleShareSelectionFromButton();
+    internal void EnterShareSelectionModeForTest(int? lineIndex = null) => EnterShareSelectionMode(lineIndex);
+    internal void ToggleShareRowForTest(int lineIndex) => ToggleShareRowSelection(lineIndex);
+    internal void ExitShareSelectionModeForTest(bool resumeAutoScroll = true) => ExitShareSelectionMode(resumeAutoScroll);
+    internal LyricSharePayload? CreateSharePayloadForTest() => BuildSharePayloadSnapshot();
+
+    private (Border Header, Button CancelBtn, TextBlock CountText, TextBlock LimitHint) BuildShareHeaderBar()
+    {
+        var cancelBtn = new Button
+        {
+            Content = "取消",
+            Height = 30,
+            Padding = new Thickness(14, 0, 14, 0),
+            Margin = new Thickness(0, 0, 14, 0),
+            Background = CreateOffsetAlphaBrush(28, 255, 255, 255),
+            Foreground = Brushes.White,
+            FontSize = 12.5,
+            FontWeight = FontWeights.SemiBold,
+            Cursor = Cursors.Hand,
+            FocusVisualStyle = null,
+            ToolTip = "退出分享选择 (Esc)",
+            VerticalAlignment = VerticalAlignment.Center,
+            Template = TransportTemplate(cornerRadius: 15),
+        };
+        AutomationProperties.SetName(cancelBtn, "取消分享选择");
+        cancelBtn.Click += (_, _) => ExitShareSelectionMode(resumeAutoScroll: true);
+
+        var titleText = new TextBlock
+        {
+            Text = "选择歌词",
+            FontSize = 13.5,
+            FontWeight = FontWeights.Bold,
+            Foreground = Brushes.White,
+        };
+
+        var countText = new TextBlock
+        {
+            Text = "已选择 0 / 6 行歌词",
+            FontSize = 11.5,
+            Foreground = CreateOffsetAlphaBrush(215, 255, 255, 255),
+            Margin = new Thickness(0, 1, 0, 0),
+        };
+
+        var limitHint = new TextBlock
+        {
+            Text = $"最多可选择 {MaxShareSelectionCount} 行歌词",
+            FontSize = 11.5,
+            FontWeight = FontWeights.SemiBold,
+            Foreground = CreateOffsetBrush(255, 214, 102),
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(12, 0, 0, 0),
+            Visibility = Visibility.Collapsed,
+        };
+
+        var textStack = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+        textStack.Children.Add(titleText);
+        textStack.Children.Add(countText);
+
+        var leftRow = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        leftRow.Children.Add(cancelBtn);
+        leftRow.Children.Add(textStack);
+        leftRow.Children.Add(limitHint);
+
+        var bar = new Border
+        {
+            VerticalAlignment = VerticalAlignment.Top,
+            Background = CreateOffsetAlphaBrush(228, 18, 18, 18),
+            BorderBrush = CreateOffsetAlphaBrush(36, 255, 255, 255),
+            BorderThickness = new Thickness(0, 0, 0, 1),
+            Padding = new Thickness(20, 10, 148, 10),
+            Visibility = Visibility.Collapsed,
+            Child = leftRow,
+        };
+        Panel.SetZIndex(bar, 15);
+        return (bar, cancelBtn, countText, limitHint);
+    }
+
+    private (Border Host, Button ContinueBtn) BuildShareActionBar()
+    {
+        var continueBtn = new Button
+        {
+            Content = "继续",
+            MinWidth = 136,
+            Height = 44,
+            Padding = new Thickness(28, 0, 28, 0),
+            Background = Brushes.White,
+            Foreground = Chrome,
+            FontSize = 15,
+            FontWeight = FontWeights.Bold,
+            Cursor = Cursors.Hand,
+            FocusVisualStyle = null,
+            ToolTip = "生成并预览歌词卡片",
+            Template = TransportTemplate(cornerRadius: 22),
+        };
+        AutomationProperties.SetName(continueBtn, "继续生成歌词分享卡片");
+        continueBtn.Click += (_, _) => OpenLyricSharePreview();
+
+        var host = new Border
+        {
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Bottom,
+            Margin = new Thickness(0, 0, 0, 26),
+            Visibility = Visibility.Collapsed,
+            Child = continueBtn,
+            Effect = new System.Windows.Media.Effects.DropShadowEffect
+            {
+                Color = Colors.Black,
+                BlurRadius = 18,
+                ShadowDepth = 4,
+                Direction = 270,
+                Opacity = 0.48,
+            },
+        };
+        Panel.SetZIndex(host, 15);
+        return (host, continueBtn);
+    }
+
+    private ContextMenu CreateRowContextMenu(int lineIndex)
+    {
+        var menu = new ContextMenu
+        {
+            FontFamily = ClassicLyricsFonts.Body,
+            Background = OffsetPopupBg,
+            BorderBrush = OffsetPopupBorder,
+            BorderThickness = new Thickness(1),
+            Padding = new Thickness(4),
+            Template = DarkContextMenuTemplate(),
+        };
+
+        var itemTemplate = DarkMenuItemTemplate();
+        menu.Opened += (_, _) =>
+        {
+            menu.Items.Clear();
+            if (!_isShareSelecting)
+            {
+                var shareItem = new MenuItem
+                {
+                    Header = "分享歌词…",
+                    Foreground = Brushes.White,
+                    Template = itemTemplate,
+                };
+                shareItem.Click += (_, _) => EnterShareSelectionMode(lineIndex);
+                menu.Items.Add(shareItem);
+                return;
+            }
+
+            var isSelected = _selectedShareLines.Contains(lineIndex);
+            var toggleItem = new MenuItem
+            {
+                Header = isSelected ? "取消选中此行" : "选中此行",
+                Foreground = Brushes.White,
+                Template = itemTemplate,
+            };
+            toggleItem.Click += (_, _) => ToggleShareRowSelection(lineIndex);
+            menu.Items.Add(toggleItem);
+
+            var previewItem = new MenuItem
+            {
+                Header = "继续生成卡片…",
+                IsEnabled = _selectedShareLines.Count > 0,
+                Foreground = Brushes.White,
+                Template = itemTemplate,
+            };
+            previewItem.Click += (_, _) => OpenLyricSharePreview();
+            menu.Items.Add(previewItem);
+
+            var cancelItem = new MenuItem
+            {
+                Header = "取消分享选择",
+                Foreground = Brushes.White,
+                Template = itemTemplate,
+            };
+            cancelItem.Click += (_, _) => ExitShareSelectionMode(resumeAutoScroll: true);
+            menu.Items.Add(cancelItem);
+        };
+        return menu;
+    }
+
+    private static ControlTemplate DarkContextMenuTemplate()
+    {
+        var border = new FrameworkElementFactory(typeof(Border));
+        border.SetValue(Border.BackgroundProperty, OffsetPopupBg);
+        border.SetValue(Border.BorderBrushProperty, OffsetPopupBorder);
+        border.SetValue(Border.BorderThicknessProperty, new Thickness(1));
+        border.SetValue(Border.CornerRadiusProperty, new CornerRadius(8));
+        border.SetValue(Border.PaddingProperty, new Thickness(4));
+        border.SetValue(UIElement.SnapsToDevicePixelsProperty, true);
+
+        var presenter = new FrameworkElementFactory(typeof(ItemsPresenter));
+        border.AppendChild(presenter);
+
+        return new ControlTemplate(typeof(ContextMenu)) { VisualTree = border };
+    }
+
+    private static ControlTemplate DarkMenuItemTemplate()
+    {
+        var border = new FrameworkElementFactory(typeof(Border), "Bg");
+        border.SetValue(Border.BackgroundProperty, Brushes.Transparent);
+        border.SetValue(Border.CornerRadiusProperty, new CornerRadius(5));
+        border.SetValue(Border.PaddingProperty, new Thickness(12, 7, 14, 7));
+
+        var content = new FrameworkElementFactory(typeof(ContentPresenter));
+        content.SetValue(ContentPresenter.ContentSourceProperty, "Header");
+        content.SetValue(FrameworkElement.VerticalAlignmentProperty, VerticalAlignment.Center);
+        border.AppendChild(content);
+
+        var template = new ControlTemplate(typeof(MenuItem)) { VisualTree = border };
+        var hover = new Trigger { Property = MenuItem.IsHighlightedProperty, Value = true };
+        hover.Setters.Add(new Setter(Border.BackgroundProperty, OffsetBtnBg, "Bg"));
+        template.Triggers.Add(hover);
+
+        var disabled = new Trigger { Property = IsEnabledProperty, Value = false };
+        disabled.Setters.Add(new Setter(OpacityProperty, 0.42));
+        template.Triggers.Add(disabled);
+        return template;
+    }
+
+    private void OnLyricRowMouseEnter(int lineIndex)
+    {
+        if (!_isShareSelecting || !_rows.TryGetValue(lineIndex, out var row)) return;
+        _hoveredShareLineIndex = lineIndex;
+        SetRowVisual(row, lineIndex, animate: false);
+    }
+
+    private void OnLyricRowMouseLeave(int lineIndex)
+    {
+        if (!_isShareSelecting) return;
+        if (_hoveredShareLineIndex == lineIndex)
+            _hoveredShareLineIndex = null;
+        if (_rows.TryGetValue(lineIndex, out var row))
+            SetRowVisual(row, lineIndex, animate: false);
+    }
+
+    private void ToggleShareSelectionFromButton()
+    {
+        if (_isShareSelecting)
+        {
+            ExitShareSelectionMode(resumeAutoScroll: true);
+            return;
+        }
+        if (_rows.Count == 0) return;
+        EnterShareSelectionMode(initialLineIndex: null);
+    }
+
+    private void UpdateShareButton()
+    {
+        if (_shareBtn is null) return;
+        var hasLyrics = _rows.Count > 0;
+        _shareBtn.IsEnabled = hasLyrics || _isShareSelecting;
+        ((ClassicTransportGlyph)_shareBtn.Content).SetState(ClassicTransportIcon.Share, active: _isShareSelecting);
+        var label = !hasLyrics && !_isShareSelecting
+            ? "暂无歌词可分享"
+            : _isShareSelecting
+                ? "退出歌词选择 (Esc)"
+                : "分享歌词…";
+        SetButtonLabel(_shareBtn, label);
+    }
+
+    private void EnterShareSelectionMode(int? initialLineIndex)
+    {
+        if (_lyrics is null || _rows.Count == 0) return;
+        if (initialLineIndex is { } initial && !_rows.ContainsKey(initial)) return;
+
+        _offsetPopup.IsOpen = false;
+        CancelScrollAnimation();
+        var keepManualOffset = initialLineIndex is null && _manualScroll;
+        _manualScroll = false;
+        _resume.Visibility = Visibility.Collapsed;
+        _resumeScrollPending = false;
+
+        _isShareSelecting = true;
+        HideCaptionBar(animate: false);
+        _shareSelectionLyrics = _lyrics;
+        _hoveredShareLineIndex = null;
+        _selectedShareLines.Clear();
+        if (initialLineIndex is { } preselected)
+            _selectedShareLines.Add(preselected);
+        HideShareLimitHint();
+
+        foreach (var row in _rows.Values)
+            row.SetShareMode(true);
+
+        ResizeLyrics();
+        UpdateShareSelectionChrome();
+        UpdateShareButton();
+        foreach (var (idx, row) in _rows)
+            SetRowVisual(row, idx, animate: true);
+
+        var focusLine = initialLineIndex ?? (!keepManualOffset && _activeIndex >= 0 && _rows.ContainsKey(_activeIndex) ? _activeIndex : (int?)null);
+        if (focusLine is { } targetLineIndex)
+        {
+            _ = Dispatcher.BeginInvoke(DispatcherPriority.Loaded, () =>
+            {
+                if (!_isShareSelecting || !_rows.TryGetValue(targetLineIndex, out var targetRow)) return;
+                if (_scroll.ViewportHeight <= 0) return;
+
+                var y = targetRow.Main.TranslatePoint(new Point(0, 0), _scroll).Y;
+                var h = targetRow.ActualHeight > 0 ? targetRow.ActualHeight : targetRow.Main.ActualHeight;
+                const double topPad = 86;
+                const double bottomPad = 92;
+                if (y < topPad)
+                {
+                    var next = Math.Max(0, _scroll.VerticalOffset + y - topPad);
+                    _scroll.ScrollToVerticalOffset(next);
+                }
+                else if (y + h > _scroll.ViewportHeight - bottomPad)
+                {
+                    var next = Math.Clamp(_scroll.VerticalOffset + (y + h - (_scroll.ViewportHeight - bottomPad)), 0, _scroll.ScrollableHeight);
+                    _scroll.ScrollToVerticalOffset(next);
+                }
+            });
+        }
+    }
+
+    private void ToggleShareRowSelection(int lineIndex)
+    {
+        if (!_isShareSelecting || !_rows.TryGetValue(lineIndex, out var row)) return;
+
+        if (_selectedShareLines.Contains(lineIndex))
+        {
+            _selectedShareLines.Remove(lineIndex);
+            HideShareLimitHint();
+        }
+        else
+        {
+            if (_selectedShareLines.Count >= MaxShareSelectionCount)
+            {
+                ShowShareLimitHint();
+                return;
+            }
+            _selectedShareLines.Add(lineIndex);
+            if (_selectedShareLines.Count < MaxShareSelectionCount)
+                HideShareLimitHint();
+        }
+
+        UpdateShareSelectionChrome();
+        SetRowVisual(row, lineIndex, animate: true);
+    }
+
+    private void ExitShareSelectionMode(bool resumeAutoScroll)
+    {
+        if (!_isShareSelecting && _selectedShareLines.Count == 0) return;
+
+        _isShareSelecting = false;
+        _shareSelectionLyrics = null;
+        _hoveredShareLineIndex = null;
+        _selectedShareLines.Clear();
+        HideShareLimitHint();
+
+        _shareHeaderBar.Visibility = Visibility.Collapsed;
+        _shareActionBar.Visibility = Visibility.Collapsed;
+
+        foreach (var row in _rows.Values)
+            row.SetShareMode(false);
+
+        ResizeLyrics();
+        UpdateShareButton();
+        foreach (var (idx, row) in _rows)
+            SetRowVisual(row, idx, animate: resumeAutoScroll);
+
+        if (resumeAutoScroll)
+        {
+            _manualScroll = false;
+            _resume.Visibility = Visibility.Collapsed;
+            _resumeScrollPending = false;
+            FollowActiveLine(animate: true);
+            Refresh();
+        }
+    }
+
+    private void UpdateShareSelectionChrome()
+    {
+        _shareHeaderBar.Visibility = _isShareSelecting ? Visibility.Visible : Visibility.Collapsed;
+        _shareActionBar.Visibility = _isShareSelecting ? Visibility.Visible : Visibility.Collapsed;
+        var count = _selectedShareLines.Count;
+        _shareCountText.Text = $"已选择 {count} / {MaxShareSelectionCount} 行歌词";
+        _shareContinueBtn.IsEnabled = count > 0;
+        if (_isShareSelecting)
+        {
+            _shareContinueBtn.Background = count > 0
+                ? Brushes.White
+                : new SolidColorBrush(BlendColor(Colors.White, _subdued, 0.25));
+            _shareHeaderBar.Background = new SolidColorBrush(Color.FromArgb(
+                232,
+                (byte)Math.Clamp((int)Math.Round(_background.R * 0.55), 14, 72),
+                (byte)Math.Clamp((int)Math.Round(_background.G * 0.55), 14, 72),
+                (byte)Math.Clamp((int)Math.Round(_background.B * 0.55), 14, 72)));
+        }
+    }
+
+    private void ShowShareLimitHint()
+    {
+        _shareLimitHintText.Text = $"最多可选择 {MaxShareSelectionCount} 行歌词";
+        _shareLimitHintText.Visibility = Visibility.Visible;
+        _shareLimitHintTimer ??= new DispatcherTimer { Interval = TimeSpan.FromSeconds(2.5) };
+        _shareLimitHintTimer.Stop();
+        _shareLimitHintTimer.Tick -= OnShareLimitHintTick;
+        _shareLimitHintTimer.Tick += OnShareLimitHintTick;
+        _shareLimitHintTimer.Start();
+    }
+
+    private void OnShareLimitHintTick(object? sender, EventArgs e) => HideShareLimitHint();
+
+    private void HideShareLimitHint()
+    {
+        _shareLimitHintTimer?.Stop();
+        _shareLimitHintText.Visibility = Visibility.Collapsed;
+    }
+
+    private LyricSharePayload? BuildSharePayloadSnapshot()
+    {
+        if (!_isShareSelecting || _lyrics is null || _selectedShareLines.Count == 0)
+            return null;
+
+        var selectedLines = _selectedShareLines
+            .Where(idx => idx >= 0 && idx < _lyrics.Lines.Count && _rows.ContainsKey(idx))
+            .OrderBy(idx => idx)
+            .Select(idx =>
+            {
+                var line = _lyrics.Lines[idx];
+                var text = string.IsNullOrWhiteSpace(line.Content) ? "♪" : line.Content.Trim();
+                return new ShareLyricLine(text, ExtractTranslation(line));
+            })
+            .ToList();
+
+        if (selectedLines.Count == 0) return null;
+
+        BitmapSource? coverSnapshot = null;
+        if (_coverBytes is { Length: > 0 } bytes)
+        {
+            try { coverSnapshot = WindowsShareService.DecodeCoverBytes(bytes, maxDimension: 1600); }
+            catch { coverSnapshot = null; }
+        }
+        coverSnapshot ??= _cover.Source as BitmapSource;
+        var brightCoverColor = ClassicLyricsPalette.ShareCardColorFromCover(coverSnapshot, _coverBackground);
+
+        return new LyricSharePayload(
+            _track?.Title,
+            _track?.Artist,
+            coverSnapshot,
+            brightCoverColor,
+            selectedLines,
+            _settings.ClassicShowTranslation,
+            TextElement.GetFontFamily(_lines),
+            _settings.ClassicLyricsFont);
+    }
+
+    private void OpenLyricSharePreview()
+    {
+        var payload = BuildSharePayloadSnapshot();
+        if (payload is null) return;
+
+        if (_shareWindow is { IsLoaded: true })
+        {
+            try { _shareWindow.Close(); } catch { }
+        }
+
+        // 进入二级分享卡片编辑窗时，主歌词界面立即恢复正常播放跟随状态
+        ExitShareSelectionMode(resumeAutoScroll: true);
+
+        _shareWindow = new LyricShareWindow(
+            payload,
+            _settings,
+            onClosed: _ =>
+            {
+                _shareWindow = null;
+            })
+        {
+            Owner = this,
+        };
+        _shareWindow.Show();
+    }
+
+    private LyricRow? FindAncestorLyricRow(DependencyObject? source)
+    {
+        while (source is not null)
+        {
+            if (source is LyricRow row && _rows.ContainsValue(row)) return row;
+            source = source is Visual or System.Windows.Media.Media3D.Visual3D
+                ? VisualTreeHelper.GetParent(source)
+                : LogicalTreeHelper.GetParent(source);
+        }
+        return null;
+    }
+
     private bool IsInteractiveTarget(DependencyObject? source)
     {
         while (source is not null)
         {
             if (source is ButtonBase or RangeBase) return true;
             if (ReferenceEquals(source, _captionBar)) return true;
+            if (ReferenceEquals(source, _shareHeaderBar) || ReferenceEquals(source, _shareActionBar)) return true;
             if (source is LyricRow row && _rows.ContainsValue(row)) return true;
             source = source is Visual or System.Windows.Media.Media3D.Visual3D
                 ? VisualTreeHelper.GetParent(source)
@@ -2467,10 +3148,13 @@ internal sealed class ClassicLyricsWindow : Window
         public bool HasKaraoke => _karaokeRuns is not null;
 
         private readonly ScaleTransform _scale = new(1.0, 1.0);
+        private readonly Border _cardBorder;
+        private readonly StackPanel _cardContent;
         private TranslationSlot? _slot;
         private TextBlock? _sub;
         private TranslateTransform? _subTranslate;
         private double _mainSize = 24;
+        private bool _isShareMode;
 
         private readonly IReadOnlyList<KaraokeSegment> _karaokeSegments;
         private readonly Run[]? _karaokeRuns;
@@ -2490,29 +3174,24 @@ internal sealed class ClassicLyricsWindow : Window
         private Color _lastUnlitColor;
         private Color _lastLitColor;
 
-        /// <summary>整首歌词是否以拉丁字母为主（英文等）。决定行高与行间距口径。</summary>
-        private readonly bool _latinMetrics;
-
         /// <summary>用户在设置里选的行距档位倍率（1.0 = 标准）。</summary>
         public double LineHeightScale { get; set; } = 1.0;
         public double GapScale { get; set; } = 1.0;
 
         private static readonly IEasingFunction VisualEase = new CubicEase { EasingMode = EasingMode.EaseOut };
-        private static readonly TimeSpan VisualDuration = TimeSpan.FromMilliseconds(450);
+        private static readonly TimeSpan VisualDuration = TimeSpan.FromMilliseconds(160);
 
         public LyricRow(
             string text,
             string? translation,
             Color initialColor,
             double progress,
-            bool latinMetrics,
             InlineTimeTags? timeTags = null)
         {
-            _latinMetrics = latinMetrics;
             Background = Brushes.Transparent;
             RenderTransformOrigin = new Point(0, 0.5);
             RenderTransform = _scale;
-            Opacity = 0.72;
+            Opacity = 1.0;
             ForegroundBrush = new SolidColorBrush(initialColor);
             Main = new TextBlock
             {
@@ -2543,8 +3222,58 @@ internal sealed class ClassicLyricsWindow : Window
                 Main.Text = text;
             }
 
-            Children.Add(Main);
+            _cardContent = new StackPanel();
+            _cardContent.Children.Add(Main);
+            _cardBorder = new Border
+            {
+                Background = Brushes.Transparent,
+                Child = _cardContent,
+            };
+            Children.Add(_cardBorder);
             SetTranslation(translation, progress);
+        }
+
+        public void SetShareMode(bool active)
+        {
+            if (_isShareMode == active) return;
+            _isShareMode = active;
+            if (active)
+            {
+                _cardBorder.CornerRadius = new CornerRadius(14);
+                _cardBorder.Padding = new Thickness(18, 11, 18, 11);
+                _cardBorder.BorderThickness = new Thickness(0);
+            }
+            else
+            {
+                _cardBorder.CornerRadius = new CornerRadius(0);
+                _cardBorder.Padding = new Thickness(0);
+                _cardBorder.BorderThickness = new Thickness(0);
+                _cardBorder.Background = Brushes.Transparent;
+                _cardBorder.BorderBrush = Brushes.Transparent;
+            }
+            ApplySpacing(_mainSize);
+        }
+
+        public void UpdateShareVisualState(bool isSelected, bool isHovered, Color background, Color subdued, bool animate)
+        {
+            ClearKaraokeProgress();
+            const double targetScale = 1.0;
+            var targetOpacity = isSelected ? 1.0 : (isHovered ? 0.96 : 0.86);
+            var targetColor = isSelected
+                ? ClassicLyricsPalette.HighContrastDarkInk(background)
+                : isHovered
+                    ? Colors.White
+                    : BlendColor(subdued, Colors.White, 0.58);
+
+            var cardFill = isSelected
+                ? Brushes.White
+                : isHovered
+                    ? new SolidColorBrush(Color.FromArgb(46, 255, 255, 255))
+                    : Brushes.Transparent;
+            _cardBorder.Background = cardFill;
+            _cardBorder.BorderBrush = Brushes.Transparent;
+
+            ApplyVisualTargets(targetScale, targetOpacity, targetColor, animate);
         }
 
         public void UpdateVisualState(bool isActive, bool isPast, Color targetColor, bool animate, bool isHovered = false)
@@ -2552,9 +3281,13 @@ internal sealed class ClassicLyricsWindow : Window
             if (!isActive || isHovered)
                 ClearKaraokeProgress();
 
-            var targetScale = isHovered ? (isActive ? 1.05 : 1.02) : (isActive ? 1.04 : 1.0);
-            var targetOpacity = isHovered ? 1.0 : (isActive ? 1.0 : (isPast ? 0.45 : 0.72));
+            const double targetScale = 1.0;
+            const double targetOpacity = 1.0;
+            ApplyVisualTargets(targetScale, targetOpacity, targetColor, animate);
+        }
 
+        private void ApplyVisualTargets(double targetScale, double targetOpacity, Color targetColor, bool animate)
+        {
             if (animate && SystemParameters.ClientAreaAnimation)
             {
                 if (Math.Abs(_scale.ScaleX - targetScale) > 0.001)
@@ -2764,7 +3497,7 @@ internal sealed class ClassicLyricsWindow : Window
                 TranslationText = null;
                 if (_slot is not null)
                 {
-                    Children.Remove(_slot);
+                    _cardContent.Children.Remove(_slot);
                     _slot = null;
                     _sub = null;
                     _subTranslate = null;
@@ -2796,7 +3529,7 @@ internal sealed class ClassicLyricsWindow : Window
                 ClipToBounds = true,
             };
             ApplyProgress(progress);
-            Children.Add(_slot);
+            _cardContent.Children.Add(_slot);
             ApplySpacing(_mainSize);
         }
 
@@ -2823,9 +3556,8 @@ internal sealed class ClassicLyricsWindow : Window
         }
 
         /// <summary>
-        /// 行高与行间距按"整首歌词的主语言"取两套基准口径，再乘用户在设置里选的行距档位：
-        /// 中日韩方块字基准 1.32 行高 / 0.82 字号间距；英文等拉丁文本 1.45 / 1.00。
-        /// 英文有上下伸部、谚文有收音，都比汉字更需要行间留白，写死一套必然有一边发闷。
+        /// 采用经典的紧凑歌词版式基准（正文 1.2 行高、译文 1.3 行高、0.62 字号行距），
+        /// 并支持乘上用户在设置里调整的行距档位倍率。
         /// </summary>
         public void ApplySizing(double mainSize)
         {
@@ -2833,12 +3565,12 @@ internal sealed class ClassicLyricsWindow : Window
             _cachedSweepSegment = -1;
             _sweepGeometryDirty = true;
             Main.FontSize = mainSize;
-            Main.LineHeight = mainSize * (_latinMetrics ? 1.45 : 1.32) * LineHeightScale;
+            Main.LineHeight = mainSize * 1.2 * LineHeightScale;
             if (_sub is not null)
             {
                 var subSize = Math.Max(14, Math.Round(mainSize * 0.56));
                 _sub.FontSize = subSize;
-                _sub.LineHeight = subSize * (_latinMetrics ? 1.4 : 1.34) * LineHeightScale;
+                _sub.LineHeight = subSize * 1.3 * LineHeightScale;
             }
             ApplySpacing(mainSize);
         }
@@ -2852,7 +3584,19 @@ internal sealed class ClassicLyricsWindow : Window
         {
             Margin = new Thickness(0);
             Main.Margin = new Thickness(0);
-            var gap = Math.Max(4, mainSize * (_latinMetrics ? 1.00 : 0.82) * GapScale);
+            if (_isShareMode)
+            {
+                _cardBorder.Margin = new Thickness(0, 0, 0, 6);
+                if (_sub is not null && _slot is not null)
+                {
+                    _sub.Margin = new Thickness(0, Math.Max(2, Math.Round(mainSize * 0.08)), 0, 0);
+                    _slot.Margin = new Thickness(0);
+                }
+                return;
+            }
+
+            _cardBorder.Margin = new Thickness(0);
+            var gap = Math.Max(4, mainSize * 0.62 * GapScale);
             if (_sub is not null && _slot is not null)
             {
                 _sub.Margin = new Thickness(0, Math.Max(2, Math.Round(mainSize * 0.08)), 0, 0);

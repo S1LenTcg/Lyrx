@@ -5,6 +5,7 @@ using System.Windows.Automation.Provider;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
 using System.Windows.Threading;
 
 namespace Musebase.Windows;
@@ -15,12 +16,25 @@ namespace Musebase.Windows;
 /// </summary>
 internal sealed class ClassicPlaybackSlider : Slider
 {
+    private static readonly DependencyProperty HoverProgressProperty = DependencyProperty.Register(
+        nameof(HoverProgress), typeof(double), typeof(ClassicPlaybackSlider),
+        new FrameworkPropertyMetadata(0d, FrameworkPropertyMetadataOptions.AffectsRender));
+
+    private static readonly DependencyProperty PressProgressProperty = DependencyProperty.Register(
+        nameof(PressProgress), typeof(double), typeof(ClassicPlaybackSlider),
+        new FrameworkPropertyMetadata(0d, FrameworkPropertyMetadataOptions.AffectsRender));
+
+    private static readonly DependencyProperty DisplayValueProperty = DependencyProperty.Register(
+        nameof(DisplayValue), typeof(double), typeof(ClassicPlaybackSlider),
+        new FrameworkPropertyMetadata(0d, FrameworkPropertyMetadataOptions.AffectsRender));
+
     internal static readonly Brush Accent = FrozenBrush(30, 215, 96);
     private static readonly Brush Rail = FrozenBrush(77, 77, 77);
     private static readonly Brush FocusedRail = FrozenBrush(106, 106, 106);
     private static readonly Brush ThumbBrush = FrozenBrush(255, 255, 255);
     private static readonly Brush FocusThumbHalo = FrozenBrush(100, 30, 215, 96);
     private static readonly Pen FocusThumbPen = FrozenPen(255, 30, 215, 96, 1.5);
+    private static readonly IEasingFunction SliderEase = new CubicEase { EasingMode = EasingMode.EaseOut };
 
     /// <summary>轨道左右留白，已播放段的端点用它做内缩。</summary>
     private const double RailInset = 8;
@@ -30,6 +44,10 @@ internal sealed class ClassicPlaybackSlider : Slider
 
     private readonly DispatcherTimer _keyboardSeekTimer;
     private bool _lastAutomationReadOnly;
+    private double _dragStartX;
+    private bool _hasMovedDuringDrag;
+    private bool _suppressImmediateDisplaySync;
+    private double _displayAnimationTarget = double.NaN;
 
     /// <summary>用户完成点击、拖动或键盘跳转后请求跳转到指定秒数。</summary>
     public event Action<double>? SeekRequested;
@@ -42,6 +60,24 @@ internal sealed class ClassicPlaybackSlider : Slider
 
     /// <summary>用户是否正在交互调节进度（拖拽或键盘连续步进），用于阻止定时刷新覆盖当前预览值。</summary>
     public bool IsUserSeeking => IsDragging || IsKeyboardSeeking;
+
+    private double HoverProgress
+    {
+        get => (double)GetValue(HoverProgressProperty);
+        set => SetValue(HoverProgressProperty, value);
+    }
+
+    private double PressProgress
+    {
+        get => (double)GetValue(PressProgressProperty);
+        set => SetValue(PressProgressProperty, value);
+    }
+
+    private double DisplayValue
+    {
+        get => (double)GetValue(DisplayValueProperty);
+        set => SetValue(DisplayValueProperty, value);
+    }
 
     private bool IsAutomationReadOnly => !IsEnabled || Maximum <= Minimum;
 
@@ -68,6 +104,22 @@ internal sealed class ClassicPlaybackSlider : Slider
         _lastAutomationReadOnly = IsAutomationReadOnly;
     }
 
+    /// <summary>以平滑过渡动画更新进度条位置（用于点击歌词等显式跳转）。</summary>
+    public void AnimateToValue(double targetSeconds)
+    {
+        var clamped = Math.Clamp(targetSeconds, Minimum, Maximum);
+        _suppressImmediateDisplaySync = true;
+        try
+        {
+            Value = clamped;
+        }
+        finally
+        {
+            _suppressImmediateDisplaySync = false;
+        }
+        AnimateDisplayValueTo(clamped, 220);
+    }
+
     /// <summary>取消尚未提交的键盘防抖跳转（例如切歌或窗口关闭时）。</summary>
     public void CancelPendingSeek()
     {
@@ -75,6 +127,7 @@ internal sealed class ClassicPlaybackSlider : Slider
         if (IsKeyboardSeeking)
         {
             IsKeyboardSeeking = false;
+            UpdateVisualActivityAnimations();
             InvalidateVisual();
         }
     }
@@ -82,12 +135,14 @@ internal sealed class ClassicPlaybackSlider : Slider
     protected override void OnMouseEnter(MouseEventArgs e)
     {
         base.OnMouseEnter(e);
+        UpdateVisualActivityAnimations();
         InvalidateVisual();
     }
 
     protected override void OnMouseLeave(MouseEventArgs e)
     {
         base.OnMouseLeave(e);
+        UpdateVisualActivityAnimations();
         InvalidateVisual();
     }
 
@@ -96,6 +151,7 @@ internal sealed class ClassicPlaybackSlider : Slider
         base.OnGotKeyboardFocus(e);
         if (UIElementAutomationPeer.FromElement(this) is PlaybackProgressPeer peer)
             peer.RaiseFocusChanged(true);
+        UpdateVisualActivityAnimations();
         InvalidateVisual();
     }
 
@@ -106,6 +162,7 @@ internal sealed class ClassicPlaybackSlider : Slider
             CommitKeyboardSeek();
         if (UIElementAutomationPeer.FromElement(this) is PlaybackProgressPeer peer)
             peer.RaiseFocusChanged(false);
+        UpdateVisualActivityAnimations();
         InvalidateVisual();
     }
 
@@ -117,9 +174,13 @@ internal sealed class ClassicPlaybackSlider : Slider
         if (Focusable && !IsKeyboardFocused)
             Focus();
         CancelPendingSeek();
+        var mouseX = e.GetPosition(this).X;
         IsDragging = true;
+        _dragStartX = mouseX;
+        _hasMovedDuringDrag = false;
         CaptureMouse();
-        UpdateValueFromMouse(e.GetPosition(this).X);
+        UpdateVisualActivityAnimations();
+        UpdateValueFromMouse(mouseX, animateClick: true);
         e.Handled = true;
     }
 
@@ -128,7 +189,10 @@ internal sealed class ClassicPlaybackSlider : Slider
         base.OnMouseMove(e);
         if (IsDragging && Maximum > Minimum)
         {
-            UpdateValueFromMouse(e.GetPosition(this).X);
+            var mouseX = e.GetPosition(this).X;
+            if (!_hasMovedDuringDrag && Math.Abs(mouseX - _dragStartX) >= 2.5)
+                _hasMovedDuringDrag = true;
+            UpdateValueFromMouse(mouseX, animateClick: !_hasMovedDuringDrag);
             e.Handled = true;
         }
     }
@@ -140,7 +204,8 @@ internal sealed class ClassicPlaybackSlider : Slider
         {
             IsDragging = false;
             ReleaseMouseCapture();
-            UpdateValueFromMouse(e.GetPosition(this).X);
+            UpdateVisualActivityAnimations();
+            UpdateValueFromMouse(e.GetPosition(this).X, animateClick: !_hasMovedDuringDrag);
             if (IsEnabled && Maximum > Minimum)
                 SeekRequested?.Invoke(Math.Clamp(Value, Minimum, Maximum));
             e.Handled = true;
@@ -153,6 +218,7 @@ internal sealed class ClassicPlaybackSlider : Slider
         if (IsDragging)
         {
             IsDragging = false;
+            UpdateVisualActivityAnimations();
             if (IsEnabled && Maximum > Minimum)
                 SeekRequested?.Invoke(Math.Clamp(Value, Minimum, Maximum));
         }
@@ -227,8 +293,12 @@ internal sealed class ClassicPlaybackSlider : Slider
         var clamped = Math.Clamp(target, Minimum, Maximum);
         if (Math.Abs(clamped - Value) < 1e-6 && !IsKeyboardSeeking) return;
 
-        Value = clamped;
         IsKeyboardSeeking = true;
+        UpdateVisualActivityAnimations();
+        _suppressImmediateDisplaySync = true;
+        try { Value = clamped; }
+        finally { _suppressImmediateDisplaySync = false; }
+        AnimateDisplayValueTo(clamped, 140);
         _keyboardSeekTimer.Stop();
         _keyboardSeekTimer.Start();
         InvalidateVisual();
@@ -239,6 +309,7 @@ internal sealed class ClassicPlaybackSlider : Slider
         _keyboardSeekTimer.Stop();
         if (!IsKeyboardSeeking) return;
         IsKeyboardSeeking = false;
+        UpdateVisualActivityAnimations();
         InvalidateVisual();
         if (IsEnabled && Maximum > Minimum)
             SeekRequested?.Invoke(Math.Clamp(Value, Minimum, Maximum));
@@ -252,8 +323,8 @@ internal sealed class ClassicPlaybackSlider : Slider
             IsDragging = false;
             if (IsMouseCaptured) ReleaseMouseCapture();
         }
-        Value = clampedSeconds;
-        InvalidateVisual();
+        UpdateVisualActivityAnimations();
+        AnimateToValue(clampedSeconds);
         SeekRequested?.Invoke(clampedSeconds);
     }
 
@@ -269,6 +340,7 @@ internal sealed class ClassicPlaybackSlider : Slider
                 if (IsMouseCaptured) ReleaseMouseCapture();
             }
         }
+        UpdateVisualActivityAnimations();
         NotifyAutomationReadOnlyChanged();
         InvalidateVisual();
     }
@@ -283,15 +355,74 @@ internal sealed class ClassicPlaybackSlider : Slider
             peer.RaiseReadOnlyChanged(previous, current);
     }
 
-    private void UpdateValueFromMouse(double mouseX)
+    private void UpdateValueFromMouse(double mouseX, bool animateClick)
     {
         var width = ActualWidth - RailInset * 2;
         if (width <= 1) return;
         var range = Maximum - Minimum;
         if (range <= 0) return;
         var ratio = Math.Clamp((mouseX - RailInset) / width, 0d, 1d);
-        Value = Minimum + ratio * range;
+        var next = Minimum + ratio * range;
+
+        if (animateClick)
+        {
+            _suppressImmediateDisplaySync = true;
+            try { Value = next; }
+            finally { _suppressImmediateDisplaySync = false; }
+            AnimateDisplayValueTo(next, 160);
+        }
+        else
+        {
+            Value = next;
+        }
         InvalidateVisual();
+    }
+
+    private void AnimateDisplayValueTo(double target, int durationMs)
+    {
+        var clamped = Math.Clamp(target, Minimum, Maximum);
+        if (!SystemParameters.ClientAreaAnimation || !IsLoaded)
+        {
+            _displayAnimationTarget = double.NaN;
+            BeginAnimation(DisplayValueProperty, null);
+            DisplayValue = clamped;
+            return;
+        }
+
+        var current = Math.Clamp(DisplayValue, Minimum, Maximum);
+        if (Math.Abs(current - clamped) < 0.001)
+        {
+            _displayAnimationTarget = double.NaN;
+            BeginAnimation(DisplayValueProperty, null);
+            DisplayValue = clamped;
+            return;
+        }
+
+        _displayAnimationTarget = clamped;
+        var anim = new DoubleAnimation(current, clamped, TimeSpan.FromMilliseconds(durationMs))
+        {
+            EasingFunction = SliderEase,
+        };
+        anim.Completed += (_, _) => _displayAnimationTarget = double.NaN;
+        BeginAnimation(DisplayValueProperty, anim);
+    }
+
+    private void UpdateVisualActivityAnimations()
+    {
+        var hoverTarget = IsEnabled && (IsMouseOver || IsDragging || IsKeyboardFocused || IsKeyboardSeeking) ? 1d : 0d;
+        var pressTarget = IsEnabled && IsDragging ? 1d : 0d;
+
+        if (!SystemParameters.ClientAreaAnimation || !IsLoaded)
+        {
+            BeginAnimation(HoverProgressProperty, null);
+            HoverProgress = hoverTarget;
+            BeginAnimation(PressProgressProperty, null);
+            PressProgress = pressTarget;
+            return;
+        }
+
+        BeginAnimation(HoverProgressProperty, new DoubleAnimation(hoverTarget, TimeSpan.FromMilliseconds(140)) { EasingFunction = SliderEase });
+        BeginAnimation(PressProgressProperty, new DoubleAnimation(pressTarget, TimeSpan.FromMilliseconds(110)) { EasingFunction = SliderEase });
     }
 
     protected override AutomationPeer OnCreateAutomationPeer() => new PlaybackProgressPeer(this);
@@ -344,30 +475,40 @@ internal sealed class ClassicPlaybackSlider : Slider
 
         var y = ActualHeight / 2;
         var range = Maximum - Minimum;
-        var ratio = range > 0 ? Math.Clamp((Value - Minimum) / range, 0d, 1d) : 0d;
+        var shownValue = DisplayValue;
+        var ratio = range > 0 ? Math.Clamp((shownValue - Minimum) / range, 0d, 1d) : 0d;
         var end = RailInset + width * ratio;
         var isFocused = IsKeyboardFocused;
-        var isActive = IsEnabled && (IsMouseOver || IsDragging || isFocused || IsKeyboardSeeking);
-        var trackHeight = isActive ? 5 : 4;
+        var hoverT = IsEnabled ? Math.Clamp(HoverProgress, 0d, 1d) : 0d;
+        var pressT = IsEnabled ? Math.Clamp(PressProgress, 0d, 1d) : 0d;
+        var trackHeight = 4.0 + hoverT * 1.2 + pressT * 0.4;
 
         if (!IsEnabled) drawing.PushOpacity(0.45);
         try
         {
-            drawing.DrawRoundedRectangle(isFocused ? FocusedRail : Rail, null, new Rect(RailInset, y - trackHeight / 2.0, width, trackHeight), 2, 2);
+            drawing.DrawRoundedRectangle(isFocused ? FocusedRail : Rail, null, new Rect(RailInset, y - trackHeight / 2.0, width, trackHeight), trackHeight / 2.0, trackHeight / 2.0);
             if (end > RailInset)
-                drawing.DrawRoundedRectangle(Accent, null, new Rect(RailInset, y - trackHeight / 2.0, end - RailInset, trackHeight), 2, 2);
+                drawing.DrawRoundedRectangle(Accent, null, new Rect(RailInset, y - trackHeight / 2.0, end - RailInset, trackHeight), trackHeight / 2.0, trackHeight / 2.0);
 
-            // 鼠标悬停、拖拽或键盘聚焦时，在当前进度处绘制白色小滑块
-            if (isActive && range > 0)
+            // 鼠标悬停、拖拽或键盘聚焦时，滑块平滑放大出现
+            var baseThumbRadius = isFocused ? 5.0 : 5.5;
+            var thumbRadius = (baseThumbRadius + pressT * 1.3) * hoverT;
+            if (thumbRadius > 0.2 && range > 0)
             {
-                if (isFocused)
-                    drawing.DrawEllipse(FocusThumbHalo, null, new Point(end, y), 7.5, 7.5);
+                if (isFocused || pressT > 0.05)
+                {
+                    var haloRadius = thumbRadius + 2.5;
+                    if (isFocused)
+                        drawing.DrawEllipse(FocusThumbHalo, null, new Point(end, y), haloRadius, haloRadius);
+                    else
+                        drawing.DrawEllipse(FrozenBrush((byte)Math.Round(72 * pressT), 255, 255, 255), null, new Point(end, y), haloRadius, haloRadius);
+                }
                 drawing.DrawEllipse(
                     ThumbBrush,
                     isFocused ? FocusThumbPen : null,
                     new Point(end, y),
-                    isFocused ? 5.0 : 5.5,
-                    isFocused ? 5.0 : 5.5);
+                    thumbRadius,
+                    thumbRadius);
             }
         }
         finally
@@ -379,6 +520,15 @@ internal sealed class ClassicPlaybackSlider : Slider
     protected override void OnValueChanged(double oldValue, double newValue)
     {
         base.OnValueChanged(oldValue, newValue);
+        if (!_suppressImmediateDisplaySync)
+        {
+            if (double.IsNaN(_displayAnimationTarget) || Math.Abs(newValue - _displayAnimationTarget) > 0.05)
+            {
+                _displayAnimationTarget = double.NaN;
+                BeginAnimation(DisplayValueProperty, null);
+                DisplayValue = newValue;
+            }
+        }
         InvalidateVisual();
     }
 

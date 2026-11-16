@@ -24,6 +24,11 @@ internal enum ClassicTransportIcon
     Speaker,
     MutedSpeaker,
     ChevronRight,
+    Download,
+    Copy,
+    Share,
+    Image,
+    Bilingual,
 }
 
 internal sealed class ClassicTransportGlyph : FrameworkElement
@@ -50,6 +55,11 @@ internal sealed class ClassicTransportGlyph : FrameworkElement
     private static readonly Geometry SpeakerWaves = Shape("M14.7 8.8 A4.2 4.2 0 0 1 14.7 15.2 M17.3 6.2 A7.2 7.2 0 0 1 17.3 17.8");
     private static readonly Geometry MutedCross = Shape("M14.8 9.2 L20.2 14.8 M20.2 9.2 L14.8 14.8");
     private static readonly Geometry ChevronRightPath = Shape("M9.2 6.2 L15.0 12.0 L9.2 17.8");
+    private static readonly Geometry DownloadPath = Shape("M12 4.2 V15.2 M7.4 11.2 L12 15.8 L16.6 11.2 M5 19.2 H19");
+    private static readonly Geometry CopyBackPath = Shape("M6.2 15.5 H5.5 A2 2 0 0 1 3.5 13.5 V5.5 A2 2 0 0 1 5.5 3.5 H13.5 A2 2 0 0 1 15.5 5.5 V6.2");
+    private static readonly Geometry ShareLinesPath = Shape("M8.6 10.7 L15.0 6.9 M8.6 13.3 L15.0 17.1");
+    private static readonly Geometry ImageMountainsPath = Shape("M4.6 17.5 L9.4 12.8 L12.6 15.6 L15.6 11.8 L19.4 17.5 Z");
+    private static readonly Geometry BilingualPath = Shape("M4.0 13.8 V6.6 Q4.0 4.2 6.4 4.2 H14.0 M11.1 16.8 L13.9 10.9 L16.7 16.8 M11.9 15.1 H15.9");
 
     public static readonly DependencyProperty TintProperty = DependencyProperty.Register(
         nameof(Tint), typeof(Brush), typeof(ClassicTransportGlyph),
@@ -132,10 +142,10 @@ internal sealed class ClassicTransportGlyph : FrameworkElement
             case ClassicTransportIcon.Next: drawing.DrawGeometry(ink, null, Next); break;
             case ClassicTransportIcon.Shuffle: drawing.DrawGeometry(null, Stroke(ink), Shuffle); break;
             case ClassicTransportIcon.Settings: drawing.DrawGeometry(null, Stroke(ink), Settings); break;
-            case ClassicTransportIcon.Minimize: drawing.DrawGeometry(null, Stroke(ink), Minimize); break;
+            case ClassicTransportIcon.Minimize: drawing.DrawGeometry(null, Stroke(ink, isDefaultToolbarBox ? 2 : 2.3), Minimize); break;
             case ClassicTransportIcon.Fullscreen: drawing.DrawGeometry(null, Stroke(ink), Fullscreen); break;
             case ClassicTransportIcon.ExitFullscreen: drawing.DrawGeometry(null, Stroke(ink), ExitFullscreen); break;
-            case ClassicTransportIcon.Close: drawing.DrawGeometry(null, Stroke(ink), Close); break;
+            case ClassicTransportIcon.Close: drawing.DrawGeometry(null, Stroke(ink, isDefaultToolbarBox ? 2 : 2.3), Close); break;
             case ClassicTransportIcon.BluetoothAudio:
                 drawing.DrawGeometry(ink, Stroke(ink, 1.1), BluetoothSpeakerCone);
                 drawing.DrawGeometry(null, Stroke(ink, 1.75), BluetoothRune);
@@ -155,6 +165,28 @@ internal sealed class ClassicTransportGlyph : FrameworkElement
                 break;
             case ClassicTransportIcon.ChevronRight:
                 drawing.DrawGeometry(null, Stroke(ink, 2.0), ChevronRightPath);
+                break;
+            case ClassicTransportIcon.Download:
+                drawing.DrawGeometry(null, Stroke(ink, 2.0), DownloadPath);
+                break;
+            case ClassicTransportIcon.Copy:
+                drawing.DrawRoundedRectangle(null, Stroke(ink, 1.85), new Rect(8.5, 8.5, 11.5, 11.5), 2.2, 2.2);
+                drawing.DrawGeometry(null, Stroke(ink, 1.85), CopyBackPath);
+                break;
+            case ClassicTransportIcon.Share:
+                drawing.DrawEllipse(null, Stroke(ink, 1.9), new Point(17.2, 5.6), 2.5, 2.5);
+                drawing.DrawEllipse(null, Stroke(ink, 1.9), new Point(6.4, 12.0), 2.5, 2.5);
+                drawing.DrawEllipse(null, Stroke(ink, 1.9), new Point(17.2, 18.4), 2.5, 2.5);
+                drawing.DrawGeometry(null, Stroke(ink, 1.9), ShareLinesPath);
+                break;
+            case ClassicTransportIcon.Image:
+                drawing.DrawRoundedRectangle(null, Stroke(ink, 1.85), new Rect(3.5, 4.2, 17.0, 15.6), 2.4, 2.4);
+                drawing.DrawEllipse(ink, null, new Point(8.4, 9.2), 1.35, 1.35);
+                drawing.DrawGeometry(ink, null, ImageMountainsPath);
+                break;
+            case ClassicTransportIcon.Bilingual:
+                drawing.DrawRoundedRectangle(null, Stroke(ink, 1.95), new Rect(7.8, 7.8, 12.2, 12.2), 2.8, 2.8);
+                drawing.DrawGeometry(null, Stroke(ink, 1.95), BilingualPath);
                 break;
             default:
                 drawing.DrawGeometry(null, Stroke(ink), Repeat);

@@ -31,6 +31,11 @@
   <ItemGroup>
     <Resource Include="assets\app.ico" />
     <EmbeddedResource Include="i18n\*.json" />
+    <Content Include="..\..\android\Lyrx.Android\Assets\fonts\SpotifyMix*.ttf">
+      <Link>local-fonts\%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
   </ItemGroup>
 
 </Project>

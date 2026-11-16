@@ -1326,7 +1326,7 @@ internal sealed class ClassicSettingsWindow : Window
         return template;
     }
 
-    private static Style CreateDarkScrollBarStyle() =>
+    internal static Style CreateDarkScrollBarStyle() =>
         (Style)System.Windows.Markup.XamlReader.Parse("""
             <Style xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"

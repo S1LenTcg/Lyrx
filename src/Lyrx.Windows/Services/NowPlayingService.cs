@@ -13,7 +13,13 @@ using Session = Windows.Media.Control.GlobalSystemMediaTransportControlsSession;
 namespace Musebase.Windows.Services;
 
 internal readonly record struct TransportState(
-    PlaybackControls Controls, bool IsPlaying, bool CanSeek, bool? Shuffle, MediaPlaybackAutoRepeatMode? Repeat);
+    PlaybackControls Controls,
+    bool IsPlaying,
+    bool CanSeek,
+    bool? Shuffle,
+    MediaPlaybackAutoRepeatMode? Repeat,
+    bool CanShuffle = false,
+    bool CanRepeat = false);
 
 /// <summary>
 /// SMTC（GlobalSystemMediaTransportControls）包装器 —— <see cref="INowPlayingSource"/> 的 Windows 实现。
@@ -312,6 +318,17 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
     private double _diagStaleSum;
     private int _diagStaleCount;
 
+    private string? _optimisticShuffleSession;
+    private bool _optimisticShuffleValue;
+    private long _optimisticShuffleUntil;
+    private string? _optimisticRepeatSession;
+    private MediaPlaybackAutoRepeatMode _optimisticRepeatValue;
+    private long _optimisticRepeatUntil;
+    private string? _shuffleRejectedSession;
+    private string? _shuffleRejectedTrackKey;
+    private string? _repeatRejectedSession;
+    private string? _repeatRejectedTrackKey;
+
     public TrackInfo? CurrentTrack { get; private set; }
     public bool IsPlaying { get; private set; }
 
@@ -361,6 +378,7 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
                 _session.TimelinePropertiesChanged -= OnTimelinePropertiesChanged;
             }
             _session = best;
+            ClearTransportOverridesLocked();
             CancelThumbVerifyLocked();
             if (_session is not null)
             {
@@ -507,7 +525,12 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
     internal TransportState GetTransportState()
     {
         Session? session;
-        lock (_lock) session = _session;
+        string? trackKey;
+        lock (_lock)
+        {
+            session = _session;
+            trackKey = BuildTransportTrackKey(CurrentTrack);
+        }
         try
         {
             if (session is not null)
@@ -517,13 +540,143 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
                 var playing = info.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing;
                 var controls = new PlaybackControls(c.IsPreviousEnabled,
                     c.IsPlayPauseToggleEnabled || (playing ? c.IsPauseEnabled : c.IsPlayEnabled), c.IsNextEnabled);
-                return new TransportState(controls, playing, c.IsPlaybackPositionEnabled,
-                    c.IsShuffleEnabled ? info.IsShuffleActive : null,
-                    c.IsRepeatEnabled ? info.AutoRepeatMode : null);
+                return ResolveTransportStateSnapshot(
+                    session.SourceAppUserModelId,
+                    trackKey,
+                    playing,
+                    controls,
+                    c.IsPlaybackPositionEnabled,
+                    c.IsShuffleEnabled,
+                    info.IsShuffleActive,
+                    c.IsRepeatEnabled,
+                    info.AutoRepeatMode);
             }
         }
         catch { /* Session went away. */ }
-        return new TransportState(PlaybackControls.None, false, false, null, null);
+        return new TransportState(PlaybackControls.None, false, false, null, null, false, false);
+    }
+
+    internal TransportState ResolveTransportStateSnapshot(
+        string? appId,
+        string? trackKey,
+        bool playing,
+        PlaybackControls controls,
+        bool canSeek,
+        bool controlsShuffleEnabled,
+        bool? activeShuffle,
+        bool controlsRepeatEnabled,
+        MediaPlaybackAutoRepeatMode? activeRepeat)
+    {
+        var now = Environment.TickCount64;
+        lock (_lock)
+        {
+            if (controlsShuffleEnabled)
+            {
+                _shuffleRejectedSession = null;
+                _shuffleRejectedTrackKey = null;
+            }
+            if (controlsRepeatEnabled)
+            {
+                _repeatRejectedSession = null;
+                _repeatRejectedTrackKey = null;
+            }
+
+            var resolvedShuffle = controlsShuffleEnabled || activeShuffle.HasValue ? activeShuffle : null;
+            if (!string.IsNullOrEmpty(appId)
+                && string.Equals(appId, _optimisticShuffleSession, StringComparison.OrdinalIgnoreCase))
+            {
+                if (now >= _optimisticShuffleUntil || resolvedShuffle == _optimisticShuffleValue)
+                    _optimisticShuffleSession = null;
+                else
+                    resolvedShuffle = _optimisticShuffleValue;
+            }
+
+            var resolvedRepeat = controlsRepeatEnabled || activeRepeat.HasValue ? activeRepeat : null;
+            if (!string.IsNullOrEmpty(appId)
+                && string.Equals(appId, _optimisticRepeatSession, StringComparison.OrdinalIgnoreCase))
+            {
+                if (now >= _optimisticRepeatUntil || resolvedRepeat == _optimisticRepeatValue)
+                    _optimisticRepeatSession = null;
+                else
+                    resolvedRepeat = _optimisticRepeatValue;
+            }
+
+            var shuffleRejected = !string.IsNullOrEmpty(appId)
+                && string.Equals(appId, _shuffleRejectedSession, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(trackKey ?? "", _shuffleRejectedTrackKey ?? "", StringComparison.Ordinal);
+            var repeatRejected = !string.IsNullOrEmpty(appId)
+                && string.Equals(appId, _repeatRejectedSession, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(trackKey ?? "", _repeatRejectedTrackKey ?? "", StringComparison.Ordinal);
+
+            var canShuffle = controlsShuffleEnabled || activeShuffle.HasValue || !shuffleRejected;
+            var canRepeat = controlsRepeatEnabled || activeRepeat.HasValue || !repeatRejected;
+            return new TransportState(controls, playing, canSeek, resolvedShuffle, resolvedRepeat, canShuffle, canRepeat);
+        }
+    }
+
+    internal static IReadOnlyList<MediaPlaybackAutoRepeatMode> GetRepeatCandidates(MediaPlaybackAutoRepeatMode? current) =>
+        current switch
+        {
+            MediaPlaybackAutoRepeatMode.List => new[] { MediaPlaybackAutoRepeatMode.Track, MediaPlaybackAutoRepeatMode.None },
+            MediaPlaybackAutoRepeatMode.Track => new[] { MediaPlaybackAutoRepeatMode.None, MediaPlaybackAutoRepeatMode.List },
+            _ => new[] { MediaPlaybackAutoRepeatMode.List, MediaPlaybackAutoRepeatMode.Track },
+        };
+
+    internal void RecordOptimisticShuffleForTest(string? appId, bool target) =>
+        SetOptimisticShuffleLocked(appId, target);
+
+    internal void RecordOptimisticRepeatForTest(string? appId, MediaPlaybackAutoRepeatMode target) =>
+        SetOptimisticRepeatLocked(appId, target);
+
+    internal void RecordShuffleRejectionForTest(string? appId, string? trackKey)
+    {
+        lock (_lock)
+        {
+            _shuffleRejectedSession = appId;
+            _shuffleRejectedTrackKey = trackKey ?? "";
+            _optimisticShuffleSession = null;
+        }
+    }
+
+    internal void RecordRepeatRejectionForTest(string? appId, string? trackKey)
+    {
+        lock (_lock)
+        {
+            _repeatRejectedSession = appId;
+            _repeatRejectedTrackKey = trackKey ?? "";
+            _optimisticRepeatSession = null;
+        }
+    }
+
+    private void ClearTransportOverridesLocked()
+    {
+        _optimisticShuffleSession = null;
+        _optimisticRepeatSession = null;
+        _shuffleRejectedSession = null;
+        _shuffleRejectedTrackKey = null;
+        _repeatRejectedSession = null;
+        _repeatRejectedTrackKey = null;
+    }
+
+    private static string BuildTransportTrackKey(TrackInfo? track) =>
+        track is null ? "" : $"{track.Title}|{track.Artist}";
+
+    private void SetOptimisticShuffleLocked(string? appId, bool value)
+    {
+        _optimisticShuffleSession = appId;
+        _optimisticShuffleValue = value;
+        _optimisticShuffleUntil = Environment.TickCount64 + 1200;
+        _shuffleRejectedSession = null;
+        _shuffleRejectedTrackKey = null;
+    }
+
+    private void SetOptimisticRepeatLocked(string? appId, MediaPlaybackAutoRepeatMode value)
+    {
+        _optimisticRepeatSession = appId;
+        _optimisticRepeatValue = value;
+        _optimisticRepeatUntil = Environment.TickCount64 + 1200;
+        _repeatRejectedSession = null;
+        _repeatRejectedTrackKey = null;
     }
 
     /// <summary>播放/暂停切换.</summary>
@@ -546,32 +699,89 @@ public sealed class NowPlayingService : INowPlayingSource, IDisposable
     internal async Task<bool> ToggleShuffleAsync()
     {
         Session? session;
-        lock (_lock) session = _session;
+        string? trackKey;
+        bool? optimistic;
+        lock (_lock)
+        {
+            session = _session;
+            trackKey = BuildTransportTrackKey(CurrentTrack);
+            optimistic = session is not null
+                && Environment.TickCount64 < _optimisticShuffleUntil
+                && string.Equals(session.SourceAppUserModelId, _optimisticShuffleSession, StringComparison.OrdinalIgnoreCase)
+                ? _optimisticShuffleValue
+                : null;
+        }
         if (session is null) return false;
         try
         {
+            var appId = session.SourceAppUserModelId;
             var info = session.GetPlaybackInfo();
-            return info.Controls.IsShuffleEnabled && info.IsShuffleActive is bool enabled
-                && await session.TryChangeShuffleActiveAsync(!enabled);
+            var current = optimistic ?? info.IsShuffleActive ?? false;
+            var target = !current;
+            var changed = await session.TryChangeShuffleActiveAsync(target);
+            if (changed)
+            {
+                lock (_lock) SetOptimisticShuffleLocked(appId, target);
+                return true;
+            }
+            if (!info.Controls.IsShuffleEnabled && !info.IsShuffleActive.HasValue)
+            {
+                lock (_lock)
+                {
+                    _shuffleRejectedSession = appId;
+                    _shuffleRejectedTrackKey = trackKey;
+                    _optimisticShuffleSession = null;
+                }
+            }
+            return false;
         }
         catch { return false; }
     }
 
-    internal async Task<bool> ToggleRepeatOneAsync()
+    internal async Task<bool> ToggleRepeatModeAsync()
     {
         Session? session;
-        lock (_lock) session = _session;
+        string? trackKey;
+        MediaPlaybackAutoRepeatMode? optimistic;
+        lock (_lock)
+        {
+            session = _session;
+            trackKey = BuildTransportTrackKey(CurrentTrack);
+            optimistic = session is not null
+                && Environment.TickCount64 < _optimisticRepeatUntil
+                && string.Equals(session.SourceAppUserModelId, _optimisticRepeatSession, StringComparison.OrdinalIgnoreCase)
+                ? _optimisticRepeatValue
+                : null;
+        }
         if (session is null) return false;
         try
         {
+            var appId = session.SourceAppUserModelId;
             var info = session.GetPlaybackInfo();
-            if (!info.Controls.IsRepeatEnabled || info.AutoRepeatMode is not { } mode) return false;
-            var next = mode == MediaPlaybackAutoRepeatMode.Track
-                ? MediaPlaybackAutoRepeatMode.None : MediaPlaybackAutoRepeatMode.Track;
-            return await session.TryChangeAutoRepeatModeAsync(next);
+            var current = optimistic ?? info.AutoRepeatMode ?? MediaPlaybackAutoRepeatMode.None;
+            foreach (var next in GetRepeatCandidates(current))
+            {
+                if (await session.TryChangeAutoRepeatModeAsync(next))
+                {
+                    lock (_lock) SetOptimisticRepeatLocked(appId, next);
+                    return true;
+                }
+            }
+            if (!info.Controls.IsRepeatEnabled && !info.AutoRepeatMode.HasValue)
+            {
+                lock (_lock)
+                {
+                    _repeatRejectedSession = appId;
+                    _repeatRejectedTrackKey = trackKey;
+                    _optimisticRepeatSession = null;
+                }
+            }
+            return false;
         }
         catch { return false; }
     }
+
+    internal Task<bool> ToggleRepeatOneAsync() => ToggleRepeatModeAsync();
 
     /// <summary>下一曲.</summary>
     public async Task<bool> SkipNextAsync()
