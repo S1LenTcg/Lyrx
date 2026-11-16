@@ -147,6 +147,10 @@ internal sealed class ClassicLyricsWindow : Window
         WindowChrome.SetWindowChrome(this, _chrome);
         Background = Chrome;
         FontFamily = ClassicLyricsFonts.Body;
+        var lyricsFont = settings.ClassicLyricsFont is { } fontId
+            ? ClassicLyricsFonts.GetChoices().FirstOrDefault(font => font.Id == fontId)?.Font
+            : null;
+        TextElement.SetFontFamily(_lines, lyricsFont ?? ClassicLyricsFonts.Family);
 
         var layout = new DockPanel();
         var lyricsView = new Grid();
@@ -1001,6 +1005,14 @@ internal sealed class ClassicLyricsWindow : Window
         RenderLyrics(preserveScroll: true);
         Refresh();
         ViewStateChanged?.Invoke();
+    }
+
+    public void ApplyLyricsFont(FontFamily font)
+    {
+        if (Equals(TextElement.GetFontFamily(_lines), font)) return;
+        TextElement.SetFontFamily(_lines, font);
+        if (_activeIndex >= 0 && !_manualScroll && !_isAnimatingTranslation)
+            _ = Dispatcher.BeginInvoke(DispatcherPriority.Loaded, () => FollowActiveLine(animate: false));
     }
 
     private void ToggleTranslation()
@@ -2505,7 +2517,6 @@ internal sealed class ClassicLyricsWindow : Window
             Main = new TextBlock
             {
                 Foreground = ForegroundBrush,
-                FontFamily = ClassicLyricsFonts.Title,
                 FontWeight = FontWeights.Bold,
                 TextWrapping = TextWrapping.Wrap,
             };
@@ -2775,7 +2786,6 @@ internal sealed class ClassicLyricsWindow : Window
             {
                 Text = translation,
                 Foreground = ForegroundBrush,
-                FontFamily = ClassicLyricsFonts.Body,
                 FontWeight = FontWeights.Normal,
                 TextWrapping = TextWrapping.Wrap,
                 RenderTransform = _subTranslate,

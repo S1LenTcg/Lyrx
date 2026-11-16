@@ -43,4 +43,10 @@ Lyrx/
   ```
   *(可选支持参数：`-SingleFile` 输出单文件独立 Exe；`-Configuration Debug` 输出调试版)*
 
-编译产物位于 `dist\Lyrx.exe`。用户配置文件与本地歌词缓存保存在 `%LOCALAPPDATA%\Lyrx\`。
+默认发布目录为 `dist`，启动文件为 `dist\Lyrx.exe`。普通自包含发布请分发整个输出目录。正式发布时可以用 `-OutputDir` 指定空目录，以免混入旧产物。SDK 不在 PATH 中时可用 `-DotNet` 指定 `dotnet.exe` 的路径。离线构建可用 `-PackageSource` 指定完整的本地 NuGet 源。用户配置文件与本地歌词缓存保存在 `%LOCALAPPDATA%\Lyrx\`。
+
+Android 构建步骤见 [Android 文档](android/README.md)。
+
+## Windows 自定义歌词字体
+
+在「设置 → 播放与窗口 → 歌词字体」导入或拖入 `.ttf` 或 `.otf` 文件，即可预览和切换歌词及译文的字体。也可以把文件放入 `%LOCALAPPDATA%\Lyrx\fonts\`，再点「刷新列表」选择字体。选择「Windows 默认字体」可恢复系统字体。

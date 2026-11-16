@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
@@ -9,6 +11,7 @@ using System.Windows.Shapes;
 using System.Windows.Shell;
 using Musebase.Core.Search;
 using Musebase.Windows.Services;
+using Path = System.Windows.Shapes.Path;
 
 namespace Musebase.Windows;
 
@@ -72,6 +75,7 @@ internal sealed class ClassicSettingsWindow : Window
         Action openEditor,
         Action exportLrc,
         Action markWrong,
+        Action<FontFamily> onFontChanged,
         Action onChanged)
     {
         Title = "设置 · Lyrx";
@@ -228,6 +232,7 @@ internal sealed class ClassicSettingsWindow : Window
         // 分页 1：播放与窗口
         // =====================================================================
         var pageGeneral = new StackPanel();
+        AddFontSettings(pageGeneral, settings, onFontChanged);
 
         var sourceCard = AddSectionCard(pageGeneral, "播放源（音频适配）");
         sourceCard.Children.Add(HintLabel("选择要跟随显示歌词的音乐播放器（基于系统 SMTC 媒体会话）："));
@@ -782,6 +787,126 @@ internal sealed class ClassicSettingsWindow : Window
 
     public void RefreshExternalState() => _syncExternalUi();
 
+    private void AddFontSettings(StackPanel page, AppSettings settings, Action<FontFamily> onFontChanged)
+    {
+        var card = AddSectionCard(page, "歌词字体");
+        card.Background = Brushes.Transparent;
+        card.Children.Add(HintLabel("选择或拖入 .ttf / .otf 文件。字体仅用于歌词和译文。"));
+        var dropdownHost = new ContentControl { Margin = new Thickness(0, 0, 0, 8) };
+        card.Children.Add(dropdownHost);
+        var preview = new TextBlock
+        {
+            Text = "歌词预览 · Lyrics · 가사 · 歌詞",
+            Foreground = TextPrimary,
+            FontSize = 18,
+            TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(0, 0, 0, 8),
+        };
+        card.Children.Add(preview);
+
+        var buttons = new WrapPanel();
+        var import = SmallToolButton("导入字体…");
+        var openFolder = SmallToolButton("打开字体文件夹");
+        var refresh = SmallToolButton("刷新列表");
+        buttons.Children.Add(import);
+        buttons.Children.Add(openFolder);
+        buttons.Children.Add(refresh);
+        card.Children.Add(buttons);
+
+        var status = HintLabel("");
+        status.Visibility = Visibility.Collapsed;
+        card.Children.Add(status);
+
+        void ShowStatus(string message)
+        {
+            status.Text = message;
+            status.Visibility = message.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
+        }
+
+        void RefreshChoices()
+        {
+            var choices = ClassicLyricsFonts.GetChoices();
+            var index = choices.ToList().FindIndex(choice => choice.Id == settings.ClassicLyricsFont);
+            if (index < 0)
+            {
+                settings.ClassicLyricsFont = null;
+                settings.Save();
+            }
+            var selected = choices[Math.Max(0, index)];
+            var (dropdown, _) = CreateDarkDropdown(choices.Select(choice => choice.Label).ToArray(), Math.Max(0, index), i =>
+            {
+                var choice = choices[i];
+                settings.ClassicLyricsFont = choice.Id;
+                settings.Save();
+                preview.FontFamily = choice.Font;
+                onFontChanged(choice.Font);
+                ShowStatus("");
+            });
+            dropdownHost.Content = dropdown;
+            preview.FontFamily = selected.Font;
+            onFontChanged(selected.Font);
+            ShowStatus(index < 0 ? "找不到已选字体，当前使用 Windows 默认字体。" : "");
+        }
+
+        void ImportFont(string file)
+        {
+            try
+            {
+                var choice = ClassicLyricsFonts.Import(file);
+                if (choice is null)
+                {
+                    ShowStatus("无法读取字体，请选择有效的 .ttf 或 .otf 文件。");
+                    return;
+                }
+                settings.ClassicLyricsFont = choice.Id;
+                settings.Save();
+                RefreshChoices();
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+            {
+                ShowStatus($"导入失败：{error.Message}");
+            }
+        }
+
+        import.Click += (_, _) =>
+        {
+            var dialog = new Microsoft.Win32.OpenFileDialog
+            {
+                Title = "导入歌词字体",
+                Filter = "字体文件 (*.ttf;*.otf)|*.ttf;*.otf",
+            };
+            if (dialog.ShowDialog(this) == true) ImportFont(dialog.FileName);
+        };
+        openFolder.Click += (_, _) =>
+        {
+            try
+            {
+                Directory.CreateDirectory(ClassicLyricsFonts.DirectoryPath);
+                Process.Start(new ProcessStartInfo(ClassicLyricsFonts.DirectoryPath) { UseShellExecute = true });
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception)
+            {
+                ShowStatus($"无法打开字体文件夹：{error.Message}");
+            }
+        };
+        refresh.Click += (_, _) => RefreshChoices();
+        card.AllowDrop = true;
+        card.PreviewDragOver += (_, e) =>
+        {
+            e.Effects = e.Data.GetDataPresent(DataFormats.FileDrop) ? DragDropEffects.Copy : DragDropEffects.None;
+            e.Handled = true;
+        };
+        card.PreviewDrop += (_, e) =>
+        {
+            e.Handled = true;
+            if (e.Data.GetData(DataFormats.FileDrop) is string[] { Length: 1 } paths)
+                ImportFont(paths[0]);
+            else
+                ShowStatus("请每次拖入一个字体文件。");
+        };
+        RefreshChoices();
+    }
+
     private static StackPanel AddSectionCard(StackPanel host, string title)
     {
         var panel = new StackPanel();
@@ -937,7 +1062,13 @@ internal sealed class ClassicSettingsWindow : Window
             BorderThickness = new Thickness(1),
             CornerRadius = new CornerRadius(6),
             Padding = new Thickness(4),
-            Child = popupStack,
+            Child = new ScrollViewer
+            {
+                Content = popupStack,
+                MaxHeight = 240,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                Resources = { [typeof(ScrollBar)] = CreateDarkScrollBarStyle() },
+            },
         };
         System.Windows.Documents.TextElement.SetFontFamily(popupBorder, ClassicLyricsFonts.Body);
 

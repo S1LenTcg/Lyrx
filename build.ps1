@@ -14,7 +14,14 @@ param (
     [switch]$NoSelfContained,
 
     [Parameter()]
-    [string]$OutputDir
+    [Alias("OutputDirectory")]
+    [string]$OutputDir,
+
+    [Parameter()]
+    [string]$DotNet = "dotnet",
+
+    [Parameter()]
+    [string]$PackageSource
 )
 
 $ErrorActionPreference = "Stop"
@@ -24,7 +31,7 @@ $repoRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyIn
 if (-not $repoRoot) { $repoRoot = Get-Location }
 
 # 1. 检查 dotnet 环境
-$dotnetCmd = Get-Command dotnet -ErrorAction SilentlyContinue
+$dotnetCmd = Get-Command $DotNet -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
 if (-not $dotnetCmd) {
     Write-Host "[错误] 系统未安装 .NET SDK，或未将其添加到 PATH 环境变量中。" -ForegroundColor Red
     Write-Host "请前往下载并安装 .NET 8.0 SDK (或更高版本):" -ForegroundColor Yellow
@@ -33,7 +40,7 @@ if (-not $dotnetCmd) {
 }
 
 # 2. 检查 .NET SDK 版本
-$sdks = & dotnet --list-sdks 2>$null
+$sdks = & $dotnetCmd.Source --list-sdks 2>$null
 $hasNet8OrHigher = $false
 foreach ($line in $sdks) {
     if ($line -match '^(\d+)\.') {
@@ -45,10 +52,8 @@ foreach ($line in $sdks) {
     }
 }
 
-if (-not $hasNet8OrHigher) {
-    Write-Host "[警告] 未检测到 .NET 8.0 或更高版本的 SDK，当前已安装的 SDK:" -ForegroundColor Yellow
-    Write-Host ($sdks -join "`n")
-    Write-Host "如果编译遇到问题，请安装 .NET 8.0 SDK: https://dotnet.microsoft.com/download/dotnet/8.0" -ForegroundColor Yellow
+if ($LASTEXITCODE -ne 0 -or -not $hasNet8OrHigher) {
+    throw "未检测到 .NET 8.0 或更高版本的 SDK。请安装 SDK，或用 -DotNet 指定 dotnet.exe 的路径。"
 }
 
 # 3. 输出目录设置
@@ -72,11 +77,14 @@ Write-Host "==========================================" -ForegroundColor Cyan
 # 4. 组装 dotnet publish 参数
 $publishArgs = @(
     "publish",
-    "`"$projectFile`"",
+    $projectFile,
     "-c", $Configuration,
     "-r", $Runtime,
-    "-o", "`"$outDir`""
+    "-m:1", "-p:UseSharedCompilation=false",
+    "-o", $outDir
 )
+
+if ($PackageSource) { $publishArgs += @("--source", $PackageSource) }
 
 if (-not $NoSelfContained) {
     $publishArgs += "--self-contained"
@@ -91,10 +99,10 @@ if ($SingleFile) {
 }
 
 # 5. 执行编译发布
-$publishCommandLine = "dotnet " + ($publishArgs -join " ")
+$publishCommandLine = "$($dotnetCmd.Source) " + ($publishArgs -join " ")
 Write-Host "正在执行: $publishCommandLine" -ForegroundColor DarkGray
 
-& dotnet @publishArgs
+& $dotnetCmd.Source @publishArgs
 if ($LASTEXITCODE -ne 0) {
     Write-Host ""
     Write-Host "[失败] 编译发布未能完成，错误码: $LASTEXITCODE" -ForegroundColor Red

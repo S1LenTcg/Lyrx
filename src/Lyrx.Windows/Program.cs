@@ -275,6 +275,7 @@ internal static class Program
                     OpenLyricsEditor,
                     ExportLrc,
                     () => coordinator.MarkWrongLyrics(),
+                    onFontChanged: font => lyricsWindow?.ApplyLyricsFont(font),
                     onChanged: () =>
                     {
                         nowPlaying.SetSource(settings.PlaybackSource, settings.IncludeBrowsers, settings.PreferredSources);
