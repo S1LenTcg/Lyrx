@@ -221,8 +221,12 @@ internal static class Program
 
             void AdjustOffset(double? delta)
             {
-                coordinator.ManualOffsetSeconds = delta is { } d ? coordinator.ManualOffsetSeconds + d : 0;
-                settings.ManualOffsetSeconds = coordinator.ManualOffsetSeconds;
+                var next = delta is { } d
+                    ? Math.Clamp(Math.Round(coordinator.ManualOffsetSeconds + d, 2), -60d, 60d)
+                    : 0d;
+                if (Math.Abs(next) < 0.005) next = 0;
+                coordinator.ManualOffsetSeconds = next;
+                settings.ManualOffsetSeconds = next;
                 settings.Save();
                 UpdateOffsetLabel();
                 settingsWindow?.RefreshExternalState();
@@ -317,7 +321,7 @@ internal static class Program
             offsetMinus.Click += (_, _) => AdjustOffset(-0.5);
             offsetReset.Click += (_, _) => AdjustOffset(null);
 
-            var menu = new ContextMenu();
+            var menu = new ContextMenu { FontFamily = ClassicLyricsFonts.Body };
             menu.Opened += (_, _) =>
             {
                 var hasLyrics = coordinator.CurrentLyrics is not null && coordinator.CurrentTrack is not null;

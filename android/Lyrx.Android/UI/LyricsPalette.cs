@@ -56,6 +56,47 @@ internal static class LyricsPalette
         return coverPalette;
     }
 
+    /// <summary>
+    /// 基于当前主题色生成柔和、低刺眼感的莫奈（Monet）胶囊选中底色与高对比深色文字。
+    /// </summary>
+    public static (Color Surface, Color OnSurface) SoftMonetPill(Color themeColor, Color? fallbackHueColor = null)
+    {
+        var (hue, sat, _) = ToHsl(themeColor.R, themeColor.G, themeColor.B);
+        double targetSat;
+
+        if (sat < 0.08)
+        {
+            if (fallbackHueColor is { } fb)
+            {
+                var (fbHue, fbSat, _) = ToHsl(fb.R, fb.G, fb.B);
+                if (fbSat >= 0.08)
+                {
+                    hue = fbHue;
+                    targetSat = 0.16;
+                }
+                else
+                {
+                    hue = 212.0;
+                    targetSat = 0.10;
+                }
+            }
+            else
+            {
+                hue = 212.0;
+                targetSat = 0.10;
+            }
+        }
+        else
+        {
+            targetSat = Math.Clamp(sat * 0.58, 0.22, 0.32);
+        }
+
+        // 控制在柔和粉彩区间（L ≈ 0.79~0.80），避免出现刺眼纯白
+        var surface = FromHsl(hue, targetSat, 0.795);
+        var onSurface = FromHsl(hue, Math.Min(targetSat, 0.24), 0.11);
+        return (surface, onSurface);
+    }
+
     public static Color BlendColor(Color from, Color to, double amount)
     {
         var t = Math.Clamp(amount, 0.0, 1.0);

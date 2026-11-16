@@ -3,7 +3,28 @@ using System.Windows.Media;
 
 namespace Musebase.Windows;
 
-internal enum ClassicTransportIcon { Shuffle, Previous, Play, Pause, Next, Repeat, RepeatOne, Sync, Translate, Settings, Minimize, Fullscreen, ExitFullscreen, Close }
+internal enum ClassicTransportIcon
+{
+    Shuffle,
+    Previous,
+    Play,
+    Pause,
+    Next,
+    Repeat,
+    RepeatOne,
+    Sync,
+    Translate,
+    Settings,
+    Minimize,
+    Fullscreen,
+    ExitFullscreen,
+    Close,
+    BluetoothAudio,
+    Headphones,
+    Speaker,
+    MutedSpeaker,
+    ChevronRight,
+}
 
 internal sealed class ClassicTransportGlyph : FrameworkElement
 {
@@ -22,6 +43,13 @@ internal sealed class ClassicTransportGlyph : FrameworkElement
     private static readonly Geometry Fullscreen = Shape("M14 5 H19 V10 M19 5 L13.5 10.5 M10 19 H5 V14 M5 19 L10.5 13.5");
     private static readonly Geometry ExitFullscreen = Shape("M5 14 H10 V19 M10 14 L4.5 19.5 M19 10 H14 V5 M14 10 L19.5 4.5");
     private static readonly Geometry Close = Shape("M6.5 6.5 L17.5 17.5 M17.5 6.5 L6.5 17.5");
+    private static readonly Geometry BluetoothSpeakerCone = Shape("M2.4 9.2 H5.5 L10.2 5.0 V19.0 L5.5 14.8 H2.4 Z");
+    private static readonly Geometry BluetoothRune = Shape("M13.5 8.3 L20.9 15.7 L17.2 19.4 V4.6 L20.9 8.3 L13.5 15.7");
+    private static readonly Geometry HeadphonesBand = Shape("M4.6 11.8 A7.4 7.4 0 0 1 19.4 11.8");
+    private static readonly Geometry SpeakerCone = Shape("M3.2 9.3 H6.8 L11.6 5.1 V18.9 L6.8 14.7 H3.2 Z");
+    private static readonly Geometry SpeakerWaves = Shape("M14.7 8.8 A4.2 4.2 0 0 1 14.7 15.2 M17.3 6.2 A7.2 7.2 0 0 1 17.3 17.8");
+    private static readonly Geometry MutedCross = Shape("M14.8 9.2 L20.2 14.8 M20.2 9.2 L14.8 14.8");
+    private static readonly Geometry ChevronRightPath = Shape("M9.2 6.2 L15.0 12.0 L9.2 17.8");
 
     public static readonly DependencyProperty TintProperty = DependencyProperty.Register(
         nameof(Tint), typeof(Brush), typeof(ClassicTransportGlyph),
@@ -79,8 +107,23 @@ internal sealed class ClassicTransportGlyph : FrameworkElement
             drawing.Pop();
             return;
         }
-        drawing.PushTransform(new TranslateTransform(2.3, 6.2));
-        drawing.PushTransform(new ScaleTransform(0.77, 0.77));
+
+        var w = ActualWidth > 0 ? ActualWidth : Width;
+        var h = ActualHeight > 0 ? ActualHeight : Height;
+        var isDefaultToolbarBox = Math.Abs(w - 23) < 0.5 && Math.Abs(h - 32) < 0.5;
+        if (isDefaultToolbarBox)
+        {
+            drawing.PushTransform(new TranslateTransform(2.3, 6.2));
+            drawing.PushTransform(new ScaleTransform(0.77, 0.77));
+        }
+        else
+        {
+            var size = Math.Min(w, h) * 0.90;
+            var scale = size / 24.0;
+            drawing.PushTransform(new TranslateTransform((w - size) / 2.0, (h - size) / 2.0));
+            drawing.PushTransform(new ScaleTransform(scale, scale));
+        }
+
         switch (_icon)
         {
             case ClassicTransportIcon.Play: drawing.DrawGeometry(ink, null, Play); break;
@@ -93,6 +136,26 @@ internal sealed class ClassicTransportGlyph : FrameworkElement
             case ClassicTransportIcon.Fullscreen: drawing.DrawGeometry(null, Stroke(ink), Fullscreen); break;
             case ClassicTransportIcon.ExitFullscreen: drawing.DrawGeometry(null, Stroke(ink), ExitFullscreen); break;
             case ClassicTransportIcon.Close: drawing.DrawGeometry(null, Stroke(ink), Close); break;
+            case ClassicTransportIcon.BluetoothAudio:
+                drawing.DrawGeometry(ink, Stroke(ink, 1.1), BluetoothSpeakerCone);
+                drawing.DrawGeometry(null, Stroke(ink, 1.75), BluetoothRune);
+                break;
+            case ClassicTransportIcon.Headphones:
+                drawing.DrawGeometry(null, Stroke(ink, 1.85), HeadphonesBand);
+                drawing.DrawRoundedRectangle(ink, null, new Rect(4.2, 12.2, 3.4, 6.8), 1.5, 1.5);
+                drawing.DrawRoundedRectangle(ink, null, new Rect(16.4, 12.2, 3.4, 6.8), 1.5, 1.5);
+                break;
+            case ClassicTransportIcon.Speaker:
+                drawing.DrawGeometry(ink, Stroke(ink, 1.1), SpeakerCone);
+                drawing.DrawGeometry(null, Stroke(ink, 1.8), SpeakerWaves);
+                break;
+            case ClassicTransportIcon.MutedSpeaker:
+                drawing.DrawGeometry(ink, Stroke(ink, 1.1), SpeakerCone);
+                drawing.DrawGeometry(null, Stroke(ink, 1.85), MutedCross);
+                break;
+            case ClassicTransportIcon.ChevronRight:
+                drawing.DrawGeometry(null, Stroke(ink, 2.0), ChevronRightPath);
+                break;
             default:
                 drawing.DrawGeometry(null, Stroke(ink), Repeat);
                 if (_icon == ClassicTransportIcon.RepeatOne) drawing.DrawGeometry(null, Stroke(ink), One);
@@ -100,7 +163,7 @@ internal sealed class ClassicTransportGlyph : FrameworkElement
         }
         drawing.Pop();
         drawing.Pop();
-        if (_active) drawing.DrawEllipse(ink, null, new Point(11.5, 29), 2, 2);
+        if (_active && isDefaultToolbarBox) drawing.DrawEllipse(ink, null, new Point(11.5, 29), 2, 2);
     }
 
     private static Geometry Shape(string path)

@@ -36,6 +36,7 @@ public sealed class SearchWindow : Window
         Width = 900;
         Height = 520;
         WindowStartupLocation = WindowStartupLocation.CenterScreen;
+        FontFamily = ClassicLyricsFonts.Body;
 
         _titleBox = new TextBox { Text = coordinator.CurrentTrack?.Title ?? "", MinWidth = 200, Margin = new Thickness(4, 0, 12, 0) };
         _artistBox = new TextBox { Text = coordinator.CurrentTrack?.Artist ?? "", MinWidth = 150, Margin = new Thickness(4, 0, 12, 0) };

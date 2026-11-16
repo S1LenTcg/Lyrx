@@ -939,6 +939,7 @@ internal sealed class ClassicSettingsWindow : Window
             Padding = new Thickness(4),
             Child = popupStack,
         };
+        System.Windows.Documents.TextElement.SetFontFamily(popupBorder, ClassicLyricsFonts.Body);
 
         var popup = new Popup
         {

@@ -65,11 +65,14 @@ internal static class AudioOutputSheetDialog
         var screenH = dm?.HeightPixels ?? 2200;
         var margin = UiHelpers.Dp(activity, 12);
 
-        var bounds = ResolveHorizontalBounds(activity, anchorContainer, screenW, margin);
+        var isTablet = UiHelpers.IsTabletLayout(activity);
+        var bounds = UiHelpers.ResolveHorizontalAnchorBounds(activity, anchorContainer, screenW, margin);
         var maxAvailW = Math.Max(UiHelpers.Dp(activity, 180), bounds.Right - bounds.Left);
         var popupWidth = bounds.ConstrainedToContainer
-            ? Math.Min(UiHelpers.Dp(activity, 286), maxAvailW)
-            : Math.Min(UiHelpers.Dp(activity, 292), (int)(screenW * 0.86));
+            ? Math.Min(UiHelpers.Dp(activity, isTablet ? 350 : 286), maxAvailW)
+            : isTablet
+                ? Math.Clamp((int)(screenW * 0.46), UiHelpers.Dp(activity, 350), UiHelpers.Dp(activity, 420))
+                : Math.Min(UiHelpers.Dp(activity, 292), (int)(screenW * 0.86));
 
         var tintedGlass = LyricsPalette.BlendColor(LyricsPalette.ChromeBackground, coverBackground, 0.24);
         var cardBgColor = Color.Argb(255, tintedGlass.R, tintedGlass.G, tintedGlass.B);
@@ -313,37 +316,13 @@ internal static class AudioOutputSheetDialog
         ShowAnchoredPopup(activity, anchor, card, popup, popupWidth, bounds, screenH);
     }
 
-    private readonly record struct HorizontalBounds(int Left, int Right, bool ConstrainedToContainer);
-
-    private static HorizontalBounds ResolveHorizontalBounds(
-        Activity activity,
-        View? anchorContainer,
-        int screenW,
-        int margin)
-    {
-        if (anchorContainer is not null && anchorContainer.Width > 0)
-        {
-            var containerLoc = new int[2];
-            anchorContainer.GetLocationInWindow(containerLoc);
-            var containerLeft = containerLoc[0];
-            var containerRight = containerLeft + anchorContainer.Width;
-            var leftPad = Math.Max(UiHelpers.Dp(activity, 8), anchorContainer.PaddingLeft - UiHelpers.Dp(activity, 4));
-            var innerLeft = containerLeft + leftPad;
-            var innerRight = containerRight - UiHelpers.Dp(activity, 10);
-            if (innerRight - innerLeft >= UiHelpers.Dp(activity, 180))
-                return new HorizontalBounds(innerLeft, innerRight, ConstrainedToContainer: true);
-        }
-
-        return new HorizontalBounds(margin, Math.Max(margin + 1, screenW - margin), ConstrainedToContainer: false);
-    }
-
     private static void ShowAnchoredPopup(
         Activity activity,
         View anchor,
         View card,
         PopupWindow popup,
         int popupWidth,
-        HorizontalBounds bounds,
+        UiHelpers.HorizontalAnchorBounds bounds,
         int screenH)
     {
         var (x, y) = ComputeAnchorPosition(activity, anchor, card, popupWidth, bounds, screenH);
@@ -356,7 +335,7 @@ internal static class AudioOutputSheetDialog
         View card,
         PopupWindow popup,
         int popupWidth,
-        HorizontalBounds bounds,
+        UiHelpers.HorizontalAnchorBounds bounds,
         int screenH)
     {
         var (x, y) = ComputeAnchorPosition(activity, anchor, card, popupWidth, bounds, screenH);
@@ -368,7 +347,7 @@ internal static class AudioOutputSheetDialog
         View anchor,
         View card,
         int popupWidth,
-        HorizontalBounds bounds,
+        UiHelpers.HorizontalAnchorBounds bounds,
         int screenH)
     {
         card.Measure(

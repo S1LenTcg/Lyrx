@@ -88,6 +88,9 @@ public sealed class AppSettings
     /// <summary>标记为“错误歌词”以阻止搜索·显示的曲目键列表（规范化后的 标题|歌手）。</summary>
     public List<string> SuppressedTracks { get; set; } = new();
 
+    /// <summary>主窗口“音频同步调整”弹窗上次选中的范围：true=仅此曲，false=全部歌曲。</summary>
+    public bool ClassicOffsetPerTrack { get; set; } = true;
+
     /// <summary>手动同步偏移（秒）。为 + 时歌词提前。</summary>
     public double ManualOffsetSeconds { get; set; }
 
@@ -99,15 +102,33 @@ public sealed class AppSettings
     public Dictionary<string, double> TrackOffsetSeconds { get; set; } = new();
 
     /// <summary>取某首歌的记忆偏移（没有则 0）。</summary>
-    public double GetTrackOffset(string? key) =>
-        !string.IsNullOrEmpty(key) && TrackOffsetSeconds.TryGetValue(key, out var value) ? value : 0;
+    public double GetTrackOffset(string? key)
+    {
+        if (string.IsNullOrWhiteSpace(key) || TrackOffsetSeconds is null) return 0;
+        var trimmed = key.Trim();
+        if (TrackOffsetSeconds.TryGetValue(trimmed, out var value)) return value;
+        foreach (var pair in TrackOffsetSeconds)
+        {
+            if (string.Equals(pair.Key?.Trim(), trimmed, StringComparison.OrdinalIgnoreCase))
+                return pair.Value;
+        }
+        return 0;
+    }
 
     /// <summary>写入/清除某首歌的记忆偏移；值为 0 时直接删掉这一项。</summary>
     public void SetTrackOffset(string? key, double value)
     {
-        if (string.IsNullOrEmpty(key)) return;
-        if (Math.Abs(value) < 0.001) TrackOffsetSeconds.Remove(key);
-        else TrackOffsetSeconds[key] = Math.Round(value, 2);
+        if (string.IsNullOrWhiteSpace(key)) return;
+        TrackOffsetSeconds ??= new();
+        var trimmed = key.Trim();
+        var staleKeys = TrackOffsetSeconds.Keys
+            .Where(k => !string.Equals(k, trimmed, StringComparison.Ordinal)
+                && string.Equals(k?.Trim(), trimmed, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        foreach (var stale in staleKeys) TrackOffsetSeconds.Remove(stale);
+
+        if (Math.Abs(value) < 0.001) TrackOffsetSeconds.Remove(trimmed);
+        else TrackOffsetSeconds[trimmed] = Math.Round(value, 2);
     }
 
     /// <summary>
@@ -485,24 +506,34 @@ public sealed class AppSettings
             string.IsNullOrEmpty(fromBackup) ? current : fromBackup;
     }
 
+    [JsonIgnore]
+    private readonly object _saveSync = new();
+
     public void Save()
     {
-        try
+        lock (_saveSync)
         {
-            // 明文密钥不写入文件，只保存密文（平台机密存储）
-            DeeplApiKeyEncrypted = Seal(DeeplApiKey, DeeplApiKeyEncrypted);
-            GoogleApiKeyEncrypted = Seal(GoogleApiKey, GoogleApiKeyEncrypted);
-            LibreTranslateApiKeyEncrypted = Seal(LibreTranslateApiKey, LibreTranslateApiKeyEncrypted);
-            OpenRouterApiKeyEncrypted = Seal(OpenRouterApiKey, OpenRouterApiKeyEncrypted);
-            LyricsServerTokenEncrypted = Seal(LyricsServerToken, LyricsServerTokenEncrypted);
-            LegacyDeeplApiKey = null;
-            Directory.CreateDirectory(Path.GetDirectoryName(SettingsPath)!);
-            File.WriteAllText(SettingsPath, JsonSerializer.Serialize(this, JsonOptions));
-        }
-        catch (Exception error)
-        {
-            // 保存失败并不致命，但记录原因以免只读目录/权限受限时静默丢配置
-            Log.Write($"[settings] 保存失败 ({SettingsPath}): {error.Message}");
+            try
+            {
+                // 明文密钥不写入文件，只保存密文（平台机密存储）
+                DeeplApiKeyEncrypted = Seal(DeeplApiKey, DeeplApiKeyEncrypted);
+                GoogleApiKeyEncrypted = Seal(GoogleApiKey, GoogleApiKeyEncrypted);
+                LibreTranslateApiKeyEncrypted = Seal(LibreTranslateApiKey, LibreTranslateApiKeyEncrypted);
+                OpenRouterApiKeyEncrypted = Seal(OpenRouterApiKey, OpenRouterApiKeyEncrypted);
+                LyricsServerTokenEncrypted = Seal(LyricsServerToken, LyricsServerTokenEncrypted);
+                LegacyDeeplApiKey = null;
+                var dir = Path.GetDirectoryName(SettingsPath)!;
+                Directory.CreateDirectory(dir);
+                var json = JsonSerializer.Serialize(this, JsonOptions);
+                var tmpPath = Path.Combine(dir, $"settings.{Environment.ProcessId}.tmp");
+                File.WriteAllText(tmpPath, json);
+                File.Move(tmpPath, SettingsPath, overwrite: true);
+            }
+            catch (Exception error)
+            {
+                // 保存失败并不致命，但记录原因以免只读目录/权限受限时静默丢配置
+                Log.Write($"[settings] 保存失败 ({SettingsPath}): {error.Message}");
+            }
         }
     }
 }
