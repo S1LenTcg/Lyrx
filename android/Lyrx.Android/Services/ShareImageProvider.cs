@@ -120,16 +120,17 @@ internal static class ShareImageHelper
 
         using (var fs = File.Open(fullPath, FileMode.Create, FileAccess.Write, FileShare.None))
         {
-            bitmap.Compress(Bitmap.CompressFormat.Png!, 100, fs);
+            if (!bitmap.Compress(Bitmap.CompressFormat.Png!, 100, fs))
+                throw new IOException("PNG 编码失败");
             fs.Flush();
         }
 
         using var uri = new AUri.Builder();
-        return uri.Scheme("content")
-            .Authority(ShareImageProvider.Authority)
-            .AppendPath("cards")
-            .AppendPath(fileName)
-            .Build();
+        uri.Scheme("content");
+        uri.Authority(ShareImageProvider.Authority);
+        uri.AppendPath("cards");
+        uri.AppendPath(fileName);
+        return uri.Build() ?? throw new IOException("无法生成分享链接");
     }
 
     public static string SaveToGallery(Context ctx, Bitmap bitmap, string baseName)
