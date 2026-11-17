@@ -113,6 +113,9 @@ public sealed class AndroidAppSettings
     /// <summary>横屏作为桌面歌词播放器使用时保持屏幕常亮。</summary>
     public bool KeepScreenOnInLandscape { get; set; } = true;
 
+    /// <summary>隐藏系统导航栏及全面屏手势导航长条，实现沉浸式显示（默认开启）。</summary>
+    public bool HideNavigationBar { get; set; } = true;
+
     /// <summary>歌词分享卡片默认样式："spotify" | "apple-music"。</summary>
     public string LyricShareStyle { get; set; } = "spotify";
     public string LyricShareBackgroundMode { get; set; } = "gradient";
@@ -123,6 +126,9 @@ public sealed class AndroidAppSettings
     public int? LyricShareCoverFade { get; set; }
     public int? LyricShareCoverTint { get; set; }
     public bool LyricShareClipboardKeepBackdrop { get; set; } = true;
+
+    [JsonExtensionData]
+    public Dictionary<string, JsonElement>? ExtensionData { get; set; }
 
     [JsonIgnore]
     public string EffectiveTranslationEngine =>
@@ -169,6 +175,7 @@ public sealed class AndroidAppSettings
                 loaded._secretStore = store;
                 loaded._settingsPath = path;
                 loaded.ResolveSecrets();
+                loaded.NormalizeCrossPlatformShareFields();
                 if (loaded.SettingsSchemaVersion < CurrentSettingsSchemaVersion)
                 {
                     if (loaded.SettingsSchemaVersion < 2
@@ -240,4 +247,25 @@ public sealed class AndroidAppSettings
 
     private string? Seal(string? plain, string? existingCipher) =>
         string.IsNullOrEmpty(plain) ? existingCipher : _secretStore.Protect(plain);
+
+    private void NormalizeCrossPlatformShareFields()
+    {
+        if (ExtensionData is null) return;
+
+        if (LyricShareFontPercent == 100
+            && ExtensionData.TryGetValue("lyricShareFontScale", out var scaleElem)
+            && scaleElem.ValueKind == JsonValueKind.Number
+            && scaleElem.TryGetDouble(out var scale))
+        {
+            LyricShareFontPercent = (int)Math.Round(scale * 100.0);
+        }
+
+        if (LyricShareCoverFade is null
+            && ExtensionData.TryGetValue("lyricShareCoverGradientFade", out var fadeElem)
+            && fadeElem.ValueKind == JsonValueKind.Number
+            && fadeElem.TryGetDouble(out var fade))
+        {
+            LyricShareCoverFade = (int)Math.Round(fade <= 1.0 ? fade * 100.0 : fade);
+        }
+    }
 }

@@ -390,7 +390,11 @@ public sealed class MainActivity : Activity
     {
         try
         {
-            UiHelpers.HideStatusBar(Window, edgeToEdge: true, navigationBarColor: LyricsPalette.ChromeBackground);
+            UiHelpers.HideStatusBar(
+                Window,
+                edgeToEdge: true,
+                navigationBarColor: LyricsPalette.ChromeBackground,
+                hideNavigationBar: App.Settings.HideNavigationBar);
         }
         catch (Exception ex)
         {
@@ -2690,7 +2694,23 @@ public sealed class MainActivity : Activity
                 _coverBackground,
                 selectedLines,
                 App.Settings.ShowTranslation),
-            _sessionOrientationOverride);
+            ResolveEffectiveOrientationForShare());
+    }
+
+    private ScreenOrientation ResolveEffectiveOrientationForShare()
+    {
+        if (_sessionOrientationOverride is { } forced)
+            return forced;
+
+        return GetNormalizedOrientationMode() switch
+        {
+            "landscape" => ScreenOrientation.SensorLandscape,
+            "portrait" => ScreenOrientation.Portrait,
+            "sensor" => (_pendingSensorSideways ?? _isLandscapeLayout)
+                ? ScreenOrientation.SensorLandscape
+                : ScreenOrientation.Portrait,
+            _ => _isLandscapeLayout ? ScreenOrientation.SensorLandscape : ScreenOrientation.Behind,
+        };
     }
 
     private void RegisterShareBackCallback()
@@ -3029,6 +3049,8 @@ public sealed class MainActivity : Activity
                 ApplyActivePalette(animate: true);
                 RebuildTypographySizing();
                 ApplyKeepScreenOnFlag();
+                ApplyChromeSystemBars();
+                _rootLayout?.RequestApplyInsets();
                 UpdateTransportAndButtons();
             },
             OpenNotificationListenerSettings,

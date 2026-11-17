@@ -356,4 +356,13 @@ public sealed class LyricsMetadata
 
     /// <summary>质量分缓存（由 LyricsQuality.Quality 填充）</summary>
     public double? Quality { get; internal set; }
+
+    /// <summary>是否由用户手动选择或编辑（保护不被自动重新匹配覆盖）</summary>
+    public bool IsManualSelection { get; set; }
+
+    /// <summary>写入缓存时已参与搜索的歌词源签名（用于避免纯无译文曲目反复穿透缓存）</summary>
+    public string? CheckedSources { get; set; }
+
+    /// <summary>缓存记录的 UTC 更新时间</summary>
+    public DateTime? CachedAtUtc { get; internal set; }
 }

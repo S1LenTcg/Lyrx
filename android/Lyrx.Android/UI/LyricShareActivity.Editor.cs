@@ -64,15 +64,30 @@ public sealed partial class LyricShareActivity
             LyricShareCardRenderer.MinFontPercent, LyricShareCardRenderer.MaxFontPercent);
         _clipboardKeepBackdrop = settings.LyricShareClipboardKeepBackdrop;
 
-        var preset = Enum.TryParse<ShareCoverEffect>(settings.LyricShareCoverEffectPreset, out var parsed) && Enum.IsDefined(parsed)
-            ? parsed
-            : ShareCoverEffect.SoftBlur;
+        var preset = ParseCoverEffectPreset(settings.LyricShareCoverEffectPreset);
         var defaults = ShareCoverEffectSettings.FromPreset(preset);
         _coverEffect = new ShareCoverEffectSettings(preset,
             Math.Clamp(settings.LyricShareCoverBlur ?? defaults.Blur, 0, 100),
             Math.Clamp(settings.LyricShareCoverDim ?? defaults.Dim, 0, 85),
             Math.Clamp(settings.LyricShareCoverFade ?? defaults.Fade, 0, 100),
             Math.Clamp(settings.LyricShareCoverTint ?? defaults.Tint, 0, 100));
+    }
+
+    private static ShareCoverEffect ParseCoverEffectPreset(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return ShareCoverEffect.SoftBlur;
+        if (Enum.TryParse<ShareCoverEffect>(raw.Trim(), ignoreCase: true, out var parsed) && Enum.IsDefined(parsed))
+            return parsed;
+
+        return raw.Trim().ToLowerInvariant() switch
+        {
+            "clean" => ShareCoverEffect.Clean,
+            "dreamy-blur" => ShareCoverEffect.DreamyBlur,
+            "color-fade" => ShareCoverEffect.ColorFade,
+            "color-tint" => ShareCoverEffect.ColorTint,
+            "cinematic" => ShareCoverEffect.Cinematic,
+            _ => ShareCoverEffect.SoftBlur,
+        };
     }
 
     private void SwitchBackgroundMode(ShareBackgroundMode mode)

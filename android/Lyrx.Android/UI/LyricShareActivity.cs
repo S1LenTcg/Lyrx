@@ -33,6 +33,7 @@ internal sealed record LyricSharePayload(
     Label = "歌词分享",
     Theme = "@style/LyrxTheme",
     Exported = false,
+    ScreenOrientation = ScreenOrientation.Behind,
     ConfigurationChanges = ConfigChanges.Orientation | ConfigChanges.ScreenSize | ConfigChanges.SmallestScreenSize | ConfigChanges.UiMode)]
 public sealed partial class LyricShareActivity : Activity
 {
@@ -82,7 +83,35 @@ public sealed partial class LyricShareActivity : Activity
         private static void ApplyInsetsApi30(LyricShareActivity owner, WindowInsets insets)
         {
             var bars = insets.GetInsets(WindowInsets.Type.SystemBars() | WindowInsets.Type.DisplayCutout());
-            owner.ApplySystemBarInsets(bars.Left, bars.Top, bars.Right, bars.Bottom);
+            var left = bars.Left;
+            var top = bars.Top;
+            var right = bars.Right;
+            var bottom = bars.Bottom;
+            if (OperatingSystem.IsAndroidVersionAtLeast(31))
+                MergeRoundedCornerInsetsApi31(insets, ref left, ref top, ref right, ref bottom);
+            owner.ApplySystemBarInsets(left, top, right, bottom);
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        [global::System.Runtime.Versioning.SupportedOSPlatform("android31.0")]
+        private static void MergeRoundedCornerInsetsApi31(
+            WindowInsets insets,
+            ref int left,
+            ref int top,
+            ref int right,
+            ref int bottom)
+        {
+            var topLeftR = insets.GetRoundedCorner((int)RoundedCornerPosition.TopLeft)?.Radius ?? 0;
+            var topRightR = insets.GetRoundedCorner((int)RoundedCornerPosition.TopRight)?.Radius ?? 0;
+            var bottomLeftR = insets.GetRoundedCorner((int)RoundedCornerPosition.BottomLeft)?.Radius ?? 0;
+            var bottomRightR = insets.GetRoundedCorner((int)RoundedCornerPosition.BottomRight)?.Radius ?? 0;
+
+            static int SafeCornerInset(int radius) => radius > 0 ? (int)Math.Ceiling(radius * 0.35) : 0;
+
+            left = Math.Max(left, Math.Max(SafeCornerInset(topLeftR), SafeCornerInset(bottomLeftR)));
+            right = Math.Max(right, Math.Max(SafeCornerInset(topRightR), SafeCornerInset(bottomRightR)));
+            top = Math.Max(top, Math.Max(SafeCornerInset(topLeftR), SafeCornerInset(topRightR)));
+            bottom = Math.Max(bottom, Math.Max(SafeCornerInset(bottomLeftR), SafeCornerInset(bottomRightR)));
         }
 
         [MethodImpl(MethodImplOptions.NoInlining)]
@@ -570,8 +599,7 @@ public sealed partial class LyricShareActivity : Activity
         {
             "landscape" => ScreenOrientation.SensorLandscape,
             "portrait" => ScreenOrientation.Portrait,
-            "sensor" => ScreenOrientation.FullSensor,
-            _ => ScreenOrientation.Unspecified,
+            _ => ScreenOrientation.Behind,
         });
         intent.PutExtra("orientation", (int)orientation);
         if (payload.CoverBitmap is { IsRecycled: false } cover)
@@ -684,7 +712,7 @@ public sealed partial class LyricShareActivity : Activity
             new Color(intent.GetIntExtra("coverColor", LyricsPalette.DefaultBackground.ToArgb())),
             originals.Select((line, index) => new ShareLyricLine(line, translations.ElementAtOrDefault(index))).ToArray(),
             intent.GetBooleanExtra("showTranslation", false));
-        var orientation = (ScreenOrientation)intent.GetIntExtra("orientation", (int)ScreenOrientation.Unspecified);
+        var orientation = (ScreenOrientation)intent.GetIntExtra("orientation", (int)ScreenOrientation.Behind);
         if (RequestedOrientation != orientation)
             RequestedOrientation = orientation;
         _presets = LyricShareCardRenderer.BuildPresets(_payload.CoverBackground);
@@ -869,7 +897,10 @@ public sealed partial class LyricShareActivity : Activity
             sizeDp: 38,
             iconFraction: 0.60f);
         backBtn.ContentDescription = "返回歌词选择";
-        _topBar.AddView(backBtn, new LinearLayout.LayoutParams(Dp(38), Dp(38)));
+        _topBar.AddView(backBtn, new LinearLayout.LayoutParams(Dp(38), Dp(38))
+        {
+            LeftMargin = Dp(4),
+        });
 
         var switcherCenter = new FrameLayout(this);
         _stylePill = new StyleSwitchPillView(this, _style);
@@ -900,11 +931,17 @@ public sealed partial class LyricShareActivity : Activity
             AttachPressSpring(trHost);
             _translationHost = trHost;
             _translationIcon = trIcon;
-            _topBar.AddView(trHost, new LinearLayout.LayoutParams(Dp(38), Dp(38)));
+            _topBar.AddView(trHost, new LinearLayout.LayoutParams(Dp(38), Dp(38))
+            {
+                RightMargin = Dp(4),
+            });
         }
         else
         {
-            _topBar.AddView(new View(this), new LinearLayout.LayoutParams(Dp(38), Dp(38)));
+            _topBar.AddView(new View(this), new LinearLayout.LayoutParams(Dp(38), Dp(38))
+            {
+                RightMargin = Dp(4),
+            });
         }
         AttachPressSpring(backBtn);
 
@@ -1028,7 +1065,7 @@ public sealed partial class LyricShareActivity : Activity
 
         var backdropLabel = new TextView(this)
         {
-            Text = "复制时保留卡片外背景",
+            Text = "保留卡片外背景",
         };
         backdropLabel.SetIncludeFontPadding(false);
         backdropLabel.SetTextColor(Color.Argb(222, 255, 255, 255));
@@ -1042,7 +1079,7 @@ public sealed partial class LyricShareActivity : Activity
             RightMargin = Dp(10),
         });
         _backdropToggleRow.AddView(_backdropToggle, new LinearLayout.LayoutParams(Dp(36), Dp(20)));
-        _backdropToggleRow.ContentDescription = "复制时保留卡片外背景";
+        _backdropToggleRow.ContentDescription = "保留卡片外背景";
         _backdropToggleRow.Click += (_, _) =>
         {
             _clipboardKeepBackdrop = !_clipboardKeepBackdrop;
@@ -1085,10 +1122,12 @@ public sealed partial class LyricShareActivity : Activity
     private int ComputeStylePillWidth()
     {
         var screenW = Resources?.DisplayMetrics?.WidthPixels ?? 1080;
+        var isTablet = UiHelpers.IsTabletLayout(this);
         var labelW = _stylePill is not null ? _stylePill.MeasureLongestLabelWidthPx() : Dp(73);
         var compactTarget = (int)MathF.Ceiling(labelW * 2f + Dp(44));
-        var maxW = Math.Max(Dp(176), Math.Min(Dp(216), screenW - Dp(124)));
-        var minW = Math.Min(Dp(182), maxW);
+        var reservedSide = _insetLeft + _insetRight + Dp(isTablet ? 156 : 148);
+        var maxW = Math.Max(Dp(156), Math.Min(Dp(216), screenW - reservedSide));
+        var minW = Math.Min(Dp(172), maxW);
         return Math.Clamp(compactTarget, minW, maxW);
     }
 
@@ -1242,11 +1281,25 @@ public sealed partial class LyricShareActivity : Activity
         var isTablet = UiHelpers.IsTabletLayout(this);
         var sidePad = Dp(isTablet ? 24 : 16);
         var compactLandscape = _isLandscapeLayout && !isTablet;
+        var topSidePad = Dp(isTablet ? 28 : (_isLandscapeLayout ? 28 : 22));
+        var minTopClearance = Dp(isTablet ? 14 : (compactLandscape ? 10 : 14));
+        var topBarTopPad = Math.Max(top, minTopClearance) + Dp(isTablet ? 6 : (compactLandscape ? 4 : 6));
         _topBar.SetPadding(
-            left + sidePad,
-            top + Dp(isTablet ? 12 : (compactLandscape ? 4 : 8)),
-            right + sidePad,
+            left + topSidePad,
+            topBarTopPad,
+            right + topSidePad,
             Dp(isTablet ? 10 : (compactLandscape ? 4 : 6)));
+        if (_stylePill.LayoutParameters is FrameLayout.LayoutParams pillLp)
+        {
+            var nextPillW = ComputeStylePillWidth();
+            var nextPillH = Dp(compactLandscape ? 34 : 36);
+            if (pillLp.Width != nextPillW || pillLp.Height != nextPillH)
+            {
+                pillLp.Width = nextPillW;
+                pillLp.Height = nextPillH;
+                _stylePill.LayoutParameters = pillLp;
+            }
+        }
         _contentArea.SetPadding(
             left + sidePad,
             Dp(isTablet ? 10 : (compactLandscape ? 4 : 6)),
@@ -2059,10 +2112,9 @@ public sealed partial class LyricShareActivity : Activity
                 clipboard.PrimaryClip = clip;
                 if (!OperatingSystem.IsAndroidVersionAtLeast(33))
                     Toast.MakeText(this, "已复制歌词卡片", ToastLength.Short)?.Show();
-            },
-            forClipboard: true);
+            });
 
-    private async void RunExport<T>(string action, Func<Bitmap, string, T> write, Action<T> onSuccess, bool forClipboard = false)
+    private async void RunExport<T>(string action, Func<Bitmap, string, T> write, Action<T> onSuccess)
     {
         if (_isExporting) return;
         SaveEditorPreferences();
@@ -2075,9 +2127,7 @@ public sealed partial class LyricShareActivity : Activity
         {
             var result = await Task.Run(() =>
             {
-                using var bitmap = forClipboard
-                    ? LyricShareCardRenderer.RenderClipboard(this, opt, keepBackdrop)
-                    : LyricShareCardRenderer.Render(this, opt);
+                using var bitmap = LyricShareCardRenderer.RenderExport(this, opt, keepBackdrop);
                 return write(bitmap, baseName);
             });
             using var disposable = result as IDisposable;
@@ -2109,7 +2159,11 @@ public sealed partial class LyricShareActivity : Activity
     {
         try
         {
-            UiHelpers.HideStatusBar(Window, edgeToEdge: true, navigationBarColor: _currentNavBarColor);
+            UiHelpers.HideStatusBar(
+                Window,
+                edgeToEdge: true,
+                navigationBarColor: _currentNavBarColor,
+                hideNavigationBar: LyrxApp.Instance.Settings.HideNavigationBar);
         }
         catch { }
     }

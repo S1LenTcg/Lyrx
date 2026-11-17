@@ -9,36 +9,13 @@ using Musebase.Engine;
 namespace Musebase.Windows.Services;
 
 /// <summary>
-/// 应用设置（%LOCALAPPDATA%\Musebase\settings.json）。
-/// M4 起使用 DeepL 密钥/目标语言。
+/// 应用设置（%LOCALAPPDATA%\Lyrx\settings.json）。
 /// </summary>
 public sealed class AppSettings
 {
     /// <summary>机密值（翻译 API 密钥）保护存储。可按平台替换（默认 Windows DPAPI）。</summary>
     [JsonIgnore]
     private ISecretStore _secretStore = new DpapiSecretStore();
-
-    public bool OverlayVisible { get; set; } = true;
-
-    /// <summary>关闭迷你窗口（X）时隐藏到托盘（从任务栏消失）。默认关闭 = 最小化常驻。</summary>
-    public bool MiniWindowCloseToTray { get; set; }
-
-    public double? OverlayX { get; set; }
-    public double? OverlayY { get; set; }
-
-    /// <summary>覆盖层尺寸。文字大小按高度比例自动决定。</summary>
-    public double OverlayWidth { get; set; } = 780;
-    public double OverlayHeight { get; set; } = 150;
-
-    /// <summary>
-    /// 控制面板（专辑封面窗口）的位置·大小。没有保存的值时（<c>null</c>）走首次运行布局 ——
-    /// 浮在工作区右下角。这是长期常驻的窗口，每次都出现在屏幕正中会很碍事。
-    /// </summary>
-    public double? PanelX { get; set; }
-    public double? PanelY { get; set; }
-
-    /// <summary>正方形，因此只保存一条边。</summary>
-    public double PanelSize { get; set; } = 360;
 
     public double? ClassicLyricsX { get; set; }
     public double? ClassicLyricsY { get; set; }
@@ -57,31 +34,6 @@ public sealed class AppSettings
     public double? LyricShareCoverDim { get; set; }
     public double? LyricShareCoverGradientFade { get; set; }
     public double? LyricShareCoverTint { get; set; }
-
-    // ---- 覆盖层样式 (#RRGGBB) ----
-    public string TextColor { get; set; } = "#FFFFFF";
-    public string KaraokeColor { get; set; } = "#FFEB3B";
-    public string TranslationColor { get; set; } = "#E8E8E8";
-    public string OutlineColor { get; set; } = "#000000";
-    public double OutlineThickness { get; set; } = 3.0;
-
-    /// <summary>歌词出现与消失时平滑淡入/淡出。</summary>
-    public bool FadeAnimation { get; set; } = true;
-
-    /// <summary>显示覆盖层背景（半透明底板）。</summary>
-    public bool OverlayBackgroundEnabled { get; set; }
-
-    /// <summary>覆盖层背景色（#RRGGBB）。透明度由 OverlayBackgroundOpacity 调节。</summary>
-    public string OverlayBackgroundColor { get; set; } = "#000000";
-
-    /// <summary>覆盖层背景不透明度（0 = 完全透明 ~ 1 = 不透明）。</summary>
-    public double OverlayBackgroundOpacity { get; set; } = 0.25;
-
-    /// <summary>覆盖层背景（半透明底板）的圆角半径（DIP）。</summary>
-    public double OverlayCornerRadius { get; set; } = 12;
-
-    /// <summary>鼠标移到覆盖层上时暂时隐藏歌词·覆盖层（避免遮挡）。</summary>
-    public bool HideOnMouseOver { get; set; }
 
     /// <summary>逐字卡拉OK（基于行内时间标签）。仅在支持的曲目（Kugou/QQ 等）上生效。</summary>
     public bool CharacterKaraoke { get; set; } = true;
@@ -191,17 +143,6 @@ public sealed class AppSettings
     [JsonPropertyName("preferredSources")]
     public List<string> PreferredSources { get; set; } = new();
 
-    // ---- 浏览器显示（平板/TV 远程显示，Musebase.Browser 进程内托管） ----
-
-    /// <summary>是否启用浏览器显示服务器（Kestrel）。启用后应用启动时自动运行。默认关闭。</summary>
-    public bool BrowserDisplayEnabled { get; set; }
-
-    /// <summary>浏览器显示监听端口（默认 5123）。</summary>
-    public int BrowserDisplayPort { get; set; } = 5123;
-
-    /// <summary>为 true 时绑定到 0.0.0.0，同一 LAN 上的其他设备（平板/TV）也能访问。默认仅限 localhost。</summary>
-    public bool BrowserDisplayLan { get; set; }
-
     // ---- 歌词源选择（基于注册表，[[0002-pluggable-sources-and-translation]]） ----
 
     /// <summary>
@@ -209,20 +150,6 @@ public sealed class AppSettings
     /// 公开发布时若要排除非官方源，就收窄到 LyricsSourceRegistry.OfficialIds。
     /// </summary>
     public List<string> EnabledLyricsSources { get; set; } = LyricsSourceRegistry.AllIds.ToList();
-
-    // ---- 使用统计（遥测，ADR-0004） — 两步选择加入，默认全部关闭 ----
-
-    /// <summary>首次运行的同意对话框是否已经展示过（只在首次显示一次）。</summary>
-    public bool TelemetryConsentAsked { get; set; }
-
-    /// <summary>① 基础统计（功能·性能·环境 — 不含歌曲信息）。默认关闭（需主动选择加入）。</summary>
-    public bool TelemetryBasicEnabled { get; set; }
-
-    /// <summary>② 质量报告（包含错误歌词/搜索失败曲目的标题·歌手 — 需单独同意）。默认关闭。</summary>
-    public bool TelemetryQualityEnabled { get; set; }
-
-    /// <summary>匿名客户端 ID（本地生成的随机 GUID）。首次开启同意时生成，可在设置中重置。</summary>
-    public string? TelemetryClientId { get; set; }
 
     // ---- 翻译引擎选择 ----
 
@@ -256,16 +183,14 @@ public sealed class AppSettings
         : TranslatorRegistry.None;
 
     /// <summary>
-    /// 覆盖层·控制面板使用的字体名称。为空则为默认（Segoe UI）。
-    /// 即使名称未安装，WPF 也会沿回退链自动降级，因此文字不会消失。
-    /// </summary>
-    public string? OverlayFontFamily { get; set; }
-
-    /// <summary>
     /// OpenRouter 模型字符串（例：<c>anthropic/claude-opus-5</c>）。为空时使用注册表默认值。
     /// 只是名称而非密钥，因此不做加密。
     /// </summary>
     public string? OpenRouterModel { get; set; }
+
+    /// <summary>保留旧版 Musebase 或跨端配置文件中未显式映射的扩展字段。</summary>
+    [JsonExtensionData]
+    public Dictionary<string, JsonElement>? ExtensionData { get; set; }
 
     /// <summary>DeepL API 密钥（明文） — 仅在应用内使用，不写入文件（只保存加密副本）。</summary>
     [JsonIgnore]
@@ -294,21 +219,6 @@ public sealed class AppSettings
     /// <summary>LibreTranslate 密钥的 DPAPI 密文（base64）。</summary>
     [JsonPropertyName("libreTranslateApiKeyEnc")]
     public string? LibreTranslateApiKeyEncrypted { get; set; }
-
-    /// <summary>
-    /// 个人歌词服务器地址（例：<c>https://oracle.example.ts.net</c>）。为空则不使用。
-    /// 在本地缓存未命中与提供方搜索之间查询此服务器，并把新找到的歌词也上传到这里
-    /// （契约：<c>contracts/lyrics-api.md</c>）。没有服务器或连不上时，静默降级为原有行为。
-    /// </summary>
-    public string? LyricsServerEndpoint { get; set; }
-
-    /// <summary>歌词服务器共享令牌（明文） — 文件里只保存加密副本。</summary>
-    [JsonIgnore]
-    public string? LyricsServerToken { get; set; }
-
-    /// <summary>歌词服务器令牌的 DPAPI 密文（base64）。</summary>
-    [JsonPropertyName("lyricsServerTokenEnc")]
-    public string? LyricsServerTokenEncrypted { get; set; }
 
     /// <summary>OpenRouter API 密钥（明文） — 文件里只保存加密副本。</summary>
     [JsonIgnore]
@@ -416,9 +326,11 @@ public sealed class AppSettings
         {
             if (File.Exists(SettingsPath))
             {
-                var settings = JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(SettingsPath), JsonOptions) ?? new AppSettings();
+                var rawJson = File.ReadAllText(SettingsPath);
+                var settings = JsonSerializer.Deserialize<AppSettings>(rawJson, JsonOptions) ?? new AppSettings();
                 settings._secretStore = store;
                 settings.ResolveSecrets();
+                settings.NormalizeCrossPlatformShareFields();
                 if (string.IsNullOrWhiteSpace(settings.ClassicBackgroundMode))
                     settings.ClassicBackgroundMode = "dynamic";
                 return settings;
@@ -443,7 +355,32 @@ public sealed class AppSettings
         GoogleApiKey = _secretStore.Unprotect(GoogleApiKeyEncrypted);
         LibreTranslateApiKey = _secretStore.Unprotect(LibreTranslateApiKeyEncrypted);
         OpenRouterApiKey = _secretStore.Unprotect(OpenRouterApiKeyEncrypted);
-        LyricsServerToken = _secretStore.Unprotect(LyricsServerTokenEncrypted);
+    }
+
+    private void NormalizeCrossPlatformShareFields()
+    {
+        if (LyricShareCoverBlur is > 1.0) LyricShareCoverBlur /= 100.0;
+        if (LyricShareCoverDim is > 1.0) LyricShareCoverDim /= 100.0;
+        if (LyricShareCoverGradientFade is > 1.0) LyricShareCoverGradientFade /= 100.0;
+        if (LyricShareCoverTint is > 1.0) LyricShareCoverTint /= 100.0;
+
+        if (ExtensionData is null) return;
+
+        if (Math.Abs(LyricShareFontScale - 1.0) < 0.0001
+            && ExtensionData.TryGetValue("lyricShareFontPercent", out var fontPctElem)
+            && fontPctElem.ValueKind == JsonValueKind.Number
+            && fontPctElem.TryGetDouble(out var fontPct))
+        {
+            LyricShareFontScale = Math.Round(fontPct / 100.0, 2);
+        }
+
+        if (LyricShareCoverGradientFade is null
+            && ExtensionData.TryGetValue("lyricShareCoverFade", out var fadeElem)
+            && fadeElem.ValueKind == JsonValueKind.Number
+            && fadeElem.TryGetDouble(out var fade))
+        {
+            LyricShareCoverGradientFade = fade > 1.0 ? fade / 100.0 : fade;
+        }
     }
 
     /// <summary>
@@ -473,14 +410,12 @@ public sealed class AppSettings
     /// </summary>
     private static readonly HashSet<string> KeptOnImport = new(StringComparer.Ordinal)
     {
-        nameof(TelemetryClientId),
-        nameof(OverlayX), nameof(OverlayY), nameof(PanelX), nameof(PanelY),
         nameof(ClassicLyricsX), nameof(ClassicLyricsY), nameof(ClassicLyricsWidth), nameof(ClassicLyricsHeight),
+        nameof(ExtensionData),
         nameof(DeeplApiKey), nameof(DeeplApiKeyEncrypted),
         nameof(GoogleApiKey), nameof(GoogleApiKeyEncrypted),
         nameof(LibreTranslateApiKey), nameof(LibreTranslateApiKeyEncrypted),
         nameof(OpenRouterApiKey), nameof(OpenRouterApiKeyEncrypted),
-        nameof(LyricsServerToken), nameof(LyricsServerTokenEncrypted),
         nameof(LegacyDeeplApiKey),
     };
 
@@ -510,7 +445,6 @@ public sealed class AppSettings
         GoogleApiKey = Taken(s.GoogleApiKey, GoogleApiKey);
         LibreTranslateApiKey = Taken(s.LibreTranslateApiKey, LibreTranslateApiKey);
         OpenRouterApiKey = Taken(s.OpenRouterApiKey, OpenRouterApiKey);
-        LyricsServerToken = Taken(s.LyricsServerToken, LyricsServerToken);
 
         static string? Taken(string? fromBackup, string? current) =>
             string.IsNullOrEmpty(fromBackup) ? current : fromBackup;
@@ -530,7 +464,6 @@ public sealed class AppSettings
                 GoogleApiKeyEncrypted = Seal(GoogleApiKey, GoogleApiKeyEncrypted);
                 LibreTranslateApiKeyEncrypted = Seal(LibreTranslateApiKey, LibreTranslateApiKeyEncrypted);
                 OpenRouterApiKeyEncrypted = Seal(OpenRouterApiKey, OpenRouterApiKeyEncrypted);
-                LyricsServerTokenEncrypted = Seal(LyricsServerToken, LyricsServerTokenEncrypted);
                 LegacyDeeplApiKey = null;
                 var dir = Path.GetDirectoryName(SettingsPath)!;
                 Directory.CreateDirectory(dir);

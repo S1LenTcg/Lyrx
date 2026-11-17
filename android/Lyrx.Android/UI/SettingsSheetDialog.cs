@@ -201,7 +201,7 @@ internal static class SettingsSheetDialog
         var pageViews = new LinearLayout[4];
         Action? refreshTrackPage = null;
 
-        pageViews[0] = BuildPlaybackAndAppearanceTab(activity, app, contentApproxW, onAppearanceOrLayoutChanged, openNotificationSettings, onOrientationChanged);
+        pageViews[0] = BuildPlaybackAndAppearanceTab(activity, app, dialog, contentApproxW, onAppearanceOrLayoutChanged, openNotificationSettings, onOrientationChanged);
         pageViews[1] = BuildSourcesTab(activity, app, dialog);
         pageViews[2] = BuildTranslationTab(activity, app, onAppearanceOrLayoutChanged);
         (pageViews[3], refreshTrackPage) = BuildCurrentTrackTab(activity, app, dialog, onAppearanceOrLayoutChanged);
@@ -280,9 +280,10 @@ internal static class SettingsSheetDialog
         dialog.Window?.SetBackgroundDrawable(new ColorDrawable(Color.Transparent));
         dialog.Window?.SetSoftInputMode(SoftInput.AdjustResize);
         dialog.Window?.SetLayout(dialogW, dialogH);
-        UiHelpers.HideStatusBar(dialog.Window);
+        UiHelpers.HideStatusBar(dialog.Window, hideNavigationBar: app.Settings.HideNavigationBar);
         dialog.SetCanceledOnTouchOutside(true);
         dialog.Show();
+        UiHelpers.HideStatusBar(dialog.Window, hideNavigationBar: app.Settings.HideNavigationBar);
     }
 
     // ────────────────────────────────────────────────────────────────
@@ -291,6 +292,7 @@ internal static class SettingsSheetDialog
     private static LinearLayout BuildPlaybackAndAppearanceTab(
         Activity ctx,
         LyrxApp app,
+        Dialog dialog,
         int contentApproxW,
         Action onAppearanceOrLayoutChanged,
         Action openNotificationSettings,
@@ -348,6 +350,100 @@ internal static class SettingsSheetDialog
             "包含浏览器音频",
             "识别网页版 Spotify、YouTube Music、Bilibili 等浏览器媒体",
             browserToggle));
+
+        audioCard.AddView(MakeHorizontalLine(ctx, 9));
+
+        var preferredHeader = new LinearLayout(ctx) { Orientation = global::Android.Widget.Orientation.Horizontal };
+        preferredHeader.SetGravity(GravityFlags.CenterVertical);
+        var preferredTitle = new TextView(ctx) { Text = "自动模式偏好播放器（多选白名单）" };
+        preferredTitle.SetTextColor(TextPrimary);
+        preferredTitle.SetTextSize(global::Android.Util.ComplexUnitType.Sp, 13f);
+        UiHelpers.SetFontWeight(preferredTitle, UiHelpers.FontWeightSemiBold);
+        preferredHeader.AddView(preferredTitle, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WrapContent, 1f));
+
+        var preferredToggles = new List<Action<bool>>();
+        var clearPreferredBtn = CreateDarkButton(
+            ctx,
+            "清空限制",
+            TextMuted,
+            () =>
+            {
+                if (app.Settings.PreferredSources.Count == 0) return;
+                app.Settings.PreferredSources = new List<string>();
+                foreach (var setChecked in preferredToggles) setChecked(false);
+                app.SaveSettings();
+                app.NowPlaying.SetSource(app.Settings.PlaybackSource, app.Settings.IncludeBrowsers, app.Settings.PreferredSources);
+            },
+            horizontalPadDp: 10,
+            fontSizeSp: 11.5f);
+        clearPreferredBtn.Enabled = app.Settings.PreferredSources.Count > 0;
+        clearPreferredBtn.Alpha = app.Settings.PreferredSources.Count > 0 ? 1f : 0.45f;
+        preferredHeader.AddView(clearPreferredBtn, new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WrapContent, UiHelpers.Dp(ctx, 28)));
+        audioCard.AddView(preferredHeader, new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent)
+        {
+            BottomMargin = UiHelpers.Dp(ctx, 4),
+        });
+
+        var preferredDesc = new TextView(ctx) { Text = "开启后自动模式仅跟随勾选应用；全部关闭则不限制音乐应用" };
+        preferredDesc.SetTextColor(TextMuted);
+        preferredDesc.SetTextSize(global::Android.Util.ComplexUnitType.Sp, 11.5f);
+        UiHelpers.SetFontWeight(preferredDesc, UiHelpers.FontWeightRegular);
+        audioCard.AddView(preferredDesc, new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent)
+        {
+            BottomMargin = UiHelpers.Dp(ctx, 6),
+        });
+
+        var availableSources = app.NowPlaying.GetAvailableSources();
+        var preferredCandidates = availableSources
+            .Concat(app.Settings.PreferredSources)
+            .Where(s => !string.IsNullOrWhiteSpace(s))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (preferredCandidates.Count == 0)
+        {
+            var emptyPreferred = new TextView(ctx) { Text = "当前未检测到活跃媒体会话；播放音乐后重新打开设置即可勾选。" };
+            emptyPreferred.SetTextColor(TextMuted);
+            emptyPreferred.SetTextSize(global::Android.Util.ComplexUnitType.Sp, 11.5f);
+            UiHelpers.SetFontWeight(emptyPreferred, UiHelpers.FontWeightRegular);
+            audioCard.AddView(emptyPreferred);
+        }
+        else
+        {
+            var preferredSet = new HashSet<string>(app.Settings.PreferredSources, StringComparer.OrdinalIgnoreCase);
+            foreach (var pkg in preferredCandidates)
+            {
+                var capturedPkg = pkg;
+                var shortName = pkg.Split('.').LastOrDefault() ?? pkg;
+                var isRunning = availableSources.Contains(pkg, StringComparer.OrdinalIgnoreCase);
+                var (prefToggle, setPrefChecked) = CreateToggleSwitch(ctx, preferredSet.Contains(pkg), val =>
+                {
+                    var next = app.Settings.PreferredSources
+                        .Where(s => !string.IsNullOrWhiteSpace(s) && !string.Equals(s, capturedPkg, StringComparison.OrdinalIgnoreCase))
+                        .ToList();
+                    if (val) next.Add(capturedPkg);
+                    app.Settings.PreferredSources = next;
+                    clearPreferredBtn.Enabled = next.Count > 0;
+                    clearPreferredBtn.Alpha = next.Count > 0 ? 1f : 0.45f;
+                    app.SaveSettings();
+                    app.NowPlaying.SetSource(app.Settings.PlaybackSource, app.Settings.IncludeBrowsers, app.Settings.PreferredSources);
+                });
+                preferredToggles.Add(setPrefChecked);
+                var prefRow = CreateSettingRow(
+                    ctx,
+                    shortName,
+                    isRunning ? $"当前正在运行 · {pkg}" : $"当前未运行 · {pkg}",
+                    prefToggle);
+                audioCard.AddView(prefRow, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent)
+                {
+                    TopMargin = UiHelpers.Dp(ctx, 5),
+                });
+            }
+        }
 
         audioCard.AddView(MakeHorizontalLine(ctx, 9));
 
@@ -467,6 +563,21 @@ internal static class SettingsSheetDialog
             "横屏保持屏幕常亮",
             "横屏时不自动熄屏",
             keepAwakeToggle));
+
+        themeCard.AddView(MakeHorizontalLine(ctx, 9));
+
+        var (hideNavToggle, _) = CreateToggleSwitch(ctx, app.Settings.HideNavigationBar, val =>
+        {
+            app.Settings.HideNavigationBar = val;
+            app.SaveSettings();
+            UiHelpers.HideStatusBar(dialog.Window, hideNavigationBar: val);
+            onAppearanceOrLayoutChanged();
+        });
+        themeCard.AddView(CreateSettingRow(
+            ctx,
+            "隐藏导航栏",
+            "隐藏底部导航栏与全面屏手势长条，实现沉浸效果",
+            hideNavToggle));
 
         themeCard.AddView(MakeHorizontalLine(ctx, 9));
 

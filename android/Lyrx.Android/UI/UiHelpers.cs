@@ -267,7 +267,8 @@ internal static class UiHelpers
     public static void HideStatusBar(
         global::Android.Views.Window? window,
         bool edgeToEdge = false,
-        Color? navigationBarColor = null)
+        Color? navigationBarColor = null,
+        bool hideNavigationBar = true)
     {
         if (window is null) return;
         try
@@ -300,23 +301,26 @@ internal static class UiHelpers
                 {
 #pragma warning disable CA1422
                     window.StatusBarContrastEnforced = false;
+                    window.NavigationBarContrastEnforced = !hideNavigationBar;
 #pragma warning restore CA1422
                 }
             }
 
             if (OperatingSystem.IsAndroidVersionAtLeast(30))
             {
-                ApplyInsetsControllerApi30(window, decor, edgeToEdge);
+                ApplyInsetsControllerApi30(window, decor, edgeToEdge, hideNavigationBar);
             }
             else
             {
                 window.AddFlags(WindowManagerFlags.Fullscreen);
 #pragma warning disable CS0618
-                decor.SystemUiVisibility = (StatusBarVisibility)(
-                    SystemUiFlags.LayoutStable
+                var flags = SystemUiFlags.LayoutStable
                     | SystemUiFlags.LayoutFullscreen
                     | SystemUiFlags.Fullscreen
-                    | SystemUiFlags.ImmersiveSticky);
+                    | SystemUiFlags.ImmersiveSticky;
+                if (hideNavigationBar)
+                    flags |= SystemUiFlags.LayoutHideNavigation | SystemUiFlags.HideNavigation;
+                decor.SystemUiVisibility = (StatusBarVisibility)flags;
 #pragma warning restore CS0618
             }
 
@@ -324,7 +328,9 @@ internal static class UiHelpers
             {
 #pragma warning disable CS0618
                 window.SetStatusBarColor(Color.Transparent);
-                if (navigationBarColor is { } navColor)
+                if (hideNavigationBar)
+                    window.SetNavigationBarColor(Color.Transparent);
+                else if (navigationBarColor is { } navColor)
                     window.SetNavigationBarColor(navColor);
 #pragma warning restore CS0618
             }
@@ -337,7 +343,11 @@ internal static class UiHelpers
 
     [MethodImpl(MethodImplOptions.NoInlining)]
     [global::System.Runtime.Versioning.SupportedOSPlatform("android30.0")]
-    private static void ApplyInsetsControllerApi30(global::Android.Views.Window window, View decor, bool edgeToEdge)
+    private static void ApplyInsetsControllerApi30(
+        global::Android.Views.Window window,
+        View decor,
+        bool edgeToEdge,
+        bool hideNavigationBar)
     {
         if (edgeToEdge && !OperatingSystem.IsAndroidVersionAtLeast(35))
         {
@@ -349,7 +359,15 @@ internal static class UiHelpers
         if ((window.InsetsController ?? decor.WindowInsetsController) is { } controller)
         {
             controller.SystemBarsBehavior = (int)WindowInsetsControllerBehavior.ShowTransientBarsBySwipe;
-            controller.Hide(WindowInsets.Type.StatusBars());
+            if (hideNavigationBar)
+            {
+                controller.Hide(WindowInsets.Type.StatusBars() | WindowInsets.Type.NavigationBars());
+            }
+            else
+            {
+                controller.Hide(WindowInsets.Type.StatusBars());
+                controller.Show(WindowInsets.Type.NavigationBars());
+            }
             if (edgeToEdge)
             {
                 controller.SetSystemBarsAppearance(

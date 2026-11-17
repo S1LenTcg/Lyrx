@@ -11,6 +11,7 @@ publish/
 
 ## Build artifacts
 /dist/
+/dist-fast/
 artifacts/
 !scripts/
 TestResults/

@@ -276,6 +276,85 @@ internal sealed class ClassicSettingsWindow : Window
             "识别网页版 Spotify、YouTube Music、Bilibili 等浏览器媒体",
             browserToggle));
 
+        sourceCard.Children.Add(CreateDivider());
+
+        var preferredHeader = new DockPanel { Margin = new Thickness(0, 2, 0, 4) };
+        var clearPreferredBtn = SmallToolButton("清空限制");
+        clearPreferredBtn.Margin = new Thickness(8, 0, 0, 0);
+        DockPanel.SetDock(clearPreferredBtn, Dock.Right);
+        preferredHeader.Children.Add(clearPreferredBtn);
+        preferredHeader.Children.Add(new TextBlock
+        {
+            Text = "自动模式偏好播放器（多选白名单）",
+            FontSize = 13,
+            FontWeight = FontWeights.SemiBold,
+            Foreground = TextPrimary,
+            VerticalAlignment = VerticalAlignment.Center,
+        });
+        sourceCard.Children.Add(preferredHeader);
+        sourceCard.Children.Add(HintLabel("勾选后自动模式仅跟随所选播放器；全部取消则自动识别全部音乐应用："));
+
+        var preferredToggles = new Dictionary<string, CheckBox>(StringComparer.OrdinalIgnoreCase);
+        var preferredSourceIds = availablePlayers
+            .Concat(settings.PreferredSources)
+            .Where(s => !string.IsNullOrWhiteSpace(s))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        void SyncPreferredTogglesFromSettings()
+        {
+            var preferredSet = new HashSet<string>(settings.PreferredSources, StringComparer.OrdinalIgnoreCase);
+            foreach (var (id, toggle) in preferredToggles)
+                toggle.IsChecked = preferredSet.Contains(id);
+            clearPreferredBtn.IsEnabled = preferredSet.Count > 0;
+            clearPreferredBtn.Opacity = preferredSet.Count > 0 ? 1.0 : 0.45;
+        }
+
+        if (preferredSourceIds.Count == 0)
+        {
+            clearPreferredBtn.IsEnabled = false;
+            clearPreferredBtn.Opacity = 0.45;
+            sourceCard.Children.Add(HintLabel("当前未检测到活跃媒体会话；播放音乐后重新打开设置即可勾选白名单。"));
+        }
+        else
+        {
+            var preferredSet = new HashSet<string>(settings.PreferredSources, StringComparer.OrdinalIgnoreCase);
+            foreach (var id in preferredSourceIds)
+            {
+                var capturedId = id;
+                var running = availablePlayers.Contains(id, StringComparer.OrdinalIgnoreCase);
+                var displayName = NowPlayingService.FormatSourceDisplayName(id);
+                var toggle = CreateToggleSwitch(preferredSet.Contains(id), val =>
+                {
+                    var next = new List<string>(settings.PreferredSources.Where(s => !string.IsNullOrWhiteSpace(s)));
+                    next.RemoveAll(s => string.Equals(s, capturedId, StringComparison.OrdinalIgnoreCase));
+                    if (val) next.Add(capturedId);
+                    settings.PreferredSources = next;
+                    clearPreferredBtn.IsEnabled = next.Count > 0;
+                    clearPreferredBtn.Opacity = next.Count > 0 ? 1.0 : 0.45;
+                    SaveAndNotify();
+                });
+                preferredToggles[id] = toggle;
+                var row = CreateSettingRow(
+                    displayName,
+                    running ? $"当前正在运行 · {id}" : $"当前未运行 · {id}",
+                    toggle);
+                row.Margin = new Thickness(0, 4, 0, 2);
+                sourceCard.Children.Add(row);
+            }
+            SyncPreferredTogglesFromSettings();
+        }
+
+        clearPreferredBtn.Click += (_, _) =>
+        {
+            if (settings.PreferredSources.Count == 0) return;
+            settings.PreferredSources = new List<string>();
+            suppressingEvents = true;
+            SyncPreferredTogglesFromSettings();
+            suppressingEvents = false;
+            SaveAndNotify();
+        };
+
         var windowCard = AddSectionCard(pageGeneral, "窗口与外观配色");
         var topmostToggle = CreateToggleSwitch(settings.ClassicTopmost, val =>
         {
@@ -695,6 +774,7 @@ internal sealed class ClassicSettingsWindow : Window
         {
             suppressingEvents = true;
             browserToggle.IsChecked = settings.IncludeBrowsers;
+            SyncPreferredTogglesFromSettings();
             timingDiagnosticsToggle.IsChecked = settings.TimingDiagnosticsEnabled;
             showTransToggle.IsChecked = settings.ClassicShowTranslation;
             topmostToggle.IsChecked = settings.ClassicTopmost;

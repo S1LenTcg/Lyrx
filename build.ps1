@@ -14,6 +14,9 @@ param (
     [switch]$NoSelfContained,
 
     [Parameter()]
+    [switch]$NoRestore,
+
+    [Parameter()]
     [Alias("OutputDirectory")]
     [string]$OutputDir,
 
@@ -85,6 +88,7 @@ $publishArgs = @(
 )
 
 if ($PackageSource) { $publishArgs += @("--source", $PackageSource) }
+if ($NoRestore) { $publishArgs += "--no-restore" }
 
 if (-not $NoSelfContained) {
     $publishArgs += "--self-contained"

@@ -1382,9 +1382,9 @@ internal sealed class LyricShareWindow : Window
         var preset = settings.LyricShareCoverEffectPreset?.Trim().ToLowerInvariant() switch
         {
             "clean" => ShareCoverEffect.Clean,
-            "dreamy-blur" => ShareCoverEffect.DreamyBlur,
-            "color-fade" => ShareCoverEffect.ColorFade,
-            "color-tint" => ShareCoverEffect.ColorTint,
+            "dreamy-blur" or "dreamyblur" => ShareCoverEffect.DreamyBlur,
+            "color-fade" or "colorfade" => ShareCoverEffect.ColorFade,
+            "color-tint" or "colortint" => ShareCoverEffect.ColorTint,
             "cinematic" => ShareCoverEffect.Cinematic,
             _ => ShareCoverEffect.SoftBlur,
         };

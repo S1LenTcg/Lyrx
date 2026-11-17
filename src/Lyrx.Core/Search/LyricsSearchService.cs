@@ -13,11 +13,18 @@ public sealed class LyricsSearchService
 {
     private readonly IReadOnlyList<ILyricsProvider> _providers;
 
+    /// <summary>当前启用的提供者规范化签名（与顺序无关），用于判断缓存是否已覆盖当前曲库。</summary>
+    public string SourceSignature { get; }
+
     public LyricsSearchService(params ILyricsProvider[] providers)
     {
         _providers = providers.Length > 0
             ? providers
             : [new LrclibProvider(), new NetEaseProvider(), new KugouProvider(), new QQMusicProvider()];
+        SourceSignature = string.Join(',',
+            _providers.Select(p => p.ServiceName.Trim().ToLowerInvariant())
+                .Distinct(StringComparer.Ordinal)
+                .OrderBy(s => s, StringComparer.Ordinal));
     }
 
     /// <summary>

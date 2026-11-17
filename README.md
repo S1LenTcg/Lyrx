@@ -22,11 +22,13 @@ Lyrx/
 ├── Lyrx.sln                  # 解决方案文件
 ├── build.ps1                 # 一键编译发布脚本（输出至 dist/）
 ├── LICENSE                   # LGPL-2.1 开源许可证
+├── android/                  # Android 解决方案、界面和构建脚本
 ├── src/
 │   ├── Lyrx.Core/            # 歌词解析、四大在线歌词源、翻译接口与 SQLite 本地缓存
 │   ├── Lyrx.Engine/          # 播放状态协调器、歌词自动择优与翻译调度引擎
 │   └── Lyrx.Windows/         # WPF 桌面端界面、SMTC 媒体会话监听、系统托盘与设置面板
-└── dist/                     # 独立可分发版本输出目录 (Lyrx.exe)
+├── dist/                     # Windows 发布输出
+└── dist-fast/                # Windows 快速验证输出
 ```
 
 ## 编译与发布
@@ -45,8 +47,12 @@ Lyrx/
 
 默认发布目录为 `dist`，启动文件为 `dist\Lyrx.exe`。普通自包含发布请分发整个输出目录。正式发布时可以用 `-OutputDir` 指定空目录，以免混入旧产物。SDK 不在 PATH 中时可用 `-DotNet` 指定 `dotnet.exe` 的路径。离线构建可用 `-PackageSource` 指定完整的本地 NuGet 源。用户配置文件与本地歌词缓存保存在 `%LOCALAPPDATA%\Lyrx\`。
 
+首次执行常规构建并还原依赖后，可运行 `.\build-fast.bat` 快速输出到 `dist-fast`。快速构建跳过包还原，运行产物需要 .NET 8 Desktop Runtime。修改项目依赖后，先执行一次常规构建。
+
 Android 构建步骤见 [Android 文档](android/README.md)。
 
 ## Windows 自定义歌词字体
 
 在「设置 → 播放与窗口 → 歌词字体」导入或拖入 `.ttf` 或 `.otf` 文件，即可预览和切换歌词及译文的字体。也可以把文件放入 `%LOCALAPPDATA%\Lyrx\fonts\`，再点「刷新列表」选择字体。选择「Windows 默认字体」可恢复系统字体。
+
+> **字体授权提示**：项目默认附带的 `SpotifyMix*.ttf`（Windows 输出目录 `local-fonts/` 及 Android `Assets/fonts/`）仅作本地开发/界面展示样本，公开或商业分发前请自行核对字体授权；若移除 `local-fonts/` 目录，Windows 端会自动回退至系统字体。

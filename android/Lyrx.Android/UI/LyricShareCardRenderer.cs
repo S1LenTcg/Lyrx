@@ -69,7 +69,10 @@ internal static class LyricShareCardRenderer
             ? RenderAppleMusicCard(context, options, forPreview ? 0.7f : ExportScale)
             : RenderSpotifyCard(context, options, forPreview ? 0.7f : ExportScale);
 
-    public static Bitmap RenderClipboard(Context context, ShareCardOptions options, bool keepBackdrop)
+    public static Bitmap RenderClipboard(Context context, ShareCardOptions options, bool keepBackdrop) =>
+        RenderExport(context, options, keepBackdrop);
+
+    public static Bitmap RenderExport(Context context, ShareCardOptions options, bool keepBackdrop)
     {
         using var card = Render(context, options);
         var pad = keepBackdrop ? (int)(72 * ExportScale) : 0;
@@ -88,9 +91,17 @@ internal static class LyricShareCardRenderer
                     LyricsPalette.BlendColor(options.BaseColor, Color.Black, 0.12)],
                 [0f, 0.46f, 1f]);
             using var shadow = new Paint(PaintFlags.AntiAlias) { Color = Color.Argb(148, 0, 0, 0) };
-            using var filter = new BlurMaskFilter(36 * ExportScale, BlurMaskFilter.Blur.Normal!);
+            using var filter = new BlurMaskFilter(42f * ExportScale, BlurMaskFilter.Blur.Normal!);
             shadow.SetMaskFilter(filter);
-            canvas.DrawRoundRect(rect.Left, rect.Top + 14, rect.Right, rect.Bottom + 14, radius, radius, shadow);
+            var shadowOffsetY = 14f * ExportScale;
+            canvas.DrawRoundRect(
+                rect.Left,
+                rect.Top + shadowOffsetY,
+                rect.Right,
+                rect.Bottom + shadowOffsetY,
+                radius,
+                radius,
+                shadow);
         }
 
         using var paint = new Paint(PaintFlags.AntiAlias | PaintFlags.FilterBitmap);

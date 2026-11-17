@@ -40,6 +40,9 @@ public sealed class LyricsCoordinator : IDisposable
     private const int YieldBudgetMs = 8000;
     private int _yieldRetryMs = 3000; // 服务器建议的重新查询间隔（已 clamp 的值）
 
+    /// <summary>已确认无自带译文的曲目在同源配置下免重复联网检索的缓存冷却期。</summary>
+    private static readonly TimeSpan UntranslatedCacheRecheckInterval = TimeSpan.FromDays(7);
+
     /// <summary>
     /// 在没有目标语言译文的情况下上传新曲目后（无翻译器·失败·额度）等待服务器译文的时间（毫秒）。服务器会
     /// 立即翻译上传的曲目（自动翻译），通常几秒内就会挂上。原文已在屏幕上，显示不会延迟。
@@ -259,30 +262,55 @@ public sealed class LyricsCoordinator : IDisposable
             return;
         }
 
-        // 1) 缓存命中就跳过网络搜索（但目标为中文且旧缓存无译文时（LRCLIB 等），重新搜索以取得译本）
-        if (Cache?.Get(track.Title, track.Artist) is { } cached && (!TargetIsChinese || cached.HasTranslation()))
+        var sourcesSig = _search.SourceSignature;
+        Lyrics? fallbackCached = null;
+
+        // 1) 缓存命中就跳过网络搜索；若目标为中文且旧缓存尚无译文、尚未用当前歌词源集合验证过，
+        //    先暂存作离线回退，仅重新检索一次；用户手动选择/编辑或本身为中文歌词则直接命中缓存。
+        if (Cache?.Get(track.Title, track.Artist) is { } cached)
         {
-            SetCurrentLyrics(cached, trackKey);
-            _lastLineIndex = int.MinValue;
-            RaiseStatus(new LyricsStatus(LyricsStatusKind.Cache, track.ToString(), cached.Metadata.ServiceName ?? ""));
-            // lyrics_search（缓存命中）：没有网络搜索，因此 perSource 为空对象
-            Telemetry.Track(TelemetryEvents.LyricsSearch, new Dictionary<string, object?>
+            var isUserEdited = string.Equals(cached.Metadata.ServiceName, "用户编辑", StringComparison.Ordinal);
+            var isUserManaged = isUserEdited || cached.Metadata.IsManualSelection;
+            var cacheCheckedForCurrentSources =
+                string.Equals(cached.Metadata.CheckedSources, sourcesSig, StringComparison.Ordinal)
+                && cached.Metadata.CachedAtUtc is { } cachedAt
+                && (DateTime.UtcNow - cachedAt) < UntranslatedCacheRecheckInterval;
+            var canUseCachedDirectly = !TargetIsChinese
+                || isUserManaged
+                || cached.HasTranslation()
+                || IsMostlyChinese(cached)
+                || cacheCheckedForCurrentSources;
+
+            if (canUseCachedDirectly)
             {
-                ["winner"] = SourceIdOf(cached.Metadata.ServiceName),
-                ["perSource"] = new Dictionary<string, object?>(),
-                ["cached"] = true,
-                ["cleanedQueryUsed"] = false,
-            });
-            var cacheCts = new CancellationTokenSource();
-            _searchCts = cacheCts;
-            // 补充翻译实际填入后回写到缓存与服务器（persistAfter）——避免保存时
-            // 没有译文的曲目永远停留在无译文状态。
-            await TranslateAsync(cached, cacheCts.Token, persistAfter: true);
-            // 补充翻译后仍无目标语言（无翻译器·失败·额度）时，服务器可能其后已补上——
-            // 本地缓存不会重新校验，不在这里询问的话，服务器译文永远不会到达这台设备。
-            if (CanReceiveServerTranslation && !HasTargetTranslation(cached))
-                await TryTakeServerTranslationAsync(track, cached, pollMs: 0, budgetMs: 0, cacheCts.Token);
-            return;
+                SetCurrentLyrics(cached, trackKey);
+                _lastLineIndex = int.MinValue;
+                RaiseStatus(new LyricsStatus(
+                    isUserEdited ? LyricsStatusKind.Edited : LyricsStatusKind.Cache,
+                    track.ToString(),
+                    cached.Metadata.ServiceName ?? ""));
+                // lyrics_search（缓存命中）：没有网络搜索，因此 perSource 为空对象
+                Telemetry.Track(TelemetryEvents.LyricsSearch, new Dictionary<string, object?>
+                {
+                    ["winner"] = SourceIdOf(cached.Metadata.ServiceName),
+                    ["perSource"] = new Dictionary<string, object?>(),
+                    ["cached"] = true,
+                    ["cleanedQueryUsed"] = false,
+                });
+                if (isUserEdited) return;
+                var cacheCts = new CancellationTokenSource();
+                _searchCts = cacheCts;
+                // 补充翻译实际填入后回写到缓存与服务器（persistAfter）——避免保存时
+                // 没有译文的曲目永远停留在无译文状态。
+                await TranslateAsync(cached, cacheCts.Token, persistAfter: true);
+                // 补充翻译后仍无目标语言（无翻译器·失败·额度）时，服务器可能其后已补上——
+                // 本地缓存不会重新校验，不在这里询问的话，服务器译文永远不会到达这台设备。
+                if (CanReceiveServerTranslation && !HasTargetTranslation(cached))
+                    await TryTakeServerTranslationAsync(track, cached, pollMs: 0, budgetMs: 0, cacheCts.Token);
+                return;
+            }
+
+            fallbackCached = cached;
         }
 
         // 1-b) 询问歌词服务器（个人服务器）——直接接收其他设备已找到的歌词与译文。
@@ -366,9 +394,6 @@ public sealed class LyricsCoordinator : IDisposable
                     _lastLineIndex = int.MinValue; // 强制重新计算行
                     RaiseStatus(new LyricsStatus(
                         LyricsStatusKind.Found, track.ToString(), lyrics.Metadata.ServiceName ?? "", lyrics.Quality()));
-                    // 让出期间不对每个候选都翻译——循环结束后只对最终采用的版本
-                    // 翻译一次，而且先等服务器。
-                    if (!yielding) await TranslateAsync(lyrics, cts.Token);
                 }
             }
 
@@ -376,16 +401,32 @@ public sealed class LyricsCoordinator : IDisposable
             if (!cts.Token.IsCancellationRequested)
                 TrackLyricsSearch(request, diagnostics);
 
-            // 让出：稍微给对方设备上传译本的时间。原文已经在屏幕上，
-            // 在这里等待也不会让显示变慢（译文本来就是后补的）。
-            var tookShared = false;
-            if (yielding && CurrentLyrics is { } adopted && !cts.Token.IsCancellationRequested)
+            var restoredFromFallback = false;
+            if (CurrentLyrics is null && fallbackCached is not null && !cts.Token.IsCancellationRequested)
             {
-                tookShared = await TryTakeServerTranslationAsync(track, adopted, _yieldRetryMs, YieldBudgetMs, cts.Token);
-                if (!tookShared)
+                SetCurrentLyrics(fallbackCached, trackKey);
+                _lastLineIndex = int.MinValue;
+                RaiseStatus(new LyricsStatus(
+                    LyricsStatusKind.Cache, track.ToString(), fallbackCached.Metadata.ServiceName ?? ""));
+                restoredFromFallback = true;
+            }
+
+            // 等待流式择优收敛后再对最终采用的版本翻译一次，避免慢源/高质量源到来前重复浪费 MT 请求
+            var tookShared = false;
+            if (CurrentLyrics is { } adopted && !cts.Token.IsCancellationRequested)
+            {
+                if (yielding)
                 {
-                    Log?.Invoke($"[server] 让出时间超时——自行翻译: {track}");
-                    await TranslateAsync(adopted, cts.Token);
+                    tookShared = await TryTakeServerTranslationAsync(track, adopted, _yieldRetryMs, YieldBudgetMs, cts.Token);
+                    if (!tookShared)
+                    {
+                        Log?.Invoke($"[server] 让出时间超时——自行翻译: {track}");
+                        await TranslateAsync(adopted, cts.Token);
+                    }
+                }
+                else
+                {
+                    await TranslateAsync(adopted, cts.Token, persistAfter: restoredFromFallback);
                 }
             }
 
@@ -402,9 +443,10 @@ public sealed class LyricsCoordinator : IDisposable
                     });
                 }
             }
-            else if (!cts.Token.IsCancellationRequested)
+            else if (!restoredFromFallback && !cts.Token.IsCancellationRequested)
             {
-                // 2) 把最终选定版本（含译文）保存到缓存
+                // 2) 把最终选定版本（含译文与当前源集合签名）保存到缓存
+                CurrentLyrics.Metadata.CheckedSources = sourcesSig;
                 Task? upload = null;
                 try
                 {
@@ -497,6 +539,8 @@ public sealed class LyricsCoordinator : IDisposable
         _searchCts = cts;
 
         Unsuppress(CurrentTrack); // 用户亲自选择的歌词，解除抑制
+        lyrics.Metadata.IsManualSelection = true;
+        lyrics.Metadata.CheckedSources = _search.SourceSignature;
 
         var key = CurrentTrack is { } currentTrack
             ? LyricsCacheStore.MakeKey(currentTrack.Title, currentTrack.Artist)
@@ -521,6 +565,8 @@ public sealed class LyricsCoordinator : IDisposable
     {
         Unsuppress(track); // 编辑并保存过的曲目，解除抑制
         lyrics.Metadata.ServiceName = "用户编辑";
+        lyrics.Metadata.IsManualSelection = true;
+        lyrics.Metadata.CheckedSources = _search.SourceSignature;
         try
         {
             Cache?.Set(track.Title, track.Artist, lyrics);
@@ -545,6 +591,7 @@ public sealed class LyricsCoordinator : IDisposable
     /// <summary>
     /// 重新执行当前歌词的翻译——在改动翻译配置（引擎/密钥/API 使用开关）后立即调用，
     /// 无需等待下一曲即可对当前曲目生效。没有歌词时不做任何事。
+    /// 用户编辑或手动选定的歌词不会被在线检索静默替换。
     /// </summary>
     public async Task RetranslateCurrentAsync()
     {
@@ -552,9 +599,12 @@ public sealed class LyricsCoordinator : IDisposable
         _searchCts?.Cancel(); // 避免与进行中的搜索/翻译重叠
         var cts = new CancellationTokenSource();
         _searchCts = cts;
+        var isUserManaged = CurrentStatus?.Kind is LyricsStatusKind.Edited or LyricsStatusKind.Manual
+            || lyrics.Metadata.IsManualSelection
+            || string.Equals(lyrics.Metadata.ServiceName, "用户编辑", StringComparison.Ordinal);
         try
         {
-            if (!lyrics.HasTranslation() && CurrentTrack is { } track)
+            if (!lyrics.HasTranslation() && !isUserManaged && CurrentTrack is { } track)
             {
                 var request = LyricsSearchRequest.ByInfo(
                     track.Title, track.Artist, track.Duration?.TotalSeconds ?? 0, limit: 3);
@@ -563,6 +613,7 @@ public sealed class LyricsCoordinator : IDisposable
                     if (cts.Token.IsCancellationRequested) return;
                     if (candidate.HasTranslation() && candidate.IsMatched())
                     {
+                        candidate.Metadata.CheckedSources = _search.SourceSignature;
                         SetCurrentLyrics(candidate, LyricsCacheStore.MakeKey(track.Title, track.Artist));
                         lyrics = candidate;
                         _lastLineIndex = int.MinValue;
