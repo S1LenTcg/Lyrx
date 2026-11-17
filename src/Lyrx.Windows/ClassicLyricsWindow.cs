@@ -925,7 +925,7 @@ internal sealed partial class ClassicLyricsWindow : Window
             && _rows.TryGetValue(_activeIndex, out var activeRow))
         {
             var elapsed = adjusted - lyrics.Lines[_activeIndex].Position;
-            activeRow.UpdateKaraokeProgress(elapsed, KaraokeUnlitColor(), Colors.White, _settings.CharacterKaraoke);
+            activeRow.UpdateKaraokeProgress(elapsed, _subdued, Colors.White, _settings.CharacterKaraoke);
         }
     }
 
@@ -1676,8 +1676,6 @@ internal sealed partial class ClassicLyricsWindow : Window
         }
     }
 
-    private Color KaraokeUnlitColor() => BlendColor(_background, _subdued, 0.70);
-
     private static Color BlendColor(Color from, Color to, double amount) =>
         ClassicLyricsPalette.BlendColor(from, to, amount);
 
@@ -1704,7 +1702,7 @@ internal sealed partial class ClassicLyricsWindow : Window
         var color = isHovered ? Colors.White : RowColor(index);
         row.UpdateVisualState(isActive, isPast, color, animate, isHovered);
         if (isActive && !isHovered)
-            row.RefreshKaraokeColors(KaraokeUnlitColor(), Colors.White, _settings.CharacterKaraoke);
+            row.RefreshKaraokeColors(_subdued, Colors.White, _settings.CharacterKaraoke);
     }
 
     private static void SetRowVisual(LyricRow row, bool isActive, bool isPast, Color color, bool animate, bool isHovered = false)

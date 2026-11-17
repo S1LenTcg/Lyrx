@@ -7,10 +7,30 @@ Lyrx 是一款面向 Windows 和 Android 的双语歌词伴侣。在你平常用
 请前往 [GitHub Releases](https://github.com/S1LenTcg/Lyrx/releases)，选择适合你的平台的发布文件。也可以从源码自行构建。
 
 - **Windows 便携版（Windows 10 2004+ 或 Windows 11，x64）** — 下载并完整解压 `Lyrx-Windows-x64.zip`。运行 `Lyrx.exe`，再在播放器里播放一首歌。
-- **Android APK（Android 8.0+，arm64）** — 安装 `Lyrx-Android-arm64.apk`，首次打开时按提示授予「通知使用权」，然后在播放器里播放音乐。
+- **Android APK（Android 8.0+，arm64）** — 下载并安装 [Lyrx-Android-arm64.apk](https://github.com/S1LenTcg/Lyrx/releases/download/v1.0.0/Lyrx-Android-arm64.apk)，首次打开时按提示授予「通知使用权」，然后在播放器里播放音乐。
   - **Android 13 及以上注意**：若通过 APK 安装后「通知使用权」开关呈灰色无法开启，请先前往 **系统设置 → 应用 → Lyrx → 右上角 `⋮` → 允许受限设置**，再返回授予权限。
 
 Lyrx 通过系统媒体会话读取曲目和进度；暂停、切歌、跳转等控制取决于播放器开放的能力。使用网页播放器时，Windows 端默认已包含浏览器音频，Android 端可在设置中开启「包含浏览器音频」；两端均支持在设置中通过偏好白名单或固定播放源过滤不需要的媒体应用。
+
+### Windows 无法识别播放器
+
+1. **先检查 Windows 是否收到歌曲信息。** 播放一首歌，看 Windows 的媒体播放卡片能否显示歌名。若播放器设置提供「系统媒体控制」或「SMTC」开关，可以开启后重启播放器再试。QQ 音乐的开关在「设置 → 常规设置 → 通知」。
+2. **检查 Lyrx 选中的播放源。** 保持音乐播放，重新打开 Lyrx 的「设置 → 播放与窗口 → 播放源」。如果列表里有目标播放器，可以直接锁定它，或选择「自动检测」并点击「清空限制」。使用网页播放器时，还需检查「包含浏览器音频」。
+3. **仍显示「等待播放」时收集日志。** 如果 Windows 的媒体播放卡片已经显示正确的歌名，请按下方的问题反馈说明提供播放器名称和版本、Windows 版本，以及日志中 `[smtc] 会话列表` 和 `[smtc] 选择` 附近的几行。如果 Lyrx 已经显示歌名，请在反馈里注明是找不到歌词，还是歌词进度不对。
+
+#### 网易云桌面版接入指南（BetterNCM 与 InfLink-rs）
+
+如果网易云桌面版播放时没有出现在 Windows 媒体卡片和 Lyrx 的播放源列表里，可以用 InfLink-rs 让它向 Windows 上报歌名和播放进度。
+
+1. **安装 BetterNCM。** 先从系统托盘退出网易云。在 Lyrx 的「设置 → 播放与窗口 → 播放源」中找到「网易云音乐插件」，点击「下载 BetterNCM 安装器」。在发布页的 Assets 下载并运行 `betterncm_installer.exe`，按提示完成安装，再打开网易云。也可以直接打开 [BetterNCM 安装器发布页](https://github.com/std-microblock/BetterNCM-Installer/releases/latest)。
+2. **安装 InfLink-rs。** 在同一处点击「安装 InfLink-rs…」，选中 BetterNCM 的 `plugins` 文件夹，默认位置是 `C:\betterncm\plugins\`。如果装过旧版 InfLink（InfinityLink），请先停用旧插件。安装后从系统托盘退出并重新打开网易云。若使用的 Lyrx 版本还没有此入口，可以从 BetterNCM 插件商店安装，或从 [InfLink-rs 发布页](https://github.com/apoint123/inflink-rs/releases/latest) 下载 `InfLink-rs.plugin` 并放入同一目录。
+3. **在 Lyrx 验证。** 在网易云播放一首歌，然后打开 Lyrx 的「设置 → 播放与窗口 → 播放源」，选择「锁定：网易云音乐」。切一首歌，确认 Lyrx 显示的歌名也随之更新。
+
+InfLink-rs 作者公布的网易云测试版本为 `3.1.20` 至 `3.1.41`，以及 `2.10.13`。我们也在一台 Windows 电脑上确认了 Lyrx 可以识别网易云 `3.1.43.205627` 搭配 InfLink-rs `3.4.0` 上报的曲目。[插件说明与兼容列表](https://github.com/apoint123/inflink-rs#已测试的网易云音乐版本)
+
+Windows 便携包中的 `integrations/netease/` 目录保存 InfLink-rs 插件、对应源码和许可证，请随 `Lyrx.exe` 一起保留。 [随附插件说明](integrations/netease/README.md)
+
+也可以使用网易云网页版。网页播放时 Windows 若能显示歌名，在 Lyrx 开启「包含浏览器音频」，再从「播放源」选择当前浏览器。
 
 ## 功能
 

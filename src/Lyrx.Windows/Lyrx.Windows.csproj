@@ -14,7 +14,7 @@
     <Title>Lyrx</Title>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>assets\app.ico</ApplicationIcon>
-    <Version>1.0.0</Version>
+    <Version>1.0.1</Version>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
   </PropertyGroup>
 
@@ -31,6 +31,12 @@
   <ItemGroup>
     <Resource Include="assets\app.ico" />
     <EmbeddedResource Include="i18n\*.json" />
+    <Content Include="..\..\integrations\netease\*">
+      <Link>integrations\netease\%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+    </Content>
     <Content Include="..\..\android\Lyrx.Android\Assets\fonts\SpotifyMix*.ttf">
       <Link>local-fonts\%(Filename)%(Extension)</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>

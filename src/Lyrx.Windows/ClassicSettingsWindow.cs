@@ -277,6 +277,8 @@ internal sealed class ClassicSettingsWindow : Window
             browserToggle));
 
         sourceCard.Children.Add(CreateDivider());
+        AddNetEasePluginSettings(sourceCard);
+        sourceCard.Children.Add(CreateDivider());
 
         var preferredHeader = new DockPanel { Margin = new Thickness(0, 2, 0, 4) };
         var clearPreferredBtn = SmallToolButton("清空限制");
@@ -985,6 +987,63 @@ internal sealed class ClassicSettingsWindow : Window
                 ShowStatus("请每次拖入一个字体文件。");
         };
         RefreshChoices();
+    }
+
+    private void AddNetEasePluginSettings(StackPanel host)
+    {
+        host.Children.Add(new TextBlock
+        {
+            Text = "网易云音乐插件",
+            FontSize = 13,
+            FontWeight = FontWeights.SemiBold,
+            Foreground = TextPrimary,
+            Margin = new Thickness(0, 2, 0, 4),
+        });
+        var hint = HintLabel("找不到网易云音乐时，先退出网易云并安装 BetterNCM，再用 Lyrx 安装 InfLink-rs。已有旧版 InfLink 时，请先停用。");
+        hint.TextWrapping = TextWrapping.Wrap;
+        host.Children.Add(hint);
+
+        var actions = new WrapPanel { Margin = new Thickness(0, 5, 0, 0) };
+        var openInstaller = SmallToolButton("下载 BetterNCM 安装器");
+        var install = SmallToolButton("安装 InfLink-rs…");
+        actions.Children.Add(openInstaller);
+        actions.Children.Add(install);
+        host.Children.Add(actions);
+
+        install.Click += (_, _) =>
+        {
+            var dialog = new Microsoft.Win32.OpenFolderDialog
+            {
+                Title = "选择 BetterNCM 的 plugins 文件夹",
+                AddToRecent = false,
+            };
+            if (Directory.Exists(NetEasePluginInstaller.DefaultPluginDirectory))
+                dialog.InitialDirectory = NetEasePluginInstaller.DefaultPluginDirectory;
+            if (dialog.ShowDialog(this) != true)
+                return;
+
+            try
+            {
+                var installed = NetEasePluginInstaller.Install(dialog.FolderName);
+                var message = installed
+                    ? "已复制 InfLink-rs。请从系统托盘退出并重新打开网易云，播放一首歌，再重新打开 Lyrx 的播放源设置。"
+                    : "这个目录已安装相同版本的 InfLink-rs。";
+                MessageBox.Show(this, message, "网易云音乐插件", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidDataException)
+            {
+                MessageBox.Show(this, error.Message, "InfLink-rs 安装失败", MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
+        };
+        openInstaller.Click += (_, _) =>
+        {
+            const string url = "https://github.com/std-microblock/BetterNCM-Installer/releases/latest";
+            try { Process.Start(new ProcessStartInfo(url) { UseShellExecute = true }); }
+            catch (System.ComponentModel.Win32Exception)
+            {
+                MessageBox.Show(this, url, "BetterNCM 下载页", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
+        };
     }
 
     private static StackPanel AddSectionCard(StackPanel host, string title)
