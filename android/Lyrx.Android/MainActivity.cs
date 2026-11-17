@@ -497,6 +497,15 @@ public sealed class MainActivity : Activity
         return (sidePad, sidePad);
     }
 
+    private static (int TopDp, int MinBottomDp, int BaseBottomDp) GetPortraitConsoleVerticalDpSpec(bool isTablet) =>
+        isTablet ? (16, 22, 18) : (12, 18, 14);
+
+    private (int TopPad, int BottomPad) ComputePortraitConsoleVerticalPadding(bool isTablet, int bottomInset)
+    {
+        var (topDp, minBottomDp, baseBottomDp) = GetPortraitConsoleVerticalDpSpec(isTablet);
+        return (Dp(topDp), Math.Max(Dp(minBottomDp), Dp(baseBottomDp) + Math.Max(0, bottomInset)));
+    }
+
     private void ApplyResponsiveLayout(bool isLandscape)
     {
         _isLandscapeLayout = isLandscape;
@@ -1120,7 +1129,8 @@ public sealed class MainActivity : Activity
             Orientation = global::Android.Widget.Orientation.Vertical,
         };
         _footerView.SetBackgroundColor(LyricsPalette.ChromeBackground);
-        _footerView.SetPadding(Dp(14), Dp(6), Dp(14), Dp(10));
+        var (initTopPad, initBottomPad) = ComputePortraitConsoleVerticalPadding(IsTablet(), _insetBottom);
+        _footerView.SetPadding(Dp(14), initTopPad, Dp(14), initBottomPad);
 
         _coverFrame = new FrameLayout(this)
         {
@@ -1418,7 +1428,8 @@ public sealed class MainActivity : Activity
         else
         {
             var (portLeft, portRight) = ComputePortraitConsolePadding(left, right);
-            _footerView.SetPadding(portLeft, Dp(isTablet ? 10 : 6), portRight, Dp(isTablet ? 14 : 10) + bottom);
+            var (portTop, portBottom) = ComputePortraitConsoleVerticalPadding(isTablet, bottom);
+            _footerView.SetPadding(portLeft, portTop, portRight, portBottom);
         }
 
         var (lyricsLeftPad, lyricsRightPad) = ComputeLyricsHorizontalPadding(isTablet, consoleWidth);
