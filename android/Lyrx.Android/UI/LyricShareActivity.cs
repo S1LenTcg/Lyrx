@@ -27,16 +27,14 @@ internal sealed record LyricSharePayload(
     bool DefaultShowTranslation);
 
 /// <summary>
-/// 独立全屏歌词分享编辑页：
-/// 顶部含大圆角卡片样式切换（Spotify / Apple Music），中部实时高分辨率卡片预览，
-/// 底部提供「颜色」（悬浮色板弹窗）与「图像」（自定义背景图）以及「保存图片」「分享图片」。
+/// 独立全屏歌词分享编辑页，支持卡片预览、背景和排版编辑以及 PNG 导出。
 /// </summary>
 [Activity(
     Label = "歌词分享",
     Theme = "@style/LyrxTheme",
     Exported = false,
     ConfigurationChanges = ConfigChanges.Orientation | ConfigChanges.ScreenSize | ConfigChanges.SmallestScreenSize | ConfigChanges.UiMode)]
-public sealed class LyricShareActivity : Activity
+public sealed partial class LyricShareActivity : Activity
 {
     private const int RequestCodeSaveToGallery = 4103;
 
@@ -159,15 +157,15 @@ public sealed class LyricShareActivity : Activity
 
         public void SetMonetPalette(Color themeColor, Color? coverHueFallback)
         {
-            var (thumbColor, activeInk) = LyricsPalette.SoftMonetPill(themeColor, coverHueFallback);
-            var trackTint = LyricsPalette.BlendColor(Color.Rgb(24, 24, 26), themeColor, 0.16);
-            var borderTint = LyricsPalette.BlendColor(Color.Rgb(86, 86, 92), thumbColor, 0.34);
+            var (monetSurface, activeInk) = LyricsPalette.SoftMonetPill(themeColor, coverHueFallback);
+            var thumbColor = LyricsPalette.BlendColor(monetSurface, Color.Rgb(245, 247, 246), 0.42);
+            var trackTint = LyricsPalette.BlendColor(Color.Rgb(10, 12, 12), themeColor, 0.14);
 
-            _trackPaint.Color = Color.Argb(204, trackTint.R, trackTint.G, trackTint.B);
-            _borderPaint.Color = Color.Argb(96, borderTint.R, borderTint.G, borderTint.B);
+            _trackPaint.Color = Color.Argb(118, trackTint.R, trackTint.G, trackTint.B);
+            _borderPaint.Color = Color.Argb(34, 255, 255, 255);
             _thumbPaint.Color = thumbColor;
             _activeInk = activeInk;
-            _inactiveInk = LyricsPalette.BlendColor(Color.Rgb(196, 198, 200), thumbColor, 0.14);
+            _inactiveInk = Color.Argb(212, 255, 255, 255);
 
             SyncLabelAppearance();
             Invalidate();
@@ -307,14 +305,291 @@ public sealed class LyricShareActivity : Activity
         }
     }
 
+    private sealed class EditorBackCallback : Java.Lang.Object, global::Android.Window.IOnBackInvokedCallback
+    {
+        private readonly WeakReference<LyricShareActivity>? _owner;
+
+        [DynamicDependency(DynamicallyAccessedMemberTypes.PublicConstructors, typeof(EditorBackCallback))]
+        public EditorBackCallback()
+        {
+        }
+
+        public EditorBackCallback(IntPtr javaReference, JniHandleOwnership transfer) : base(javaReference, transfer)
+        {
+        }
+
+        public EditorBackCallback(LyricShareActivity owner) => _owner = new WeakReference<LyricShareActivity>(owner);
+
+        public void OnBackInvoked()
+        {
+            if (_owner is not null && _owner.TryGetTarget(out var owner))
+                owner.CloseEditor();
+        }
+    }
+
+    private sealed class SpotifyToggleView : View
+    {
+        private readonly Paint _trackPaint = new(PaintFlags.AntiAlias);
+        private readonly Paint _thumbPaint = new(PaintFlags.AntiAlias) { Color = Color.White };
+        private ValueAnimator? _anim;
+        private float _progress;
+        private bool _checked;
+
+        public bool Checked => _checked;
+
+        public SpotifyToggleView(Context context, bool initialChecked) : base(context)
+        {
+            _checked = initialChecked;
+            _progress = initialChecked ? 1f : 0f;
+            _trackPaint.SetStyle(Paint.Style.Fill);
+            _thumbPaint.SetStyle(Paint.Style.Fill);
+        }
+
+        public void SetChecked(bool value, bool animate)
+        {
+            if (_checked == value) return;
+            _checked = value;
+            var target = value ? 1f : 0f;
+            _anim?.Cancel();
+            if (!animate)
+            {
+                _progress = target;
+                Invalidate();
+                return;
+            }
+
+            if (ValueAnimator.OfFloat(_progress, target) is not { } anim)
+            {
+                _progress = target;
+                Invalidate();
+                return;
+            }
+            anim.SetDuration(160);
+            anim.SetInterpolator(new DecelerateInterpolator(1.5f));
+            anim.Update += (_, e) =>
+            {
+                if (e.Animation?.AnimatedValue is Java.Lang.Float val)
+                {
+                    _progress = Math.Clamp(val.FloatValue(), 0f, 1f);
+                    Invalidate();
+                }
+            };
+            _anim = anim;
+            anim.Start();
+        }
+
+        protected override void OnDraw(Canvas canvas)
+        {
+            base.OnDraw(canvas);
+            var w = Width;
+            var h = Height;
+            if (w <= 0 || h <= 0) return;
+
+            var r = h / 2f;
+            var offColor = Color.Argb(76, 255, 255, 255);
+            var onColor = LyricsPalette.AccentGreen;
+            _trackPaint.Color = Color.Argb(
+                (byte)Math.Round(offColor.A + (onColor.A - offColor.A) * _progress),
+                (byte)Math.Round(offColor.R + (onColor.R - offColor.R) * _progress),
+                (byte)Math.Round(offColor.G + (onColor.G - offColor.G) * _progress),
+                (byte)Math.Round(offColor.B + (onColor.B - offColor.B) * _progress));
+            canvas.DrawRoundRect(0f, 0f, w, h, r, r, _trackPaint);
+
+            var pad = MathF.Max(2f, h * 0.14f);
+            var thumbR = (h - pad * 2f) / 2f;
+            var travel = MathF.Max(0f, w - pad * 2f - thumbR * 2f);
+            var cx = pad + thumbR + travel * _progress;
+            canvas.DrawCircle(cx, h / 2f, thumbR, _thumbPaint);
+        }
+    }
+
+    private sealed class SpotifySliderView : View
+    {
+        private readonly Paint _bgPaint = new(PaintFlags.AntiAlias);
+        private readonly Paint _activePaint = new(PaintFlags.AntiAlias) { Color = LyricsPalette.AccentGreen };
+        private readonly Paint _haloPaint = new(PaintFlags.AntiAlias) { Color = Color.Argb(48, 255, 255, 255) };
+        private readonly Paint _thumbPaint = new(PaintFlags.AntiAlias) { Color = Color.White };
+        private ValueAnimator? _dragAnim;
+        private int _min;
+        private int _max = 100;
+        private int _value;
+        private float _dragScale;
+        private bool _dragging;
+
+        public event Action<int>? ValueChanged;
+
+        public int Value => _value;
+
+        public SpotifySliderView(Context context, int min, int max, int initialValue) : base(context)
+        {
+            _min = min;
+            _max = Math.Max(min + 1, max);
+            _value = Math.Clamp(initialValue, _min, _max);
+            _bgPaint.Color = Color.Argb(58, 255, 255, 255);
+            _bgPaint.SetStyle(Paint.Style.Fill);
+            _activePaint.SetStyle(Paint.Style.Fill);
+            _haloPaint.SetStyle(Paint.Style.Fill);
+            _thumbPaint.SetStyle(Paint.Style.Fill);
+            Clickable = true;
+            Focusable = true;
+        }
+
+        public void SetValue(int value)
+        {
+            var clamped = Math.Clamp(value, _min, _max);
+            if (_value == clamped) return;
+            _value = clamped;
+            Invalidate();
+        }
+
+        public void SetRange(int min, int max, int value)
+        {
+            _min = min;
+            _max = Math.Max(min + 1, max);
+            _value = Math.Clamp(value, _min, _max);
+            Invalidate();
+        }
+
+        private void AnimateDrag(bool active)
+        {
+            var target = active ? 1f : 0f;
+            _dragAnim?.Cancel();
+            if (ValueAnimator.OfFloat(_dragScale, target) is not { } anim)
+            {
+                _dragScale = target;
+                Invalidate();
+                return;
+            }
+            anim.SetDuration(active ? 110 : 170);
+            anim.SetInterpolator(new DecelerateInterpolator(1.5f));
+            anim.Update += (_, e) =>
+            {
+                if (e.Animation?.AnimatedValue is Java.Lang.Float val)
+                {
+                    _dragScale = Math.Clamp(val.FloatValue(), 0f, 1f);
+                    Invalidate();
+                }
+            };
+            _dragAnim = anim;
+            anim.Start();
+        }
+
+        public override bool OnTouchEvent(MotionEvent? e)
+        {
+            if (e is null || !Enabled) return base.OnTouchEvent(e);
+            switch (e.ActionMasked)
+            {
+                case MotionEventActions.Down:
+                    Parent?.RequestDisallowInterceptTouchEvent(true);
+                    _dragging = true;
+                    AnimateDrag(true);
+                    UpdateFromX(e.GetX());
+                    return true;
+
+                case MotionEventActions.Move:
+                    if (_dragging)
+                        UpdateFromX(e.GetX());
+                    return true;
+
+                case MotionEventActions.Up:
+                case MotionEventActions.Cancel:
+                    if (_dragging)
+                    {
+                        if (e.ActionMasked == MotionEventActions.Up)
+                            UpdateFromX(e.GetX());
+                        _dragging = false;
+                        AnimateDrag(false);
+                    }
+                    return true;
+            }
+            return base.OnTouchEvent(e);
+        }
+
+        private void UpdateFromX(float x)
+        {
+            var pad = UiHelpers.Dp(Context!, 10);
+            var span = MathF.Max(1f, Width - pad * 2f);
+            var t = Math.Clamp((x - pad) / span, 0f, 1f);
+            var next = (int)MathF.Round(_min + t * (_max - _min));
+            if (next != _value)
+            {
+                _value = next;
+                Invalidate();
+                ValueChanged?.Invoke(_value);
+            }
+        }
+
+        protected override void OnDraw(Canvas canvas)
+        {
+            base.OnDraw(canvas);
+            var w = Width;
+            var h = Height;
+            if (w <= 0 || h <= 0) return;
+
+            var pad = UiHelpers.Dp(Context!, 10);
+            var span = MathF.Max(1f, w - pad * 2f);
+            var cy = h / 2f;
+            var trackH = UiHelpers.Dp(Context!, 4);
+            var trackR = trackH / 2f;
+
+            var t = Math.Clamp((_value - _min) / (float)(_max - _min), 0f, 1f);
+            var thumbX = pad + span * t;
+
+            canvas.DrawRoundRect(pad, cy - trackR, w - pad, cy + trackR, trackR, trackR, _bgPaint);
+            if (thumbX > pad)
+                canvas.DrawRoundRect(pad, cy - trackR, thumbX, cy + trackR, trackR, trackR, _activePaint);
+
+            if (_dragScale > 0.01f)
+            {
+                var haloR = UiHelpers.Dp(Context!, 15) * _dragScale;
+                _haloPaint.Alpha = (int)(52 * _dragScale);
+                canvas.DrawCircle(thumbX, cy, haloR, _haloPaint);
+            }
+
+            var thumbR = UiHelpers.Dp(Context!, 7.5f) + UiHelpers.Dp(Context!, 2f) * _dragScale;
+            canvas.DrawCircle(thumbX, cy, thumbR, _thumbPaint);
+        }
+    }
+
     private const int RequestCodePickImage = 2001;
 
-    private static LyricSharePayload? _pendingPayload;
-
-    internal static void Launch(Activity caller, int requestCode, LyricSharePayload payload)
+    internal static void Launch(
+        Activity caller,
+        int requestCode,
+        LyricSharePayload payload,
+        ScreenOrientation? overrideOrientation = null)
     {
-        _pendingPayload = payload;
-        var intent = new Intent(caller, typeof(LyricShareActivity));
+        using var intent = new Intent(caller, typeof(LyricShareActivity));
+        intent.PutExtra("title", payload.TrackTitle);
+        intent.PutExtra("artist", payload.ArtistName);
+        intent.PutExtra("coverColor", payload.CoverBackground.ToArgb());
+        intent.PutExtra("originals", payload.Lines.Select(line => line.Original).ToArray());
+        intent.PutExtra("translations", payload.Lines.Select(line => line.Translation ?? "").ToArray());
+        intent.PutExtra("showTranslation", payload.DefaultShowTranslation);
+        var orientation = overrideOrientation ?? (LyrxApp.Instance.Settings.OrientationMode switch
+        {
+            "landscape" => ScreenOrientation.SensorLandscape,
+            "portrait" => ScreenOrientation.Portrait,
+            "sensor" => ScreenOrientation.FullSensor,
+            _ => ScreenOrientation.Unspecified,
+        });
+        intent.PutExtra("orientation", (int)orientation);
+        if (payload.CoverBitmap is { IsRecycled: false } cover)
+        {
+            try
+            {
+                var scale = Math.Min(1f, 960f / Math.Max(cover.Width, cover.Height));
+                using var thumbnail = scale < 1f
+                    ? Bitmap.CreateScaledBitmap(cover, Math.Max(1, (int)(cover.Width * scale)), Math.Max(1, (int)(cover.Height * scale)), true)
+                    : null;
+                using var coverUri = ShareImageHelper.SaveTempSharePng(caller, thumbnail ?? cover, "editor-cover");
+                intent.PutExtra("cover", coverUri.ToString());
+            }
+            catch (Exception ex)
+            {
+                AndroidLog.Write($"[share] 无法保存封面快照: {ex.Message}");
+            }
+        }
 #pragma warning disable CA1422
         caller.StartActivityForResult(intent, requestCode);
         if (!OperatingSystem.IsAndroidVersionAtLeast(34))
@@ -331,9 +606,12 @@ public sealed class LyricShareActivity : Activity
     private bool _isExporting;
     private bool _disposed;
     private bool _isLandscapeLayout;
+    private bool _hasExported;
 
     private Bitmap? _customBgBitmap;
     private Color _customBgThemeColor;
+    private string? _customBgUri;
+    private int _imageLoadVersion;
     private Bitmap? _previewBitmap;
 
     private int _insetLeft;
@@ -350,19 +628,30 @@ public sealed class LyricShareActivity : Activity
     private ImageView? _outgoingPreviewImage;
     private Bitmap? _outgoingPreviewBitmap;
     private LinearLayout _controlsArea = null!;
+    private ScrollView _controlsScroll = null!;
+    private FrameLayout _controlsHost = null!;
     private LinearLayout _toolsRow = null!;
     private LinearLayout _colorTile = null!;
     private View _colorDotView = null!;
     private LinearLayout _imageTile = null!;
     private VectorIconView _imageTileIcon = null!;
-    private LinearLayout _actionsRow = null!;
+    private View _imageTileDot = null!;
+    private LinearLayout _fontTile = null!;
+    private VectorIconView _fontTileIcon = null!;
+    private LinearLayout _actionsHost = null!;
+    private LinearLayout _actionsSecondaryRow = null!;
     private LinearLayout _saveBtn = null!;
     private LinearLayout _shareBtn = null!;
+    private LinearLayout _copyBtn = null!;
+    private LinearLayout _backdropToggleRow = null!;
+    private SpotifyToggleView _backdropToggle = null!;
 
     private StyleSwitchPillView _stylePill = null!;
     private FrameLayout? _translationHost;
     private VectorIconView? _translationIcon;
-    private PopupWindow? _colorPopup;
+    private Color _currentNavBarColor = Color.Rgb(16, 16, 16);
+    private object? _editorBackCallback;
+    private ValueAnimator? _controlsSizeAnimator;
 
     private float _cardDownX;
     private float _cardDownY;
@@ -373,34 +662,75 @@ public sealed class LyricShareActivity : Activity
         base.OnCreate(savedInstanceState);
         ApplyEnterTransitionApi34();
 
-        var payload = _pendingPayload;
-        _pendingPayload = null;
-        if (payload is null || payload.Lines.Count == 0)
+        var intent = Intent;
+        if (intent?.GetStringArrayExtra("originals") is not { Length: > 0 } originals)
         {
             Finish();
             return;
         }
 
-        _payload = payload;
+        var translations = intent.GetStringArrayExtra("translations") ?? [];
+        Bitmap? cover = null;
+        if (intent.GetStringExtra("cover") is { } savedCover
+            && global::Android.Net.Uri.Parse(savedCover) is { } coverUri)
+        {
+            using (coverUri)
+                cover = DecodeSampledImageFromUri(coverUri, maxDimension: 960);
+        }
+        _payload = new LyricSharePayload(
+            intent.GetStringExtra("title"),
+            intent.GetStringExtra("artist"),
+            cover,
+            new Color(intent.GetIntExtra("coverColor", LyricsPalette.DefaultBackground.ToArgb())),
+            originals.Select((line, index) => new ShareLyricLine(line, translations.ElementAtOrDefault(index))).ToArray(),
+            intent.GetBooleanExtra("showTranslation", false));
+        var orientation = (ScreenOrientation)intent.GetIntExtra("orientation", (int)ScreenOrientation.Unspecified);
+        if (RequestedOrientation != orientation)
+            RequestedOrientation = orientation;
         _presets = LyricShareCardRenderer.BuildPresets(_payload.CoverBackground);
         _style = string.Equals(LyrxApp.Instance.Settings.LyricShareStyle, "apple-music", StringComparison.OrdinalIgnoreCase)
             ? LyricShareStyle.AppleMusic
             : LyricShareStyle.Spotify;
         _hasAnyTranslation = _payload.Lines.Any(l => !string.IsNullOrWhiteSpace(l.Translation));
-        _showTranslation = _hasAnyTranslation && _payload.DefaultShowTranslation;
+        _showTranslation = _hasAnyTranslation && (savedInstanceState?.GetBoolean("translation") ?? _payload.DefaultShowTranslation);
+        _colorIndex = Math.Clamp(savedInstanceState?.GetInt("color") ?? 0, 0, _presets.Count - 1);
+        _hasExported = savedInstanceState?.GetBoolean("exported") == true;
+        LoadEditorPreferences();
+        _lyricsFont = (ShareLyricsFont)Math.Clamp(savedInstanceState?.GetInt("font") ?? 0, 0, FontLabels.Length - 1);
+        var restoredTab = (ShareEditorTab)Math.Clamp(savedInstanceState?.GetInt("editorTab") ?? 0, 0, (int)ShareEditorTab.Typography);
 
         BuildPageUi();
         SetContentView(_rootLayout);
         ApplyChromeSystemBars();
         ApplyResponsiveLayout(DetectLandscape(Resources?.Configuration));
+        if (restoredTab != ShareEditorTab.None)
+            OpenEditor(restoredTab, animate: false);
         RefreshAllVisuals();
+
+        if (savedInstanceState?.GetString("customImage") is { } imageUri
+            && global::Android.Net.Uri.Parse(imageUri) is { } restoredUri)
+            LoadCustomBackground(restoredUri);
+    }
+
+    protected override void OnSaveInstanceState(Bundle outState)
+    {
+        SaveEditorPreferences();
+        outState.PutBoolean("translation", _showTranslation);
+        outState.PutInt("color", _colorIndex);
+        outState.PutInt("font", (int)_lyricsFont);
+        outState.PutBoolean("exported", _hasExported);
+        outState.PutString("customImage", _customBgUri);
+        outState.PutInt("editorTab", (int)_activeEditor);
+        base.OnSaveInstanceState(outState);
     }
 
     public override void OnConfigurationChanged(Configuration newConfig)
     {
         base.OnConfigurationChanged(newConfig);
-        DismissColorPopup();
+        if (_rootLayout is null) return;
         ApplyResponsiveLayout(DetectLandscape(newConfig));
+        if (_activeEditor != ShareEditorTab.None)
+            RefreshActiveEditorPanel();
         ApplyChromeSystemBars();
         _rootLayout.RequestApplyInsets();
     }
@@ -411,6 +741,18 @@ public sealed class LyricShareActivity : Activity
         if (hasFocus) ApplyChromeSystemBars();
     }
 
+#pragma warning disable CA1422
+    public override void OnBackPressed()
+    {
+        if (_activeEditor != ShareEditorTab.None)
+        {
+            CloseEditor();
+            return;
+        }
+        base.OnBackPressed();
+    }
+#pragma warning restore CA1422
+
     protected override void OnActivityResult(int requestCode, Result resultCode, Intent? data)
     {
 #pragma warning disable CA1422
@@ -419,36 +761,60 @@ public sealed class LyricShareActivity : Activity
         if (requestCode != RequestCodePickImage || resultCode != Result.Ok || data?.Data is not { } uri)
             return;
 
+        LoadCustomBackground(uri);
+    }
+
+    private void LoadCustomBackground(global::Android.Net.Uri uri)
+    {
+        var version = ++_imageLoadVersion;
+        var uriText = uri.ToString();
         _ = Task.Run(() =>
         {
-            var loaded = DecodeSampledImageFromUri(uri, maxDimension: 1600);
-            RunOnUiThread(() =>
+            using (uri)
             {
-                if (_disposed || IsFinishing || IsDestroyed)
+                var loaded = DecodeSampledImageFromUri(uri, maxDimension: 1600);
+                var theme = loaded is null ? default : ReadCustomImageColor(loaded);
+                RunOnUiThread(() =>
                 {
-                    if (loaded is not null && !loaded.IsRecycled) loaded.Recycle();
-                    return;
-                }
+                    if (_disposed || IsFinishing || IsDestroyed || version != _imageLoadVersion)
+                    {
+                        loaded?.Dispose();
+                        return;
+                    }
 
-                if (loaded is null)
-                {
-                    Toast.MakeText(this, "无法读取所选图片，请换一张重试", ToastLength.Short)?.Show();
-                    return;
-                }
+                    if (loaded is null)
+                    {
+                        Toast.MakeText(this, "无法读取所选图片，请换一张重试", ToastLength.Short)?.Show();
+                        return;
+                    }
 
-                var prevCustom = _customBgBitmap;
-                _customBgBitmap = loaded;
-                (_customBgThemeColor, _) = LyricsPalette.FromCover(loaded);
-                RefreshAllVisuals();
-                if (prevCustom is not null && !prevCustom.IsRecycled)
-                    prevCustom.Recycle();
-            });
+                    _customBgBitmap = loaded;
+                    _customBgUri = uriText;
+                    _customBgThemeColor = theme;
+                    _backgroundMode = ShareBackgroundMode.CustomImage;
+                    RefreshAllVisuals(crossfade: true);
+                    if (_activeEditor != ShareEditorTab.None)
+                        RefreshActiveEditorPanel();
+                });
+            }
         });
+    }
+
+    private Color ReadCustomImageColor(Bitmap bitmap)
+    {
+        try { return LyricsPalette.ShareCardColor(LyricsPalette.FromCover(bitmap).Background); }
+        catch (Exception ex)
+        {
+            AndroidLog.Write($"[share] 无法提取背景图颜色: {ex.Message}");
+            return _presets[0].BaseColor;
+        }
     }
 
     public override void Finish()
     {
-        DismissColorPopup();
+        SaveEditorPreferences();
+        UnregisterEditorBackCallback();
+        if (_hasExported) SetResult(Result.Ok);
         base.Finish();
         ApplyExitTransition();
     }
@@ -456,14 +822,21 @@ public sealed class LyricShareActivity : Activity
     protected override void OnDestroy()
     {
         _disposed = true;
-        DismissColorPopup();
+        SaveEditorPreferences();
+        UnregisterEditorBackCallback();
+        _controlsSizeAnimator?.Cancel();
+        _controlsSizeAnimator?.Dispose();
+        _controlsSizeAnimator = null;
+        _controlsScroll?.Animate()?.Cancel();
+        _editorPanel?.Animate()?.Cancel();
+        _editorBody?.Animate()?.Cancel();
+        _previewImage?.Animate()?.Cancel();
+        CancelPreviewRefresh();
         ClearOutgoingPreview();
-        _previewImage.SetImageDrawable(null);
-        if (_previewBitmap is not null && !_previewBitmap.IsRecycled)
-            _previewBitmap.Recycle();
+        _previewImage?.SetImageDrawable(null);
+        _previewBitmap?.Dispose();
         _previewBitmap = null;
-        if (_customBgBitmap is not null && !_customBgBitmap.IsRecycled)
-            _customBgBitmap.Recycle();
+        // 导出任务持有自己的图片引用，来源位图在任务结束后由运行时回收。
         _customBgBitmap = null;
         base.OnDestroy();
     }
@@ -472,7 +845,7 @@ public sealed class LyricShareActivity : Activity
     {
         _pageBgDrawable = new GradientDrawable(
             GradientDrawable.Orientation.TopBottom,
-            [Color.Rgb(16, 16, 16).ToArgb(), Color.Rgb(16, 16, 16).ToArgb(), Color.Rgb(28, 48, 34).ToArgb()]);
+            [Color.Rgb(12, 14, 13).ToArgb(), Color.Rgb(16, 26, 20).ToArgb(), Color.Rgb(24, 72, 48).ToArgb()]);
 
         _rootLayout = new LinearLayout(this)
         {
@@ -481,7 +854,7 @@ public sealed class LyricShareActivity : Activity
         };
         _rootLayout.SetOnApplyWindowInsetsListener(new InsetsListener(this));
 
-        // 1. 顶部栏：返回箭头 + 大圆角卡片样式切换 + （可选译文切换 / 对称占位）
+        // 1. 顶部栏：极简返回箭头 + 样式胶囊 +（可选译文按钮）
         _topBar = new LinearLayout(this)
         {
             Orientation = global::Android.Widget.Orientation.Horizontal,
@@ -492,16 +865,17 @@ public sealed class LyricShareActivity : Activity
             this,
             ClassicIconKind.ArrowLeft,
             Color.White,
-            () => { SetResult(Result.Canceled); Finish(); },
+            Finish,
             sizeDp: 38,
-            iconFraction: 0.62f);
+            iconFraction: 0.60f);
+        backBtn.ContentDescription = "返回歌词选择";
         _topBar.AddView(backBtn, new LinearLayout.LayoutParams(Dp(38), Dp(38)));
 
         var switcherCenter = new FrameLayout(this);
         _stylePill = new StyleSwitchPillView(this, _style);
         _stylePill.StyleSelected += nextStyle => SwitchStyle(nextStyle, fromPill: true);
 
-        switcherCenter.AddView(_stylePill, new FrameLayout.LayoutParams(ComputeStylePillWidth(), Dp(38))
+        switcherCenter.AddView(_stylePill, new FrameLayout.LayoutParams(ComputeStylePillWidth(), Dp(36))
         {
             Gravity = GravityFlags.Center,
         });
@@ -521,8 +895,9 @@ public sealed class LyricShareActivity : Activity
             trHost.Click += (_, _) =>
             {
                 _showTranslation = !_showTranslation;
-                RefreshAllVisuals();
+                RefreshAllVisuals(crossfade: true);
             };
+            AttachPressSpring(trHost);
             _translationHost = trHost;
             _translationIcon = trIcon;
             _topBar.AddView(trHost, new LinearLayout.LayoutParams(Dp(38), Dp(38)));
@@ -531,15 +906,17 @@ public sealed class LyricShareActivity : Activity
         {
             _topBar.AddView(new View(this), new LinearLayout.LayoutParams(Dp(38), Dp(38)));
         }
+        AttachPressSpring(backBtn);
 
         _rootLayout.AddView(_topBar, new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent));
 
-        // 2. 主内容区（预览区 + 底部「颜色 / 图像」及「保存图片 / 分享图片」）
+        // 2. 主内容区（预览区 + 底部/右侧 Spotify 风格编辑控制区）
         _contentArea = new LinearLayout(this)
         {
             Orientation = global::Android.Widget.Orientation.Vertical,
         };
+        _contentArea.LayoutChange += (_, _) => UpdateControlsHostBounds();
 
         _previewStage = new FrameLayout(this) { Clickable = true };
         _previewStage.LayoutChange += (_, _) => UpdatePreviewImageMaxBounds();
@@ -548,7 +925,7 @@ public sealed class LyricShareActivity : Activity
         _previewImage = new ImageView(this)
         {
             ClipToOutline = true,
-            Elevation = Dp(14),
+            Elevation = Dp(16),
         };
         _previewImage.SetAdjustViewBounds(true);
         _previewImage.SetScaleType(ImageView.ScaleType.FitCenter);
@@ -558,13 +935,22 @@ public sealed class LyricShareActivity : Activity
             Gravity = GravityFlags.Center,
         });
 
+        _controlsHost = new FrameLayout(this);
+
         _controlsArea = new LinearLayout(this)
         {
             Orientation = global::Android.Widget.Orientation.Vertical,
         };
-        _controlsArea.SetGravity(GravityFlags.CenterHorizontal);
+        _controlsArea.SetGravity(GravityFlags.Center);
+        _controlsScroll = new ScrollView(this)
+        {
+            VerticalScrollBarEnabled = false,
+            FillViewport = true,
+        };
+        _controlsScroll.AddView(_controlsArea, new ScrollView.LayoutParams(
+            ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent));
 
-        // 2a. 颜色 + 图像入口卡片行
+        // 2a. Spotify 风格方圆角工具块：配色 / 背景 / 排版
         _toolsRow = new LinearLayout(this)
         {
             Orientation = global::Android.Widget.Orientation.Horizontal,
@@ -572,54 +958,125 @@ public sealed class LyricShareActivity : Activity
         _toolsRow.SetGravity(GravityFlags.Center);
 
         (_colorTile, _colorDotView) = BuildColorToolTile();
-        _colorTile.Click += (_, _) => ToggleColorPickerPopup();
+        _colorTile.Click += (_, _) => OpenEditor(ShareEditorTab.Color);
+        AttachPressSpring(_colorTile);
 
-        (_imageTile, _imageTileIcon) = BuildImageToolTile();
-        _imageTile.Click += (_, _) => OpenCustomBackgroundPicker();
+        (_imageTile, _imageTileIcon, _imageTileDot) = BuildImageToolTile();
+        _imageTile.Click += (_, _) => OpenEditor(ShareEditorTab.Background);
+        AttachPressSpring(_imageTile);
 
-        _toolsRow.AddView(_colorTile, new LinearLayout.LayoutParams(Dp(86), Dp(74))
+        (_fontTile, _fontTileIcon) = BuildTypographyToolTile();
+        _fontTile.Click += (_, _) => OpenEditor(ShareEditorTab.Typography);
+        AttachPressSpring(_fontTile);
+
+        _toolsRow.AddView(_colorTile);
+        _toolsRow.AddView(_imageTile);
+        _toolsRow.AddView(_fontTile);
+
+        // 2b. 保存、复制和分享
+        _actionsHost = new LinearLayout(this)
         {
-            RightMargin = Dp(16),
-        });
-        _toolsRow.AddView(_imageTile, new LinearLayout.LayoutParams(Dp(86), Dp(74)));
-
-        // 2b. 保存图片 + 分享图片按钮行
-        _actionsRow = new LinearLayout(this)
+            Orientation = global::Android.Widget.Orientation.Vertical,
+        };
+        _actionsSecondaryRow = new LinearLayout(this)
         {
             Orientation = global::Android.Widget.Orientation.Horizontal,
         };
-        _actionsRow.SetGravity(GravityFlags.CenterVertical);
+        _actionsSecondaryRow.SetGravity(GravityFlags.CenterVertical);
 
         _saveBtn = BuildBottomActionPill(
             ClassicIconKind.Download,
-            "保存图片",
-            Color.Argb(205, 36, 36, 36),
+            "保存",
+            Color.Argb(98, 0, 0, 0),
             Color.White,
-            Color.Argb(72, 255, 255, 255));
+            Color.Argb(38, 255, 255, 255));
         _saveBtn.Click += (_, _) => ExportAndSaveToGallery();
+        _saveBtn.ContentDescription = "保存图片";
+        AttachPressSpring(_saveBtn);
+
+        _copyBtn = BuildBottomActionPill(
+            ClassicIconKind.Copy,
+            "复制",
+            Color.Argb(98, 0, 0, 0),
+            Color.White,
+            Color.Argb(38, 255, 255, 255));
+        _copyBtn.Click += (_, _) => ExportAndCopy();
+        _copyBtn.ContentDescription = "复制图片";
+        AttachPressSpring(_copyBtn);
 
         _shareBtn = BuildBottomActionPill(
             ClassicIconKind.Share,
-            "分享图片",
+            "分享",
             Color.White,
             Color.Rgb(18, 18, 18),
             null);
         _shareBtn.Elevation = Dp(4);
         _shareBtn.Click += (_, _) => ExportAndShareSystem();
+        _shareBtn.ContentDescription = "分享图片";
+        AttachPressSpring(_shareBtn);
 
-        _actionsRow.AddView(_saveBtn, new LinearLayout.LayoutParams(0, Dp(46), 1f)
+        // 2c. 剪贴板保留背景开关（Spotify 样式开关）
+        _backdropToggleRow = new LinearLayout(this)
         {
-            RightMargin = Dp(12),
+            Orientation = global::Android.Widget.Orientation.Horizontal,
+            Clickable = true,
+            Focusable = true,
+            Background = UiHelpers.RoundedRect(this, Color.Argb(64, 0, 0, 0), 18f),
+        };
+        _backdropToggleRow.SetGravity(GravityFlags.Center);
+        _backdropToggleRow.SetPadding(Dp(14), Dp(7), Dp(12), Dp(7));
+
+        var backdropLabel = new TextView(this)
+        {
+            Text = "复制时保留卡片外背景",
+        };
+        backdropLabel.SetIncludeFontPadding(false);
+        backdropLabel.SetTextColor(Color.Argb(222, 255, 255, 255));
+        backdropLabel.SetTextSize(global::Android.Util.ComplexUnitType.Sp, 12f);
+        UiHelpers.SetFontWeight(backdropLabel, UiHelpers.FontWeightMedium);
+
+        _backdropToggle = new SpotifyToggleView(this, _clipboardKeepBackdrop);
+        _backdropToggleRow.AddView(backdropLabel, new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WrapContent, ViewGroup.LayoutParams.WrapContent)
+        {
+            RightMargin = Dp(10),
         });
-        _actionsRow.AddView(_shareBtn, new LinearLayout.LayoutParams(0, Dp(46), 1f));
+        _backdropToggleRow.AddView(_backdropToggle, new LinearLayout.LayoutParams(Dp(36), Dp(20)));
+        _backdropToggleRow.ContentDescription = "复制时保留卡片外背景";
+        _backdropToggleRow.Click += (_, _) =>
+        {
+            _clipboardKeepBackdrop = !_clipboardKeepBackdrop;
+            _backdropToggle.SetChecked(_clipboardKeepBackdrop, animate: true);
+            var settings = LyrxApp.Instance.Settings;
+            settings.LyricShareClipboardKeepBackdrop = _clipboardKeepBackdrop;
+            settings.Save();
+        };
+        AttachPressSpring(_backdropToggleRow);
 
         _controlsArea.AddView(_toolsRow, new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WrapContent, ViewGroup.LayoutParams.WrapContent)
+        {
+            BottomMargin = Dp(14),
+        });
+        _controlsArea.AddView(_actionsHost, new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent)
         {
-            BottomMargin = Dp(18),
+            BottomMargin = Dp(10),
         });
-        _controlsArea.AddView(_actionsRow, new LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent));
+        _controlsArea.AddView(_backdropToggleRow, new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WrapContent, ViewGroup.LayoutParams.WrapContent));
+
+        _controlsHost.AddView(_controlsScroll, new FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent)
+        {
+            Gravity = GravityFlags.Center,
+        });
+        _editorPanel = BuildEditorPanel();
+        _controlsHost.AddView(_editorPanel, new FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent)
+        {
+            Gravity = GravityFlags.Center,
+        });
 
         _rootLayout.AddView(_contentArea, new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MatchParent, 0, 1f));
@@ -640,41 +1097,58 @@ public sealed class LyricShareActivity : Activity
         _isLandscapeLayout = isLandscape;
         var isTablet = UiHelpers.IsTabletLayout(this);
 
+        _controlsSizeAnimator?.Cancel();
+        _controlsScroll.Animate()?.Cancel();
+        _editorPanel.Animate()?.Cancel();
+        _controlsScroll.Alpha = 1f;
+        _controlsScroll.TranslationX = 0f;
+        _controlsScroll.TranslationY = 0f;
+        _editorPanel.Alpha = 1f;
+        _editorPanel.TranslationX = 0f;
+        _editorPanel.TranslationY = 0f;
+        _controlsScroll.Visibility = _activeEditor == ShareEditorTab.None ? ViewStates.Visible : ViewStates.Gone;
+        _editorPanel.Visibility = _activeEditor == ShareEditorTab.None ? ViewStates.Gone : ViewStates.Visible;
+
         if (_stylePill.LayoutParameters is FrameLayout.LayoutParams pillLp)
         {
             var nextPillW = ComputeStylePillWidth();
-            if (pillLp.Width != nextPillW)
+            var nextPillH = Dp(isLandscape && !isTablet ? 34 : 36);
+            if (pillLp.Width != nextPillW || pillLp.Height != nextPillH)
             {
                 pillLp.Width = nextPillW;
+                pillLp.Height = nextPillH;
                 _stylePill.LayoutParameters = pillLp;
             }
         }
 
+        ApplyToolTileDimensions(isLandscape, isTablet);
+        LayoutActionButtons(isLandscape, isTablet);
+
         if (_previewStage.Parent is ViewGroup p1) p1.RemoveView(_previewStage);
-        if (_controlsArea.Parent is ViewGroup p2) p2.RemoveView(_controlsArea);
+        if (_controlsHost.Parent is ViewGroup p2) p2.RemoveView(_controlsHost);
         _contentArea.RemoveAllViews();
 
-        if (_toolsRow.LayoutParameters is LinearLayout.LayoutParams toolsLp)
-        {
-            toolsLp.BottomMargin = Dp(isLandscape ? 18 : 40);
-            _toolsRow.LayoutParameters = toolsLp;
-        }
+        var dmW = Resources?.DisplayMetrics?.WidthPixels ?? 1080;
+        var sidePad = Dp(isTablet ? 24 : 16);
+        var availW = Math.Max(Dp(300), dmW - _insetLeft - _insetRight - sidePad * 2);
 
         if (isLandscape)
         {
             _contentArea.Orientation = global::Android.Widget.Orientation.Horizontal;
             _contentArea.AddView(_previewStage, new LinearLayout.LayoutParams(
-                0, ViewGroup.LayoutParams.MatchParent, 1.25f)
+                0, ViewGroup.LayoutParams.MatchParent, 1.15f)
             {
-                RightMargin = Dp(isTablet ? 28 : 16),
+                RightMargin = Dp(isTablet ? 24 : 14),
             });
 
-            var rightColW = Dp(isTablet ? 320 : 256);
-            var controlsLp = new LinearLayout.LayoutParams(rightColW, ViewGroup.LayoutParams.WrapContent)
+            var rightColW = isTablet
+                ? Math.Clamp((int)(availW * 0.38f), Dp(340), Dp(420))
+                : Math.Clamp((int)(availW * 0.45f), Dp(282), Dp(368));
+            _contentArea.AddView(_controlsHost, new LinearLayout.LayoutParams(
+                rightColW, ViewGroup.LayoutParams.MatchParent)
             {
                 Gravity = GravityFlags.CenterVertical,
-            };
-            _contentArea.AddView(_controlsArea, controlsLp);
+            });
         }
         else
         {
@@ -682,13 +1156,14 @@ public sealed class LyricShareActivity : Activity
             _contentArea.AddView(_previewStage, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MatchParent, 0, 1f)
             {
-                BottomMargin = Dp(isTablet ? 20 : 12),
+                BottomMargin = Dp(isTablet ? 18 : 10),
             });
 
-            var maxActionW = isTablet ? Dp(400) : Dp(340);
-            var dmW = Resources?.DisplayMetrics?.WidthPixels ?? 1080;
-            var controlsW = Math.Min(maxActionW, Math.Max(Dp(240), dmW - Dp(40)));
-            _contentArea.AddView(_controlsArea, new LinearLayout.LayoutParams(
+            var maxControlsW = _activeEditor == ShareEditorTab.None
+                ? Dp(isTablet ? 396 : 348)
+                : Dp(isTablet ? 460 : 396);
+            var controlsW = Math.Min(maxControlsW, availW);
+            _contentArea.AddView(_controlsHost, new LinearLayout.LayoutParams(
                 controlsW, ViewGroup.LayoutParams.WrapContent)
             {
                 Gravity = GravityFlags.CenterHorizontal,
@@ -696,7 +1171,65 @@ public sealed class LyricShareActivity : Activity
         }
 
         ApplySystemBarInsets(_insetLeft, _insetTop, _insetRight, _insetBottom);
+        UpdateControlsHostBounds();
         UpdatePreviewImageMaxBounds();
+    }
+
+    private void ApplyToolTileDimensions(bool isLandscape, bool isTablet)
+    {
+        var tileW = Dp(isTablet ? 78 : (isLandscape ? 70 : 74));
+        var tileH = Dp(isTablet ? 74 : (isLandscape ? 66 : 70));
+        var tileGap = Dp(isLandscape && !isTablet ? 8 : 10);
+
+        _colorTile.LayoutParameters = new LinearLayout.LayoutParams(tileW, tileH) { RightMargin = tileGap };
+        _imageTile.LayoutParameters = new LinearLayout.LayoutParams(tileW, tileH) { RightMargin = tileGap };
+        _fontTile.LayoutParameters = new LinearLayout.LayoutParams(tileW, tileH);
+
+        if (_toolsRow.LayoutParameters is LinearLayout.LayoutParams toolsLp)
+        {
+            toolsLp.BottomMargin = Dp(isLandscape && !isTablet ? 10 : 14);
+            _toolsRow.LayoutParameters = toolsLp;
+        }
+    }
+
+    private void LayoutActionButtons(bool isLandscape, bool isTablet)
+    {
+        if (_saveBtn.Parent is ViewGroup pSave) pSave.RemoveView(_saveBtn);
+        if (_copyBtn.Parent is ViewGroup pCopy) pCopy.RemoveView(_copyBtn);
+        if (_shareBtn.Parent is ViewGroup pShare) pShare.RemoveView(_shareBtn);
+        if (_actionsSecondaryRow.Parent is ViewGroup pSec) pSec.RemoveView(_actionsSecondaryRow);
+        _actionsSecondaryRow.RemoveAllViews();
+        _actionsHost.RemoveAllViews();
+
+        if (isLandscape)
+        {
+            var secH = Dp(isTablet ? 44 : 40);
+            var primaryH = Dp(isTablet ? 46 : 42);
+            _actionsSecondaryRow.AddView(_saveBtn, new LinearLayout.LayoutParams(0, secH, 1f) { RightMargin = Dp(8) });
+            _actionsSecondaryRow.AddView(_copyBtn, new LinearLayout.LayoutParams(0, secH, 1f));
+            _actionsHost.AddView(_actionsSecondaryRow, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent)
+            {
+                BottomMargin = Dp(8),
+            });
+            _actionsHost.AddView(_shareBtn, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MatchParent, primaryH));
+        }
+        else
+        {
+            var btnH = Dp(isTablet ? 46 : 42);
+            _actionsSecondaryRow.AddView(_saveBtn, new LinearLayout.LayoutParams(0, btnH, 1f) { RightMargin = Dp(8) });
+            _actionsSecondaryRow.AddView(_copyBtn, new LinearLayout.LayoutParams(0, btnH, 1f) { RightMargin = Dp(8) });
+            _actionsSecondaryRow.AddView(_shareBtn, new LinearLayout.LayoutParams(0, btnH, 1.18f));
+            _actionsHost.AddView(_actionsSecondaryRow, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent));
+        }
+
+        if (_actionsHost.LayoutParameters is LinearLayout.LayoutParams hostLp)
+        {
+            hostLp.BottomMargin = Dp(isLandscape && !isTablet ? 8 : 10);
+            _actionsHost.LayoutParameters = hostLp;
+        }
     }
 
     private void ApplySystemBarInsets(int left, int top, int right, int bottom)
@@ -708,47 +1241,228 @@ public sealed class LyricShareActivity : Activity
 
         var isTablet = UiHelpers.IsTabletLayout(this);
         var sidePad = Dp(isTablet ? 24 : 16);
-        _topBar.SetPadding(left + sidePad, top + Dp(isTablet ? 12 : 8), right + sidePad, Dp(isTablet ? 10 : 6));
+        var compactLandscape = _isLandscapeLayout && !isTablet;
+        _topBar.SetPadding(
+            left + sidePad,
+            top + Dp(isTablet ? 12 : (compactLandscape ? 4 : 8)),
+            right + sidePad,
+            Dp(isTablet ? 10 : (compactLandscape ? 4 : 6)));
         _contentArea.SetPadding(
             left + sidePad,
-            Dp(isTablet ? 10 : 6),
+            Dp(isTablet ? 10 : (compactLandscape ? 4 : 6)),
             right + sidePad,
-            bottom + Dp(isTablet ? 24 : 18));
+            bottom + Dp(isTablet ? 22 : (compactLandscape ? 10 : 14)));
+        UpdateControlsHostBounds();
+    }
+
+    private int ComputeUnifiedEditorHeight(int contentH, bool isTablet)
+    {
+        var maxAllowedH = Math.Max(Dp(200), contentH - Dp(isTablet ? 210 : 185));
+        return Math.Clamp(
+            (int)(contentH * (isTablet ? 0.42f : 0.44f)),
+            Math.Min(Dp(isTablet ? 296 : 276), maxAllowedH),
+            Math.Min(Dp(isTablet ? 344 : 306), maxAllowedH));
+    }
+
+    private void UpdateControlsHostBounds(bool animateSize = false)
+    {
+        if (_disposed || _controlsHost is null || _contentArea is null) return;
+        var isTablet = UiHelpers.IsTabletLayout(this);
+        var dmW = Resources?.DisplayMetrics?.WidthPixels ?? 1080;
+        var dmH = Resources?.DisplayMetrics?.HeightPixels ?? 2200;
+        var sidePad = Dp(isTablet ? 24 : 16);
+        var availW = Math.Max(Dp(300), dmW - _insetLeft - _insetRight - sidePad * 2);
+
+        if (_controlsHost.LayoutParameters is not LinearLayout.LayoutParams hostLp) return;
+
+        var contentH = _contentArea.Height > 0
+            ? Math.Max(1, _contentArea.Height - _contentArea.PaddingTop - _contentArea.PaddingBottom)
+            : Math.Max(Dp(240), dmH - _insetTop - _insetBottom - Dp(90));
+
+        if (_isLandscapeLayout)
+        {
+            _controlsSizeAnimator?.Cancel();
+            var rightColW = isTablet
+                ? Math.Clamp((int)(availW * 0.38f), Dp(340), Dp(420))
+                : Math.Clamp((int)(availW * 0.45f), Dp(282), Dp(368));
+            var changed = false;
+            if (hostLp.Width != rightColW)
+            {
+                hostLp.Width = rightColW;
+                changed = true;
+            }
+            if (hostLp.Height != ViewGroup.LayoutParams.MatchParent)
+            {
+                hostLp.Height = ViewGroup.LayoutParams.MatchParent;
+                changed = true;
+            }
+            if (changed) _controlsHost.LayoutParameters = hostLp;
+
+            if (_controlsScroll.LayoutParameters is FrameLayout.LayoutParams scrollLp)
+            {
+                scrollLp.Height = ViewGroup.LayoutParams.MatchParent;
+                _controlsScroll.LayoutParameters = scrollLp;
+            }
+
+            if (_editorPanel.LayoutParameters is FrameLayout.LayoutParams edLp)
+            {
+                var unifiedLandscapeH = contentH <= Dp(isTablet ? 356 : 318)
+                    ? ViewGroup.LayoutParams.MatchParent
+                    : Dp(isTablet ? 344 : 304);
+                if (edLp.Height != unifiedLandscapeH)
+                {
+                    edLp.Height = unifiedLandscapeH;
+                    _editorPanel.LayoutParameters = edLp;
+                }
+            }
+            return;
+        }
+
+        var maxControlsW = _activeEditor == ShareEditorTab.None
+            ? Dp(isTablet ? 396 : 348)
+            : Dp(isTablet ? 460 : 396);
+        var controlsW = Math.Min(maxControlsW, availW);
+        var targetH = ViewGroup.LayoutParams.WrapContent;
+        int measuredTargetH;
+
+        if (_activeEditor != ShareEditorTab.None)
+        {
+            targetH = measuredTargetH = ComputeUnifiedEditorHeight(contentH, isTablet);
+            if (_editorPanel.LayoutParameters is FrameLayout.LayoutParams edLp && edLp.Height != ViewGroup.LayoutParams.MatchParent)
+            {
+                edLp.Height = ViewGroup.LayoutParams.MatchParent;
+                _editorPanel.LayoutParameters = edLp;
+            }
+        }
+        else
+        {
+            var maxMainH = Math.Max(Dp(160), (int)(contentH * 0.50f));
+            _controlsArea.Measure(
+                View.MeasureSpec.MakeMeasureSpec(controlsW, MeasureSpecMode.Exactly),
+                View.MeasureSpec.MakeMeasureSpec(maxMainH * 2, MeasureSpecMode.AtMost));
+            measuredTargetH = Math.Max(Dp(120), Math.Min(_controlsArea.MeasuredHeight, maxMainH));
+            targetH = _controlsArea.MeasuredHeight > maxMainH
+                ? maxMainH
+                : ViewGroup.LayoutParams.WrapContent;
+
+            if (_controlsScroll.LayoutParameters is FrameLayout.LayoutParams scrollLp)
+            {
+                var nextScrollH = targetH == ViewGroup.LayoutParams.WrapContent
+                    ? ViewGroup.LayoutParams.WrapContent
+                    : ViewGroup.LayoutParams.MatchParent;
+                if (scrollLp.Height != nextScrollH)
+                {
+                    scrollLp.Height = nextScrollH;
+                    _controlsScroll.LayoutParameters = scrollLp;
+                }
+            }
+        }
+
+        var startW = _controlsHost.Width;
+        var startH = _controlsHost.Height;
+        if (animateSize && startW > 0 && startH > 0 && (startW != controlsW || startH != measuredTargetH))
+        {
+            _controlsSizeAnimator?.Cancel();
+            var finalLayoutH = targetH;
+            var isClosingToMain = _activeEditor == ShareEditorTab.None;
+            var anim = ValueAnimator.OfFloat(0f, 1f);
+            if (anim is not null)
+            {
+                anim.SetDuration(220);
+                anim.SetInterpolator(new DecelerateInterpolator(1.65f));
+                anim.Update += (_, e) =>
+                {
+                    if (_disposed || _controlsHost.LayoutParameters is not LinearLayout.LayoutParams curLp) return;
+                    var t = e.Animation?.AnimatedFraction ?? 1f;
+                    curLp.Width = (int)Math.Round(startW + (controlsW - startW) * t);
+                    curLp.Height = (int)Math.Round(startH + (measuredTargetH - startH) * t);
+                    _controlsHost.LayoutParameters = curLp;
+                    UpdatePreviewImageMaxBounds();
+                };
+                anim.AnimationEnd += (_, _) =>
+                {
+                    if (_disposed || _controlsHost.LayoutParameters is not LinearLayout.LayoutParams endLp) return;
+                    if ((_activeEditor == ShareEditorTab.None) != isClosingToMain) return;
+                    endLp.Width = controlsW;
+                    endLp.Height = finalLayoutH;
+                    _controlsHost.LayoutParameters = endLp;
+                    UpdatePreviewImageMaxBounds();
+                };
+                _controlsSizeAnimator = anim;
+                anim.Start();
+                return;
+            }
+        }
+
+        _controlsSizeAnimator?.Cancel();
+        if (hostLp.Width != controlsW || hostLp.Height != targetH)
+        {
+            hostLp.Width = controlsW;
+            hostLp.Height = targetH;
+            _controlsHost.LayoutParameters = hostLp;
+        }
     }
 
     private void UpdatePreviewImageMaxBounds()
     {
         if (_disposed || _previewStage.Width <= 0 || _previewStage.Height <= 0) return;
         var isTablet = UiHelpers.IsTabletLayout(this);
-        var maxSideCap = isTablet ? Dp(500) : _previewStage.Width;
-        var maxW = Math.Min(_previewStage.Width - Dp(8), maxSideCap);
-        var maxH = Math.Min(_previewStage.Height - Dp(8), Dp(isTablet ? 520 : 480));
-        _previewImage.SetMaxWidth(Math.Max(Dp(120), maxW));
-        _previewImage.SetMaxHeight(Math.Max(Dp(120), maxH));
+        var maxSideCap = isTablet ? Dp(520) : Dp(440);
+        var maxW = Math.Min(_previewStage.Width - Dp(12), maxSideCap);
+        var maxH = Math.Min(_previewStage.Height - Dp(8), isTablet ? Dp(540) : _previewStage.Height - Dp(8));
+        _previewImage.SetMaxWidth(Math.Max(1, maxW));
+        _previewImage.SetMaxHeight(Math.Max(1, maxH));
     }
 
     private (LinearLayout Tile, View Dot) BuildColorToolTile()
     {
         var tile = MakeToolTileHost();
         var dot = new View(this);
-        tile.AddView(dot, new LinearLayout.LayoutParams(Dp(30), Dp(30))
+        tile.AddView(dot, new LinearLayout.LayoutParams(Dp(26), Dp(26))
         {
             BottomMargin = Dp(6),
         });
-        tile.AddView(MakeToolTileLabel("颜色"));
+        tile.AddView(MakeToolTileLabel("配色"));
         return (tile, dot);
     }
 
-    private (LinearLayout Tile, VectorIconView Icon) BuildImageToolTile()
+    private (LinearLayout Tile, VectorIconView Icon, View ActiveDot) BuildImageToolTile()
     {
         var tile = MakeToolTileHost();
-        var icon = new VectorIconView(this, ClassicIconKind.Image);
-        icon.Configure(ClassicIconKind.Image, Color.White, iconFraction: 0.90f);
-        tile.AddView(icon, new LinearLayout.LayoutParams(Dp(30), Dp(30))
+        var iconBox = new FrameLayout(this);
+        var icon = new VectorIconView(this, ClassicIconKind.SpotifyImage);
+        icon.Configure(ClassicIconKind.SpotifyImage, Color.White, iconFraction: 0.94f);
+        iconBox.AddView(icon, new FrameLayout.LayoutParams(Dp(26), Dp(26))
+        {
+            Gravity = GravityFlags.Center,
+        });
+        var dot = new View(this)
+        {
+            Background = UiHelpers.RoundedRect(this, LyricsPalette.AccentGreen, 3f),
+            Visibility = ViewStates.Gone,
+        };
+        iconBox.AddView(dot, new FrameLayout.LayoutParams(Dp(6), Dp(6))
+        {
+            Gravity = GravityFlags.Top | GravityFlags.Right,
+        });
+        tile.AddView(iconBox, new LinearLayout.LayoutParams(Dp(30), Dp(26))
         {
             BottomMargin = Dp(6),
         });
-        tile.AddView(MakeToolTileLabel("图像"));
+        tile.AddView(MakeToolTileLabel("背景"));
+        return (tile, icon, dot);
+    }
+
+    private (LinearLayout Tile, VectorIconView Icon) BuildTypographyToolTile()
+    {
+        var tile = MakeToolTileHost();
+        var icon = new VectorIconView(this, ClassicIconKind.SpotifyTypography);
+        icon.Configure(ClassicIconKind.SpotifyTypography, Color.White, iconFraction: 0.94f);
+        tile.AddView(icon, new LinearLayout.LayoutParams(Dp(26), Dp(26))
+        {
+            BottomMargin = Dp(6),
+        });
+        tile.AddView(MakeToolTileLabel("排版"));
         return (tile, icon);
     }
 
@@ -759,10 +1473,10 @@ public sealed class LyricShareActivity : Activity
             Orientation = global::Android.Widget.Orientation.Vertical,
             Clickable = true,
             Focusable = true,
-            Background = UiHelpers.RoundedRect(this, Color.Argb(168, 22, 24, 24), 16f, Color.Argb(46, 255, 255, 255), 1f),
+            Background = UiHelpers.RoundedRect(this, Color.Argb(92, 0, 0, 0), 12f),
         };
         tile.SetGravity(GravityFlags.Center);
-        tile.SetPadding(Dp(8), Dp(10), Dp(8), Dp(8));
+        tile.SetPadding(Dp(6), Dp(8), Dp(6), Dp(8));
         return tile;
     }
 
@@ -774,9 +1488,10 @@ public sealed class LyricShareActivity : Activity
             Gravity = GravityFlags.Center,
         };
         tv.SetIncludeFontPadding(false);
-        tv.SetTextColor(Color.Argb(235, 255, 255, 255));
+        tv.SetMaxLines(1);
+        tv.SetTextColor(Color.Argb(242, 255, 255, 255));
         tv.SetTextSize(global::Android.Util.ComplexUnitType.Sp, 11.5f);
-        UiHelpers.SetFontWeight(tv, UiHelpers.FontWeightRegular);
+        UiHelpers.SetFontWeight(tv, UiHelpers.FontWeightMedium);
         return tv;
     }
 
@@ -791,23 +1506,24 @@ public sealed class LyricShareActivity : Activity
         {
             Orientation = global::Android.Widget.Orientation.Horizontal,
             Background = strokeColor is { } s
-                ? UiHelpers.RoundedRect(this, bgColor, 23f, s, 1f)
-                : UiHelpers.RoundedRect(this, bgColor, 23f),
+                ? UiHelpers.RoundedRect(this, bgColor, 22f, s, 1f)
+                : UiHelpers.RoundedRect(this, bgColor, 22f),
             Clickable = true,
             Focusable = true,
         };
         pill.SetGravity(GravityFlags.Center);
-        pill.SetPadding(Dp(12), 0, Dp(14), 0);
+        pill.SetPadding(Dp(10), 0, Dp(10), 0);
 
         var icon = new VectorIconView(this, iconKind);
         icon.Configure(iconKind, fgColor, iconFraction: 0.78f);
         pill.AddView(icon, new LinearLayout.LayoutParams(Dp(17), Dp(17))
         {
-            RightMargin = Dp(7),
+            RightMargin = Dp(5),
         });
 
         var tv = new TextView(this) { Text = labelText };
         tv.SetIncludeFontPadding(false);
+        tv.SetMaxLines(1);
         tv.SetTextColor(fgColor);
         tv.SetTextSize(global::Android.Util.ComplexUnitType.Sp, 14f);
         UiHelpers.SetFontWeight(tv, UiHelpers.FontWeightBold);
@@ -906,69 +1622,149 @@ public sealed class LyricShareActivity : Activity
                         _stylePill.AnimateToStyle(_style);
                     }
                 }
+                else if (ev.ActionMasked == MotionEventActions.Up
+                    && _activeEditor != ShareEditorTab.None
+                    && MathF.Abs(ev.RawX - _cardDownX) < touchSlop
+                    && MathF.Abs(ev.RawY - _cardDownY) < touchSlop)
+                {
+                    CloseEditor();
+                }
                 _cardDragging = false;
                 e.Handled = true;
                 break;
         }
     }
 
-    private ShareCardOptions BuildCurrentOptions() => new(
-        _style,
-        _presets[_colorIndex].BaseColor,
-        _showTranslation,
-        _payload.TrackTitle,
-        _payload.ArtistName,
-        _payload.CoverBitmap,
-        _payload.Lines,
-        _customBgBitmap);
-
-    private void RefreshAllVisuals(int animateDirection = 0)
+    private static void AttachPressSpring(View view)
     {
+        view.Touch += (s, e) =>
+        {
+            if (s is not View target || e.Event is not { } ev || !target.Enabled)
+            {
+                e.Handled = false;
+                return;
+            }
+            switch (ev.ActionMasked)
+            {
+                case MotionEventActions.Down:
+                    target.Animate()?.Cancel();
+                    target.Animate()
+                        ?.ScaleX(0.95f)
+                        ?.ScaleY(0.95f)
+                        ?.SetDuration(75)
+                        ?.SetInterpolator(new DecelerateInterpolator(1.4f))
+                        ?.Start();
+                    break;
+
+                case MotionEventActions.Up:
+                case MotionEventActions.Cancel:
+                    target.Animate()?.Cancel();
+                    target.Animate()
+                        ?.ScaleX(1f)
+                        ?.ScaleY(1f)
+                        ?.SetDuration(165)
+                        ?.SetInterpolator(new OvershootInterpolator(1.2f))
+                        ?.Start();
+                    break;
+            }
+            e.Handled = false;
+        };
+    }
+
+    private SharePalettePreset SelectedPalette => _backgroundMode == ShareBackgroundMode.CustomImage && _colorIndex == 0
+        ? new SharePalettePreset("图片取色", _customBgThemeColor, LyricsPalette.BlendColor(_customBgThemeColor, Color.Black, 0.28))
+        : _presets[_colorIndex];
+
+    private ShareCardOptions BuildCurrentOptions()
+    {
+        var palette = SelectedPalette;
+        return new ShareCardOptions(
+            _style,
+            palette.BaseColor,
+            _showTranslation,
+            _payload.TrackTitle,
+            _payload.ArtistName,
+            _payload.CoverBitmap,
+            _payload.Lines,
+            _customBgBitmap,
+            _backgroundMode,
+            palette.GradientEndColor,
+            _coverEffect,
+            _lyricsFont,
+            _fontPercent / 100f);
+    }
+
+    private void RefreshAllVisuals(int animateDirection = 0, bool crossfade = false)
+    {
+        CancelPreviewRefresh();
         var isSpotify = _style == LyricShareStyle.Spotify;
 
         if (_translationHost is not null && _translationIcon is not null)
         {
             _translationHost.Background = _showTranslation
                 ? UiHelpers.RoundedRect(this, LyricsPalette.AccentGreen, 19f)
-                : UiHelpers.RoundedRect(this, Color.Argb(185, 28, 28, 28), 19f, Color.Argb(60, 255, 255, 255), 1f);
+                : UiHelpers.RoundedRect(this, Color.Argb(96, 0, 0, 0), 19f, Color.Argb(36, 255, 255, 255), 1f);
             _translationIcon.Configure(
                 ClassicIconKind.Bilingual,
                 _showTranslation ? Color.Rgb(18, 18, 18) : Color.White,
-                iconFraction: 0.58f);
+                iconFraction: 0.56f);
+            _translationHost.Selected = _showTranslation;
         }
 
-        var hasCustom = _customBgBitmap is { IsRecycled: false };
-        var themeColor = hasCustom ? _customBgThemeColor : _presets[_colorIndex].BaseColor;
+        var themeColor = SelectedPalette.BaseColor;
+        var isImageBackground = _backgroundMode is ShareBackgroundMode.CustomImage or ShareBackgroundMode.AlbumCover;
         _stylePill.SetMonetPalette(themeColor, _payload.CoverBackground);
-        var bottomHue = LyricsPalette.BlendColor(themeColor, Color.Black, 0.25);
-        var topDark = Color.Rgb(14, 14, 14);
-        _pageBgDrawable.SetColors([topDark.ToArgb(), topDark.ToArgb(), bottomHue.ToArgb()]);
+
+        var isLightTheme = LyricsPalette.RelativeLuminance(themeColor) > 0.24;
+        var topDark = LyricsPalette.BlendColor(themeColor, Color.Rgb(10, 12, 11), 0.88);
+        var midHue = LyricsPalette.BlendColor(themeColor, Color.Rgb(12, 14, 13), isLightTheme ? 0.68 : 0.50);
+        var bottomHue = LyricsPalette.BlendColor(themeColor, Color.Rgb(12, 14, 13), isLightTheme ? 0.44 : 0.16);
+        _pageBgDrawable.SetColors([topDark.ToArgb(), midHue.ToArgb(), bottomHue.ToArgb()]);
+        if (_currentNavBarColor != bottomHue)
+        {
+            _currentNavBarColor = bottomHue;
+            ApplyChromeSystemBars();
+        }
 
         _colorDotView.Background = UiHelpers.RoundedRect(
             this,
-            _presets[_colorIndex].BaseColor,
-            15f,
-            hasCustom ? Color.Argb(150, 255, 255, 255) : Color.White,
-            hasCustom ? 1.4f : 2f);
+            themeColor,
+            13f,
+            Color.White,
+            1.8f);
 
         _colorTile.Background = UiHelpers.RoundedRect(
             this,
-            Color.Argb(168, 22, 24, 24),
-            16f,
-            hasCustom ? Color.Argb(46, 255, 255, 255) : Color.Argb(130, 255, 255, 255),
-            hasCustom ? 1f : 1.3f);
+            Color.Argb(_activeEditor == ShareEditorTab.Color ? 148 : 92, 0, 0, 0),
+            12f,
+            _activeEditor == ShareEditorTab.Color ? Color.Argb(110, 255, 255, 255) : null,
+            1f);
 
         _imageTile.Background = UiHelpers.RoundedRect(
             this,
-            Color.Argb(168, 22, 24, 24),
-            16f,
-            hasCustom ? LyricsPalette.AccentGreen : Color.Argb(46, 255, 255, 255),
-            hasCustom ? 1.5f : 1f);
-        _imageTileIcon.Configure(ClassicIconKind.Image, hasCustom ? LyricsPalette.AccentGreen : Color.White, iconFraction: 0.90f);
+            Color.Argb(_activeEditor == ShareEditorTab.Background ? 148 : 92, 0, 0, 0),
+            12f,
+            isImageBackground ? Color.Argb(100, 30, 215, 96) : null,
+            1f);
+        _imageTile.ContentDescription = $"背景 · {BackgroundLabel(_backgroundMode)}";
+        _imageTileIcon.Configure(
+            ClassicIconKind.SpotifyImage,
+            isImageBackground ? LyricsPalette.AccentGreen : Color.White,
+            iconFraction: 0.94f);
+        _imageTileDot.Visibility = isImageBackground ? ViewStates.Visible : ViewStates.Gone;
 
-        var nextBmp = LyricShareCardRenderer.Render(this, BuildCurrentOptions());
+        _fontTile.Background = UiHelpers.RoundedRect(
+            this,
+            Color.Argb(_activeEditor == ShareEditorTab.Typography ? 148 : 92, 0, 0, 0),
+            12f,
+            _activeEditor == ShareEditorTab.Typography ? Color.Argb(110, 255, 255, 255) : null,
+            1f);
+        if (_activeEditor == ShareEditorTab.Color)
+            SyncColorEditorDots();
+
+        var nextBmp = LyricShareCardRenderer.Render(this, BuildCurrentOptions(), forPreview: true);
         var oldBmp = _previewBitmap;
-        var previewRadiusDp = isSpotify ? 22f : 18f;
+        var previewRadiusDp = isSpotify ? 16f : 14f;
 
         ClearOutgoingPreview();
 
@@ -1027,6 +1823,48 @@ public sealed class LyricShareActivity : Activity
                 ?.SetInterpolator(new DecelerateInterpolator(1.6f))
                 ?.Start();
         }
+        else if (crossfade && oldBmp is { IsRecycled: false }
+            && _previewImage.Width > 0 && _previewImage.Height > 0
+            && oldBmp.Width == nextBmp.Width && oldBmp.Height == nextBmp.Height)
+        {
+            var outgoing = new ImageView(this)
+            {
+                ClipToOutline = true,
+                OutlineProvider = _previewImage.OutlineProvider,
+                Elevation = Dp(14),
+            };
+            outgoing.SetScaleType(ImageView.ScaleType.FitCenter);
+            outgoing.SetImageBitmap(oldBmp);
+
+            var outLp = new FrameLayout.LayoutParams(_previewImage.Width, _previewImage.Height)
+            {
+                Gravity = GravityFlags.Center,
+            };
+            var incomingIndex = _previewStage.IndexOfChild(_previewImage);
+            _previewStage.AddView(outgoing, Math.Max(0, incomingIndex), outLp);
+
+            _outgoingPreviewImage = outgoing;
+            _outgoingPreviewBitmap = oldBmp;
+
+            _previewBitmap = nextBmp;
+            _previewImage.OutlineProvider = new RoundedOutlineProvider(Dp(previewRadiusDp));
+            _previewImage.SetImageBitmap(nextBmp);
+            _previewImage.Animate()?.Cancel();
+            _previewImage.TranslationX = 0f;
+            _previewImage.ScaleX = 1f;
+            _previewImage.ScaleY = 1f;
+            _previewImage.Alpha = 0f;
+            _previewImage.Animate()
+                ?.Alpha(1f)
+                ?.SetDuration(145)
+                ?.SetInterpolator(new DecelerateInterpolator(1.4f))
+                ?.WithEndAction(new Java.Lang.Runnable(() =>
+                {
+                    if (ReferenceEquals(_outgoingPreviewImage, outgoing))
+                        ClearOutgoingPreview();
+                }))
+                ?.Start();
+        }
         else
         {
             _previewBitmap = nextBmp;
@@ -1037,8 +1875,7 @@ public sealed class LyricShareActivity : Activity
             _previewImage.ScaleY = 1f;
             _previewImage.Alpha = 1f;
             _previewImage.SetImageBitmap(nextBmp);
-            if (oldBmp is not null && !oldBmp.IsRecycled)
-                oldBmp.Recycle();
+            oldBmp?.Dispose();
         }
     }
 
@@ -1046,186 +1883,36 @@ public sealed class LyricShareActivity : Activity
     {
         if (_outgoingPreviewImage is { } oldView)
         {
+            _outgoingPreviewImage = null;
             oldView.Animate()?.Cancel();
             oldView.SetImageDrawable(null);
             _previewStage?.RemoveView(oldView);
-            _outgoingPreviewImage = null;
         }
-        if (_outgoingPreviewBitmap is { IsRecycled: false } oldBmp)
-            oldBmp.Recycle();
+        _outgoingPreviewBitmap?.Dispose();
         _outgoingPreviewBitmap = null;
-    }
-
-    private void ToggleColorPickerPopup()
-    {
-        if (_colorPopup is { IsShowing: true })
-        {
-            DismissColorPopup();
-            return;
-        }
-
-        var dm = Resources?.DisplayMetrics;
-        var screenW = dm?.WidthPixels ?? 1080;
-        var screenH = dm?.HeightPixels ?? 2200;
-        var margin = Dp(14);
-        var popupW = Math.Min(Dp(312), screenW - margin * 2);
-
-        var card = new LinearLayout(this)
-        {
-            Orientation = global::Android.Widget.Orientation.Vertical,
-            Background = UiHelpers.RoundedRect(this, Color.Argb(245, 26, 26, 28), 20f, Color.Argb(75, 255, 255, 255), 1f),
-            Elevation = Dp(14),
-        };
-        card.SetPadding(Dp(14), Dp(12), Dp(14), Dp(12));
-
-        var title = new TextView(this) { Text = "选择背景颜色" };
-        title.SetIncludeFontPadding(false);
-        title.SetTextColor(Color.Argb(210, 255, 255, 255));
-        title.SetTextSize(global::Android.Util.ComplexUnitType.Sp, 12.5f);
-        UiHelpers.SetFontWeight(title, UiHelpers.FontWeightSemiBold);
-        card.AddView(title, new LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent)
-        {
-            BottomMargin = Dp(10),
-        });
-
-        var dotViews = new List<View>(_presets.Count);
-        void SyncPopupDots()
-        {
-            var hasCustom = _customBgBitmap is { IsRecycled: false };
-            for (var i = 0; i < dotViews.Count; i++)
-            {
-                var selected = !hasCustom && i == _colorIndex;
-                dotViews[i].Background = UiHelpers.RoundedRect(
-                    this,
-                    _presets[i].BaseColor,
-                    18f,
-                    selected ? Color.White : Color.Argb(90, 255, 255, 255),
-                    selected ? 2.4f : 1f);
-            }
-        }
-
-        // 每行 4 个圆形色块 + 色板名（共 2 行 8 色）
-        const int cols = 4;
-        var rows = (_presets.Count + cols - 1) / cols;
-        for (var r = 0; r < rows; r++)
-        {
-            var rowLayout = new LinearLayout(this)
-            {
-                Orientation = global::Android.Widget.Orientation.Horizontal,
-            };
-            for (var c = 0; c < cols; c++)
-            {
-                var idx = r * cols + c;
-                if (idx >= _presets.Count)
-                {
-                    rowLayout.AddView(new View(this), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WrapContent, 1f));
-                    continue;
-                }
-
-                var cell = new LinearLayout(this)
-                {
-                    Orientation = global::Android.Widget.Orientation.Vertical,
-                    Clickable = true,
-                    Focusable = true,
-                };
-                cell.SetGravity(GravityFlags.CenterHorizontal);
-                cell.SetPadding(Dp(2), Dp(4), Dp(2), Dp(4));
-
-                var dot = new View(this);
-                cell.AddView(dot, new LinearLayout.LayoutParams(Dp(36), Dp(36))
-                {
-                    BottomMargin = Dp(5),
-                });
-                dotViews.Add(dot);
-
-                var label = new TextView(this)
-                {
-                    Text = _presets[idx].Label,
-                    Gravity = GravityFlags.Center,
-                };
-                label.SetIncludeFontPadding(false);
-                label.SetMaxLines(1);
-                label.SetTextColor(Color.Argb(200, 255, 255, 255));
-                label.SetTextSize(global::Android.Util.ComplexUnitType.Sp, 10.5f);
-                UiHelpers.SetFontWeight(label, UiHelpers.FontWeightRegular);
-                cell.AddView(label);
-
-                var capturedIdx = idx;
-                cell.Click += (_, _) =>
-                {
-                    var oldCustom = _customBgBitmap;
-                    _customBgBitmap = null;
-                    _colorIndex = capturedIdx;
-                    RefreshAllVisuals();
-                    SyncPopupDots();
-                    if (oldCustom is not null && !oldCustom.IsRecycled)
-                        oldCustom.Recycle();
-                };
-
-                rowLayout.AddView(cell, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WrapContent, 1f));
-            }
-
-            var rowLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.WrapContent);
-            if (r < rows - 1) rowLp.BottomMargin = Dp(6);
-            card.AddView(rowLayout, rowLp);
-        }
-
-        SyncPopupDots();
-
-        var popup = new PopupWindow(card, popupW, ViewGroup.LayoutParams.WrapContent, focusable: true)
-        {
-            OutsideTouchable = true,
-            Elevation = Dp(14),
-            AnimationStyle = Resource.Style.AudioOutputPopupAnim,
-        };
-        popup.SetBackgroundDrawable(new ColorDrawable(Color.Transparent));
-        popup.DismissEvent += (_, _) =>
-        {
-            if (ReferenceEquals(_colorPopup, popup))
-                _colorPopup = null;
-        };
-        _colorPopup = popup;
-
-        card.Measure(
-            View.MeasureSpec.MakeMeasureSpec(popupW, MeasureSpecMode.Exactly),
-            View.MeasureSpec.MakeMeasureSpec(screenH, MeasureSpecMode.AtMost));
-        var popupH = card.MeasuredHeight;
-
-        var anchorLoc = new int[2];
-        _colorTile.GetLocationInWindow(anchorLoc);
-        var x = Math.Clamp(anchorLoc[0] + (_colorTile.Width - popupW) / 2, margin, screenW - popupW - margin);
-        var y = Math.Clamp(anchorLoc[1] - popupH - Dp(10), _insetTop + margin, screenH - popupH - margin);
-        popup.ShowAtLocation(_rootLayout, GravityFlags.NoGravity, x, y);
-    }
-
-    private void DismissColorPopup()
-    {
-        if (_colorPopup is { IsShowing: true } p)
-            p.Dismiss();
-        _colorPopup = null;
     }
 
     private void OpenCustomBackgroundPicker()
     {
-        DismissColorPopup();
         try
         {
-            Intent intent;
+#pragma warning disable CA1422
             if (OperatingSystem.IsAndroidVersionAtLeast(33))
             {
-                intent = new Intent(MediaStore.ActionPickImages);
-                intent.SetType("image/*");
+                using var picker = new Intent(MediaStore.ActionPickImages);
+                picker.SetType("image/*");
+                try
+                {
+                    StartActivityForResult(picker, RequestCodePickImage);
+                    return;
+                }
+                catch (ActivityNotFoundException) { }
             }
-            else
-            {
-                intent = new Intent(Intent.ActionGetContent);
-                intent.SetType("image/*");
-                intent.AddCategory(Intent.CategoryOpenable);
-            }
-#pragma warning disable CA1422
-            StartActivityForResult(Intent.CreateChooser(intent, "选择自定义背景图"), RequestCodePickImage);
+
+            using var intent = new Intent(Intent.ActionOpenDocument);
+            intent.SetType("image/*");
+            intent.AddCategory(Intent.CategoryOpenable);
+            StartActivityForResult(intent, RequestCodePickImage);
 #pragma warning restore CA1422
         }
         catch (Exception ex)
@@ -1238,7 +1925,7 @@ public sealed class LyricShareActivity : Activity
     {
         try
         {
-            var bounds = new BitmapFactory.Options { InJustDecodeBounds = true };
+            using var bounds = new BitmapFactory.Options { InJustDecodeBounds = true };
             using (var s1 = ContentResolver?.OpenInputStream(uri))
             {
                 if (s1 is null) return null;
@@ -1252,7 +1939,7 @@ public sealed class LyricShareActivity : Activity
             while (longest / sample > maxDimension)
                 sample *= 2;
 
-            var opts = new BitmapFactory.Options { InSampleSize = sample };
+            using var opts = new BitmapFactory.Options { InSampleSize = sample, InPreferredConfig = Bitmap.Config.Argb8888 };
             Bitmap? decoded;
             using (var s2 = ContentResolver?.OpenInputStream(uri))
             {
@@ -1275,7 +1962,7 @@ public sealed class LyricShareActivity : Activity
             }
             catch { }
 
-            var matrix = new Matrix();
+            using var matrix = new Matrix();
             switch (exifOrientation)
             {
                 case global::Android.Media.Orientation.Rotate90:
@@ -1293,6 +1980,14 @@ public sealed class LyricShareActivity : Activity
                 case global::Android.Media.Orientation.FlipVertical:
                     matrix.PostScale(1f, -1f);
                     break;
+                case global::Android.Media.Orientation.Transpose:
+                    matrix.PostScale(-1f, 1f);
+                    matrix.PostRotate(270f);
+                    break;
+                case global::Android.Media.Orientation.Transverse:
+                    matrix.PostScale(-1f, 1f);
+                    matrix.PostRotate(90f);
+                    break;
                 default:
                     return decoded;
             }
@@ -1300,7 +1995,7 @@ public sealed class LyricShareActivity : Activity
             var rotated = Bitmap.CreateBitmap(decoded, 0, 0, decoded.Width, decoded.Height, matrix, true);
             if (rotated is not null && !ReferenceEquals(rotated, decoded))
             {
-                decoded.Recycle();
+                decoded.Dispose();
                 return rotated;
             }
             return decoded;
@@ -1322,40 +2017,9 @@ public sealed class LyricShareActivity : Activity
             return;
         }
 
-        SetExportBusy(true);
-        var opt = BuildCurrentOptions();
-        var baseName = string.IsNullOrWhiteSpace(_payload.TrackTitle) ? "Lyrx_Lyrics" : _payload.TrackTitle!;
-
-        _ = Task.Run(() =>
-        {
-            string? savedPath = null;
-            string? errorMsg = null;
-            try
-            {
-                using var exportBmp = LyricShareCardRenderer.Render(this, opt);
-                savedPath = ShareImageHelper.SaveToGallery(this, exportBmp, baseName);
-            }
-            catch (Exception ex)
-            {
-                errorMsg = ex.Message;
-            }
-
-            RunOnUiThread(() =>
-            {
-                SetExportBusy(false);
-                if (_disposed || IsFinishing || IsDestroyed) return;
-                if (savedPath is not null)
-                {
-                    Toast.MakeText(this, $"已保存到相册 {savedPath}", ToastLength.Short)?.Show();
-                    SetResult(Result.Ok);
-                    Finish();
-                }
-                else
-                {
-                    Toast.MakeText(this, $"保存失败：{errorMsg}", ToastLength.Short)?.Show();
-                }
-            });
-        });
+        RunExport("保存图片",
+            (bitmap, fileName) => ShareImageHelper.SaveToGallery(this, bitmap, fileName),
+            path => Toast.MakeText(this, $"已保存到相册 {path}", ToastLength.Short)?.Show());
     }
 
     public override void OnRequestPermissionsResult(int requestCode, string[] permissions, Permission[] grantResults)
@@ -1368,68 +2032,84 @@ public sealed class LyricShareActivity : Activity
             Toast.MakeText(this, "需要存储权限才能保存到系统相册。", ToastLength.Short)?.Show();
     }
 
-    private void ExportAndShareSystem()
+    private void ExportAndShareSystem() =>
+        RunExport("分享图片",
+            (bitmap, fileName) => ShareImageHelper.SaveTempSharePng(this, bitmap, fileName),
+            uri =>
+            {
+                using var send = new Intent(Intent.ActionSend);
+                send.SetType("image/png");
+                send.PutExtra(Intent.ExtraStream, uri);
+                send.PutExtra(Intent.ExtraTitle, _payload.TrackTitle ?? "Lyrx 歌词卡片");
+                using var clip = ClipData.NewRawUri("Lyrx", uri);
+                send.ClipData = clip;
+                send.AddFlags(ActivityFlags.GrantReadUriPermission);
+                using var chooser = Intent.CreateChooser(send, "分享歌词卡片");
+                StartActivity(chooser);
+            });
+
+    private void ExportAndCopy() =>
+        RunExport("复制图片",
+            (bitmap, fileName) => ShareImageHelper.SaveTempSharePng(this, bitmap, fileName, forClipboard: true),
+            uri =>
+            {
+                var clipboard = GetSystemService(ClipboardService) as ClipboardManager
+                    ?? throw new InvalidOperationException("系统剪贴板不可用");
+                using var clip = ClipData.NewUri(ContentResolver!, "Lyrx 歌词卡片", uri);
+                clipboard.PrimaryClip = clip;
+                if (!OperatingSystem.IsAndroidVersionAtLeast(33))
+                    Toast.MakeText(this, "已复制歌词卡片", ToastLength.Short)?.Show();
+            },
+            forClipboard: true);
+
+    private async void RunExport<T>(string action, Func<Bitmap, string, T> write, Action<T> onSuccess, bool forClipboard = false)
     {
         if (_isExporting) return;
-        SetExportBusy(true);
+        SaveEditorPreferences();
         var opt = BuildCurrentOptions();
         var baseName = string.IsNullOrWhiteSpace(_payload.TrackTitle) ? "Lyrx_Lyrics" : _payload.TrackTitle!;
+        var keepBackdrop = _clipboardKeepBackdrop;
+        SetExportBusy(true);
 
-        _ = Task.Run(() =>
+        try
         {
-            global::Android.Net.Uri? shareUri = null;
-            string? errorMsg = null;
-            try
+            var result = await Task.Run(() =>
             {
-                using var exportBmp = LyricShareCardRenderer.Render(this, opt);
-                shareUri = ShareImageHelper.SaveTempSharePng(this, exportBmp, baseName);
-            }
-            catch (Exception ex)
-            {
-                errorMsg = ex.Message;
-            }
-
-            RunOnUiThread(() =>
-            {
-                SetExportBusy(false);
-                if (_disposed || IsFinishing || IsDestroyed) return;
-                if (shareUri is null)
-                {
-                    Toast.MakeText(this, $"生成分享图片失败：{errorMsg}", ToastLength.Short)?.Show();
-                    return;
-                }
-
-                try
-                {
-                    var send = new Intent(Intent.ActionSend);
-                    send.SetType("image/png");
-                    send.PutExtra(Intent.ExtraStream, shareUri);
-                    send.ClipData = ClipData.NewRawUri("Lyrx", shareUri);
-                    send.AddFlags(ActivityFlags.GrantReadUriPermission);
-                    StartActivity(Intent.CreateChooser(send, "分享歌词卡片"));
-                    SetResult(Result.Ok);
-                    Finish();
-                }
-                catch (Exception ex)
-                {
-                    Toast.MakeText(this, $"无法打开系统分享：{ex.Message}", ToastLength.Short)?.Show();
-                }
+                using var bitmap = forClipboard
+                    ? LyricShareCardRenderer.RenderClipboard(this, opt, keepBackdrop)
+                    : LyricShareCardRenderer.Render(this, opt);
+                return write(bitmap, baseName);
             });
-        });
+            using var disposable = result as IDisposable;
+            if (_disposed || IsFinishing || IsDestroyed) return;
+            onSuccess(result);
+            _hasExported = true;
+        }
+        catch (Exception ex)
+        {
+            AndroidLog.Write($"[share] {action}失败: {ex}");
+            if (!_disposed && !IsFinishing)
+                Toast.MakeText(this, $"{action}失败：{ex.Message}", ToastLength.Short)?.Show();
+        }
+        finally
+        {
+            if (!_disposed && !IsFinishing)
+                SetExportBusy(false);
+        }
     }
 
     private void SetExportBusy(bool busy)
     {
         _isExporting = busy;
-        _saveBtn.Alpha = busy ? 0.6f : 1f;
-        _shareBtn.Alpha = busy ? 0.65f : 1f;
+        _saveBtn.Enabled = _copyBtn.Enabled = _shareBtn.Enabled = !busy;
+        _saveBtn.Alpha = _copyBtn.Alpha = _shareBtn.Alpha = busy ? 0.6f : 1f;
     }
 
     private void ApplyChromeSystemBars()
     {
         try
         {
-            UiHelpers.HideStatusBar(Window, edgeToEdge: true, navigationBarColor: Color.Rgb(16, 16, 16));
+            UiHelpers.HideStatusBar(Window, edgeToEdge: true, navigationBarColor: _currentNavBarColor);
         }
         catch { }
     }

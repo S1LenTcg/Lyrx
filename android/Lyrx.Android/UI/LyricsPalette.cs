@@ -106,6 +106,29 @@ internal static class LyricsPalette
             (byte)Math.Round(from.B + (to.B - from.B) * t));
     }
 
+    public static Color ShareCardColor(Color color)
+    {
+        var (hue, saturation, lightness) = ToHsl(color.R, color.G, color.B);
+        saturation = Math.Min(0.84, saturation * 1.12);
+        lightness = Math.Max(0.34, lightness);
+        var result = FromHsl(hue, saturation, lightness);
+        while (RelativeLuminance(result) < 0.065 && lightness < 0.62)
+            result = FromHsl(hue, saturation, lightness += 0.02);
+        while (RelativeLuminance(result) > 0.175 && lightness > 0.22)
+            result = FromHsl(hue, saturation, lightness -= 0.015);
+        return result;
+    }
+
+    public static double RelativeLuminance(Color color)
+    {
+        static double Linearize(int channel)
+        {
+            var v = channel / 255.0;
+            return v <= 0.04045 ? v / 12.92 : Math.Pow((v + 0.055) / 1.055, 2.4);
+        }
+        return 0.2126 * Linearize(color.R) + 0.7152 * Linearize(color.G) + 0.0722 * Linearize(color.B);
+    }
+
     public static (Color Background, Color Subdued) FromCover(Bitmap? cover)
     {
         if (cover is null || cover.IsRecycled || cover.Width <= 0 || cover.Height <= 0)

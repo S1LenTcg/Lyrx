@@ -40,6 +40,9 @@ public static partial class SearchTermCleaner
             if (cleaned.Length > 0)
             {
                 AddVariant(new SearchTerm(cleaned));
+                var shortKw = StripTrailingParenthetical(cleaned);
+                if (shortKw.Length >= 2 && !string.Equals(shortKw, cleaned, StringComparison.OrdinalIgnoreCase))
+                    AddVariant(new SearchTerm(shortKw));
                 if (TrySplitArtistTitle(cleaned, out var t, out var a))
                 {
                     AddVariant(new SearchTerm(t, a));
@@ -51,10 +54,28 @@ public static partial class SearchTermCleaner
         {
             var title = CleanTitle(term.Title!);
             var artist = CleanArtist(term.Artist!);
+            var shortTitle = StripTrailingParenthetical(title);
+            var hasShortTitle = shortTitle.Length >= 2 && !string.Equals(shortTitle, title, StringComparison.OrdinalIgnoreCase);
 
             // 1. 常规清洗变体
             if (title.Length > 0)
                 AddVariant(new SearchTerm(title, artist));
+            if (hasShortTitle)
+                AddVariant(new SearchTerm(shortTitle, artist));
+
+            // 1b. 多歌手拆分与分隔符标准化（例如 "Jhené Aiko/TWENTY88"、"Jhené Aiko/Swae Lee"）
+            if (TryExtractPrimaryArtist(artist, out var primaryArtist, out var spacedArtist))
+            {
+                var baseTitle = title.Length > 0 ? title : term.Title!.Trim();
+                if (!string.IsNullOrEmpty(spacedArtist))
+                    AddVariant(new SearchTerm(baseTitle, spacedArtist));
+                if (!string.IsNullOrEmpty(primaryArtist))
+                {
+                    AddVariant(new SearchTerm(baseTitle, primaryArtist));
+                    if (hasShortTitle)
+                        AddVariant(new SearchTerm(shortTitle, primaryArtist));
+                }
+            }
 
             // 2. 如果标题中带有书名号《歌名》，尝试提取
             var bookMatch = BookTitleRegex().Match(term.Title!);
@@ -228,6 +249,34 @@ public static partial class SearchTermCleaner
     private static string Collapse(string s) =>
         WhitespaceRegex().Replace(s, " ").Trim().Trim('-', '–', '—').Trim();
 
+    /// <summary>剥离末尾的括号副标题（如 "OLLA (Only Lovers Left Alive)" → "OLLA"），仅在生成搜索变体时使用。</summary>
+    private static string StripTrailingParenthetical(string title)
+    {
+        if (string.IsNullOrWhiteSpace(title)) return "";
+        var trimmed = title.Trim();
+        var stripped = TrailingBracketRegex().Replace(trimmed, "").Trim();
+        return Collapse(stripped);
+    }
+
+    /// <summary>提取多位合作歌手的主歌手名及空格拼接形式（如 "Jhené Aiko/Swae Lee" → "Jhené Aiko"、"Jhené Aiko Swae Lee"）。</summary>
+    private static bool TryExtractPrimaryArtist(string artist, out string primaryArtist, out string spacedArtist)
+    {
+        primaryArtist = "";
+        spacedArtist = "";
+        if (string.IsNullOrWhiteSpace(artist)) return false;
+
+        var parts = MultiArtistSeparatorRegex().Split(artist)
+            .Select(p => p.Trim())
+            .Where(p => p.Length > 0)
+            .ToArray();
+        if (parts.Length <= 1) return false;
+
+        primaryArtist = parts[0];
+        spacedArtist = Collapse(string.Join(' ', parts));
+        return !string.Equals(primaryArtist, artist.Trim(), StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(spacedArtist, artist.Trim(), StringComparison.OrdinalIgnoreCase);
+    }
+
     // (feat. X) / [ft X] / （featuring …） / (with …) — 括号内的 with 也算安全
     [GeneratedRegex(@"[\(\[（]\s*(?:feat|ft|featuring|with)\b\.?[^\)\]）]*[\)\]）]", RegexOptions.IgnoreCase)]
     private static partial Regex BracketFeatRegex();
@@ -287,4 +336,10 @@ public static partial class SearchTermCleaner
 
     [GeneratedRegex(@"\s+")]
     private static partial Regex WhitespaceRegex();
+
+    [GeneratedRegex(@"(?:\s*[\(\[（【][^\)\]）】]{2,}[\)\]）】])+$")]
+    private static partial Regex TrailingBracketRegex();
+
+    [GeneratedRegex(@"\s*(?:/|、|,|，|;|；|\s+&\s+|\s+[x×]\s+)\s*", RegexOptions.IgnoreCase)]
+    private static partial Regex MultiArtistSeparatorRegex();
 }

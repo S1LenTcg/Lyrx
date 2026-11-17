@@ -9,8 +9,8 @@
     <RootNamespace>Musebase.Android</RootNamespace>
     <AssemblyName>Lyrx.Android</AssemblyName>
     <ApplicationId>app.lyrx.android</ApplicationId>
-    <ApplicationVersion>2</ApplicationVersion>
-    <ApplicationDisplayVersion>1.0.1</ApplicationDisplayVersion>
+    <ApplicationVersion>4</ApplicationVersion>
+    <ApplicationDisplayVersion>1.0.3</ApplicationDisplayVersion>
     <ApplicationTitle>Lyrx</ApplicationTitle>
     <AndroidPackageFormat>apk</AndroidPackageFormat>
     <AndroidStoreUncompressedFileExtensions>$(AndroidStoreUncompressedFileExtensions);.ttf;.otf</AndroidStoreUncompressedFileExtensions>

@@ -166,6 +166,11 @@ internal static class LyricShareCardRenderer
     public static BitmapSource RenderBitmap(ShareCardOptions options, double scale = ExportScale)
     {
         var visual = BuildCardVisual(options, out var width, out var height, scale);
+        return RenderVisual(visual, width, height);
+    }
+
+    private static BitmapSource RenderVisual(FrameworkElement visual, int width, int height)
+    {
         visual.Measure(new Size(width, height));
         visual.Arrange(new Rect(0, 0, width, height));
         visual.UpdateLayout();
@@ -203,14 +208,7 @@ internal static class LyricShareCardRenderer
             };
             TextOptions.SetTextFormattingMode(cardOnlyHost, TextFormattingMode.Ideal);
             RenderOptions.SetBitmapScalingMode(cardOnlyHost, BitmapScalingMode.HighQuality);
-            cardOnlyHost.Measure(new Size(cardW, cardH));
-            cardOnlyHost.Arrange(new Rect(0, 0, cardW, cardH));
-            cardOnlyHost.UpdateLayout();
-
-            var cardRtb = new RenderTargetBitmap(cardW, cardH, 96, 96, PixelFormats.Pbgra32);
-            cardRtb.Render(cardOnlyHost);
-            cardRtb.Freeze();
-            return cardRtb;
+            return RenderVisual(cardOnlyHost, cardW, cardH);
         }
 
         var pad = (int)Math.Round(72 * s);
@@ -265,14 +263,7 @@ internal static class LyricShareCardRenderer
 
         TextOptions.SetTextFormattingMode(host, TextFormattingMode.Ideal);
         RenderOptions.SetBitmapScalingMode(host, BitmapScalingMode.HighQuality);
-        host.Measure(new Size(outW, outH));
-        host.Arrange(new Rect(0, 0, outW, outH));
-        host.UpdateLayout();
-
-        var rtb = new RenderTargetBitmap(outW, outH, 96, 96, PixelFormats.Pbgra32);
-        rtb.Render(host);
-        rtb.Freeze();
-        return rtb;
+        return RenderVisual(host, outW, outH);
     }
 
     public static byte[] EncodePng(BitmapSource bitmap)
