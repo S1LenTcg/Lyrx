@@ -109,20 +109,25 @@ internal static class ShareImageHelper
         return dir;
     }
 
-    public static AUri SaveTempSharePng(Context ctx, Bitmap bitmap, string baseName)
+    public static AUri SaveTempSharePng(Context ctx, Bitmap bitmap, string baseName, bool forClipboard = false)
     {
         var dir = GetShareCacheDir(ctx);
         PruneOldCacheFiles(dir);
 
         var safeName = SanitizeFileName(baseName);
-        var fileName = $"{safeName}_{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}.png";
+        var prefix = forClipboard ? "clipboard-" : "share-";
+        var fileName = $"{prefix}{Guid.NewGuid():N}_{safeName}.png";
         var fullPath = IoPath.Combine(dir, fileName);
 
-        using (var fs = File.Open(fullPath, FileMode.Create, FileAccess.Write, FileShare.None))
+        try
         {
-            if (!bitmap.Compress(Bitmap.CompressFormat.Png!, 100, fs))
-                throw new IOException("PNG 编码失败");
-            fs.Flush();
+            using var fs = File.Open(fullPath, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+            WritePng(bitmap, fs);
+        }
+        catch
+        {
+            try { File.Delete(fullPath); } catch { }
+            throw;
         }
 
         using var uri = new AUri.Builder();
@@ -136,7 +141,7 @@ internal static class ShareImageHelper
     public static string SaveToGallery(Context ctx, Bitmap bitmap, string baseName)
     {
         var safeName = SanitizeFileName(baseName);
-        var fileName = $"{safeName}_{DateTime.Now:yyyyMMdd_HHmmss}.png";
+        var fileName = $"{safeName}_{DateTime.Now:yyyyMMdd_HHmmss_fff}.png";
 
         if (OperatingSystem.IsAndroidVersionAtLeast(29))
             return SaveToGalleryApi29(ctx, bitmap, fileName);
@@ -162,9 +167,7 @@ internal static class ShareImageHelper
         {
             using (var stream = resolver.OpenOutputStream(uri) ?? throw new IOException("无法打开相册输出流"))
             {
-                if (!bitmap.Compress(Bitmap.CompressFormat.Png!, 100, stream))
-                    throw new IOException("PNG 编码失败");
-                stream.Flush();
+                WritePng(bitmap, stream);
             }
 
             values.Clear();
@@ -194,11 +197,18 @@ internal static class ShareImageHelper
         Directory.CreateDirectory(outDir);
         var fullPath = IoPath.Combine(outDir, fileName);
 
-        using (var fs = File.Open(fullPath, FileMode.Create, FileAccess.Write, FileShare.None))
+        using (var fs = File.Open(fullPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
         {
-            if (!bitmap.Compress(Bitmap.CompressFormat.Png!, 100, fs))
-                throw new IOException("PNG 编码失败");
-            fs.Flush();
+            try
+            {
+                WritePng(bitmap, fs);
+            }
+            catch
+            {
+                fs.Close();
+                try { File.Delete(fullPath); } catch { }
+                throw;
+            }
         }
 
         MediaScannerConnection.ScanFile(ctx, [fullPath], ["image/png"], null);
@@ -209,9 +219,12 @@ internal static class ShareImageHelper
     {
         try
         {
-            var cutoff = DateTime.UtcNow.AddMinutes(-5);
+            var now = DateTime.UtcNow;
             foreach (var file in Directory.EnumerateFiles(dir, "*.png"))
             {
+                var cutoff = IoPath.GetFileName(file).StartsWith("clipboard-", StringComparison.Ordinal)
+                    ? now.AddDays(-1)
+                    : now.AddHours(-1);
                 if (File.GetLastWriteTimeUtc(file) < cutoff)
                     File.Delete(file);
             }
@@ -220,6 +233,13 @@ internal static class ShareImageHelper
         {
             // 忽略临时文件清理异常
         }
+    }
+
+    private static void WritePng(Bitmap bitmap, System.IO.Stream stream)
+    {
+        if (!bitmap.Compress(Bitmap.CompressFormat.Png!, 100, stream))
+            throw new IOException("PNG 编码失败");
+        stream.Flush();
     }
 
     private static string SanitizeFileName(string raw)

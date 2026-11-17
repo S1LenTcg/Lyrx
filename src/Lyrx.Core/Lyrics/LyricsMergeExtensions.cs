@@ -42,6 +42,83 @@ public static class LyricsMergeExtensions
             ApplyTranslation(lyrics.Lines[i], translation.Lines[i].Content);
     }
 
+    /// <summary>
+    /// 面向逐字时间轴（如 NetEase yrc/klyric）的翻译合并：
+    /// 先执行 20ms 精确时间戳匹配；若大量译文因逐字行首时间与行级 lrc 存在小幅偏移而未命中，
+    /// 再对剩余行在单调顺序与 ±0.85s 容差内按最邻近时间戳对齐补齐。
+    /// </summary>
+    internal static void MergeTranslationAdaptive(this Lyrics lyrics, Lyrics translation)
+    {
+        lyrics.MergeTranslation(translation);
+
+        var totalNonEmpty = translation.Lines.Count(l => IsValidTranslationText(l.Content));
+        if (totalNonEmpty < 3) return;
+
+        var trTag = LineAttachments.TranslationTag();
+        var exactMatched = lyrics.Lines.Count(l => !string.IsNullOrWhiteSpace(l.Attachments[trTag]));
+        if (exactMatched * 2 >= totalNonEmpty) return;
+
+        // 建立译文到原文行的近似单调映射，只补齐尚无译文的行
+        var matchedTransPositions = new HashSet<int>();
+        var lStart = 0;
+        for (var ti = 0; ti < translation.Lines.Count; ti++)
+        {
+            var tLine = translation.Lines[ti];
+            if (!IsValidTranslationText(tLine.Content)) continue;
+
+            // 若该译文时间戳已在 20ms 精确阶段命中，则推进下界游标
+            var exactIdx = -1;
+            for (var li = lStart; li < lyrics.Lines.Count; li++)
+            {
+                if (Math.Abs(lyrics.Lines[li].Position - tLine.Position) < MergeTimeTagThreshold)
+                {
+                    exactIdx = li;
+                    break;
+                }
+                if (lyrics.Lines[li].Position > tLine.Position + MergeTimeTagThreshold)
+                    break;
+            }
+            if (exactIdx >= 0)
+            {
+                lStart = exactIdx + 1;
+                matchedTransPositions.Add(ti);
+                continue;
+            }
+
+            if (matchedTransPositions.Contains(ti)) continue;
+
+            var bestIdx = -1;
+            var bestDiff = 0.85;
+            for (var li = lStart; li < lyrics.Lines.Count; li++)
+            {
+                var line = lyrics.Lines[li];
+                if (!line.Enabled || string.IsNullOrWhiteSpace(line.Content)) continue;
+                if (!string.IsNullOrWhiteSpace(line.Attachments[trTag])) continue;
+
+                var diff = Math.Abs(line.Position - tLine.Position);
+                if (line.Position > tLine.Position + 0.85) break;
+                if (diff <= bestDiff)
+                {
+                    bestDiff = diff;
+                    bestIdx = li;
+                }
+            }
+
+            if (bestIdx >= 0)
+            {
+                ApplyTranslation(lyrics.Lines[bestIdx], tLine.Content);
+                lStart = bestIdx + 1;
+            }
+        }
+    }
+
+    private static bool IsValidTranslationText(string? s)
+    {
+        if (string.IsNullOrWhiteSpace(s)) return false;
+        var trimmed = s.Trim();
+        return trimmed.Length > 0 && trimmed != "//";
+    }
+
     private static void ApplyTranslation(LyricsLine line, string translation)
     {
         // "//" 是 NetEase 在空翻译行中使用的占位符

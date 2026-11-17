@@ -1069,8 +1069,8 @@ internal sealed class LyricShareWindow : Window
             if (Math.Abs(nextScale - _fontSizeScale) < 0.005) return;
             UpdateFontScale(nextScale, saveSettings: false);
         };
-        _fontScaleSlider.LostMouseCapture += (_, _) => PersistFontScaleIfChanged();
-        _fontScaleSlider.KeyUp += (_, _) => PersistFontScaleIfChanged();
+        _fontScaleSlider.LostMouseCapture += (_, _) => PersistPreferences();
+        _fontScaleSlider.KeyUp += (_, _) => PersistPreferences();
         Grid.SetColumn(_fontScaleSlider, 2);
         fontSliderRow.Children.Add(_fontScaleSlider);
         fontSection.Children.Add(fontSliderRow);
@@ -1132,8 +1132,7 @@ internal sealed class LyricShareWindow : Window
         if (mode == ShareBackgroundMode.AlbumCover && !_hasAlbumCover) return;
         SwitchBackgroundMode(mode);
     }
-    internal void SetFontSizeScaleForTest(double scale) =>
-        UpdateFontScale(Math.Clamp(Math.Round(scale, 2), LyricShareCardRenderer.MinFontScale, LyricShareCardRenderer.MaxFontScale), saveSettings: false);
+    internal void SetFontSizeScaleForTest(double scale) => UpdateFontScale(scale, saveSettings: false);
     internal void SetCoverEffectPresetForTest(ShareCoverEffect preset) =>
         ApplyCoverEffectPreset(preset, saveSettings: false);
     internal void SetCoverEffectSettingsForTest(ShareCoverEffectSettings settings) =>
@@ -1158,19 +1157,23 @@ internal sealed class LyricShareWindow : Window
     {
         _keepBackdropTrack.Background = _clipboardKeepBackdrop ? AccentGreen : FrozenBrush(66, 66, 72);
         var targetX = _clipboardKeepBackdrop ? 16.0 : 0.0;
+        MovePillThumb(_keepBackdropKnobTransform, targetX, animate, 160);
+    }
 
+    private static void MovePillThumb(TranslateTransform thumb, double targetX, bool animate, int durationMs = 200)
+    {
         if (!animate || !SystemParameters.ClientAreaAnimation)
         {
-            _keepBackdropKnobTransform.BeginAnimation(TranslateTransform.XProperty, null);
-            _keepBackdropKnobTransform.X = targetX;
+            thumb.BeginAnimation(TranslateTransform.XProperty, null);
+            thumb.X = targetX;
             return;
         }
 
-        var anim = new DoubleAnimation(targetX, TimeSpan.FromMilliseconds(160))
+        var anim = new DoubleAnimation(targetX, TimeSpan.FromMilliseconds(durationMs))
         {
             EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
         };
-        _keepBackdropKnobTransform.BeginAnimation(TranslateTransform.XProperty, anim);
+        thumb.BeginAnimation(TranslateTransform.XProperty, anim);
     }
 
     private string BuildTrackSubtitleText()
@@ -1184,18 +1187,14 @@ internal sealed class LyricShareWindow : Window
 
     private ShareCardOptions BuildCurrentOptions()
     {
-        var hasCustom = _backgroundMode == ShareBackgroundMode.CustomImage
-            && _customBgBitmap is { PixelWidth: > 0, PixelHeight: > 0 };
-        var baseColor = hasCustom && _colorIndex == 0
-            ? _customBgThemeColor
-            : _presets[_colorIndex].BaseColor;
+        var hasCustom = HasCustomBackground;
         var gradientEnd = hasCustom && _colorIndex == 0
             ? ClassicLyricsPalette.BlendColor(_customBgThemeColor, Colors.Black, 0.28)
             : _presets[_colorIndex].AccentEndColor;
 
         return new ShareCardOptions(
             _style,
-            baseColor,
+            ResolveThemeColor(),
             _showTranslation,
             _payload.TrackTitle,
             _payload.ArtistName,
@@ -1371,8 +1370,6 @@ internal sealed class LyricShareWindow : Window
         _settings.LyricShareCoverTint = _coverEffect.ColorTintAmount;
     }
 
-    private void PersistFontScaleIfChanged() => PersistPreferences();
-
     private void PersistPreferences()
     {
         _settings.LyricShareFontScale = _fontSizeScale;
@@ -1425,19 +1422,16 @@ internal sealed class LyricShareWindow : Window
         _ => "gradient",
     };
 
-    private Color ResolveThemeColor()
-    {
-        if (_backgroundMode == ShareBackgroundMode.CustomImage && _customBgBitmap is { PixelWidth: > 0, PixelHeight: > 0 })
-            return _colorIndex == 0 ? _customBgThemeColor : _presets[_colorIndex].BaseColor;
-        if (_backgroundMode == ShareBackgroundMode.AlbumCover && _hasAlbumCover)
-            return _presets[_colorIndex].BaseColor;
-        return _presets[_colorIndex].BaseColor;
-    }
+    private bool HasCustomBackground => _backgroundMode == ShareBackgroundMode.CustomImage
+        && _customBgBitmap is { PixelWidth: > 0, PixelHeight: > 0 };
+
+    private Color ResolveThemeColor() => HasCustomBackground && _colorIndex == 0
+        ? _customBgThemeColor
+        : _presets[_colorIndex].BaseColor;
 
     private void RefreshAllVisuals()
     {
-        var hasCustom = _backgroundMode == ShareBackgroundMode.CustomImage
-            && _customBgBitmap is { PixelWidth: > 0, PixelHeight: > 0 };
+        var hasCustom = HasCustomBackground;
         var isAlbumCover = _backgroundMode == ShareBackgroundMode.AlbumCover && _hasAlbumCover;
         var isImageBg = hasCustom || isAlbumCover;
         var themeColor = ResolveThemeColor();
@@ -1455,7 +1449,8 @@ internal sealed class LyricShareWindow : Window
         if (_translationBtn is not null && _translationGlyph is not null && _translationBtnLabel is not null)
         {
             _translationBtn.Background = _showTranslation ? BgElevated : BgSurface;
-            _translationBtnGlyphTintSync(_showTranslation);
+            _translationGlyph.Tint = _showTranslation ? AccentGreen : TextMuted;
+            _translationBtnLabel.Foreground = _showTranslation ? TextPrimary : TextMuted;
         }
 
         // 4. 色板提示与选中状态（未选中圆点不加灰圈，选中仅呈现纯白外环）
@@ -1542,13 +1537,6 @@ internal sealed class LyricShareWindow : Window
         }
     }
 
-    private void _translationBtnGlyphTintSync(bool active)
-    {
-        if (_translationGlyph is null || _translationBtnLabel is null) return;
-        _translationGlyph.Tint = active ? AccentGreen : TextMuted;
-        _translationBtnLabel.Foreground = active ? TextPrimary : TextMuted;
-    }
-
     private void UpdatePreviewClipRadius()
     {
         var w = _previewCardClipFrame.ActualWidth;
@@ -1576,27 +1564,13 @@ internal sealed class LyricShareWindow : Window
         _appleLabel.FontWeight = isApple ? FontWeights.Bold : FontWeights.SemiBold;
 
         var segW = _stylePillTrack.ActualWidth > 0 ? _stylePillTrack.ActualWidth / 2.0 : 108.0;
-        var targetX = isApple ? segW : 0.0;
-
-        if (!animate || !SystemParameters.ClientAreaAnimation)
-        {
-            _styleThumbTransform.BeginAnimation(TranslateTransform.XProperty, null);
-            _styleThumbTransform.X = targetX;
-            return;
-        }
-
-        var anim = new DoubleAnimation(targetX, TimeSpan.FromMilliseconds(200))
-        {
-            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
-        };
-        _styleThumbTransform.BeginAnimation(TranslateTransform.XProperty, anim);
+        MovePillThumb(_styleThumbTransform, isApple ? segW : 0.0, animate);
     }
 
     private void UpdateBackgroundModePillVisual(bool animate)
     {
         var activeInk = FrozenBrush(18, 18, 18);
-        var isCustom = _backgroundMode == ShareBackgroundMode.CustomImage
-            && _customBgBitmap is { PixelWidth: > 0, PixelHeight: > 0 };
+        var isCustom = HasCustomBackground;
         _bgModeThumb.Background = Brushes.White;
         _bgModeThumb.Opacity = isCustom ? 0.0 : 1.0;
 
@@ -1619,20 +1593,7 @@ internal sealed class LyricShareWindow : Window
         if (activeSeg < 0) return;
 
         var segW = _bgModePillTrack.ActualWidth > 0 ? _bgModePillTrack.ActualWidth / 3.0 : 68.0;
-        var targetX = activeSeg * segW;
-
-        if (!animate || !SystemParameters.ClientAreaAnimation)
-        {
-            _bgModeThumbTransform.BeginAnimation(TranslateTransform.XProperty, null);
-            _bgModeThumbTransform.X = targetX;
-            return;
-        }
-
-        var anim = new DoubleAnimation(targetX, TimeSpan.FromMilliseconds(200))
-        {
-            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
-        };
-        _bgModeThumbTransform.BeginAnimation(TranslateTransform.XProperty, anim);
+        MovePillThumb(_bgModeThumbTransform, activeSeg * segW, animate);
     }
 
     private static Style CreateSpotifySliderStyle()

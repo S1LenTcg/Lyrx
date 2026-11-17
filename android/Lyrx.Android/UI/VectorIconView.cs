@@ -24,9 +24,12 @@ internal enum ClassicIconKind
     Speaker,
     Check,
     Download,
+    Copy,
     Share,
     ArrowLeft,
     Image,
+    SpotifyImage,
+    SpotifyTypography,
     Bilingual,
 }
 
@@ -67,6 +70,7 @@ internal static class ClassicIconRenderer
 
         var path = _path ??= new Path();
         path.Reset();
+        path.SetFillType(Path.FillType.Winding!);
 
         canvas.Save();
         canvas.Translate(dx, dy);
@@ -266,6 +270,15 @@ internal static class ClassicIconRenderer
                 canvas.DrawLine(8.6f, 13.3f, 15.0f, 17.1f, strokePaint);
                 break;
 
+            case ClassicIconKind.Copy:
+                canvas.DrawRoundRect(8f, 8f, 20.5f, 21f, 2f, 2f, strokePaint);
+                path.MoveTo(4f, 15.5f);
+                path.LineTo(4f, 5.5f);
+                path.QuadTo(4f, 3.5f, 6f, 3.5f);
+                path.LineTo(16f, 3.5f);
+                canvas.DrawPath(path, strokePaint);
+                break;
+
             case ClassicIconKind.ArrowLeft:
                 strokePaint.StrokeWidth = 2.1f;
                 canvas.DrawLine(19.0f, 12.0f, 5.5f, 12.0f, strokePaint);
@@ -284,6 +297,38 @@ internal static class ClassicIconRenderer
                 path.LineTo(12.6f, 15.6f);
                 path.LineTo(15.6f, 11.8f);
                 path.LineTo(19.4f, 17.5f);
+                path.Close();
+                canvas.DrawPath(path, fillPaint);
+                break;
+
+            case ClassicIconKind.SpotifyImage:
+                path.SetFillType(Path.FillType.EvenOdd!);
+                path.AddRoundRect(new RectF(3.2f, 3.6f, 20.8f, 20.4f), 3.4f, 3.4f, Path.Direction.Cw!);
+                path.AddCircle(8.3f, 8.7f, 1.55f, Path.Direction.Cw!);
+                path.MoveTo(5.2f, 18.2f);
+                path.LineTo(9.2f, 13.0f);
+                path.LineTo(12.2f, 16.0f);
+                path.LineTo(15.3f, 11.3f);
+                path.LineTo(18.8f, 18.2f);
+                path.Close();
+                canvas.DrawPath(path, fillPaint);
+                break;
+
+            case ClassicIconKind.SpotifyTypography:
+                path.SetFillType(Path.FillType.EvenOdd!);
+                path.AddRoundRect(new RectF(3.2f, 3.2f, 20.8f, 20.8f), 4.4f, 4.4f, Path.Direction.Cw!);
+                path.MoveTo(10.7f, 6.7f);
+                path.LineTo(13.3f, 6.7f);
+                path.LineTo(17.1f, 17.2f);
+                path.LineTo(14.5f, 17.2f);
+                path.LineTo(13.7f, 14.8f);
+                path.LineTo(10.3f, 14.8f);
+                path.LineTo(9.5f, 17.2f);
+                path.LineTo(6.9f, 17.2f);
+                path.Close();
+                path.MoveTo(12.0f, 9.2f);
+                path.LineTo(10.8f, 12.8f);
+                path.LineTo(13.2f, 12.8f);
                 path.Close();
                 canvas.DrawPath(path, fillPaint);
                 break;

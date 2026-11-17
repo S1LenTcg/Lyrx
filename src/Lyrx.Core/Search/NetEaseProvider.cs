@@ -82,12 +82,43 @@ public sealed partial class NetEaseProvider : LyricsProviderBase<NetEaseProvider
         var response = JsonSerializer.Deserialize<LyricsResponse>(raw, JsonOptions);
         if (response is null) return null;
 
-        // 优先逐字格式（yrc 新式 → klyric 旧式），没有则用行级 lrc
-        var lyrics = ParseWordLevel(response) ?? ParseFixed(response.Lrc?.Lyric);
-        if (lyrics is null) return null;
-
+        // 优先逐字格式（yrc 新式 → klyric 旧式），没有则用行级 lrc；
+        // 当逐字格式无法与 tlyric 译文充分对齐时，优先保留完整双语的 lrc 版本。
+        var wordLevel = ParseWordLevel(response);
+        var lineLevel = ParseFixed(response.Lrc?.Lyric);
         var translation = ParseFixed(response.Tlyric?.Lyric);
-        if (translation is not null) lyrics.MergeTranslation(translation);
+
+        Lyrics? lyrics;
+        if (wordLevel is not null)
+        {
+            if (translation is not null)
+            {
+                wordLevel.MergeTranslationAdaptive(translation);
+                if (lineLevel is not null)
+                {
+                    lineLevel.MergeTranslationAdaptive(translation);
+                    var wordTr = wordLevel.Lines.Count(l => !string.IsNullOrWhiteSpace(l.Attachments.Translation()));
+                    var lineTr = lineLevel.Lines.Count(l => !string.IsNullOrWhiteSpace(l.Attachments.Translation()));
+                    lyrics = (lineTr >= 4 && wordTr * 2 < lineTr) ? lineLevel : wordLevel;
+                }
+                else
+                {
+                    lyrics = wordLevel;
+                }
+            }
+            else
+            {
+                lyrics = wordLevel;
+            }
+        }
+        else
+        {
+            lyrics = lineLevel;
+            if (lyrics is not null && translation is not null)
+                lyrics.MergeTranslationAdaptive(translation);
+        }
+
+        if (lyrics is null) return null;
 
         lyrics.IdTags[Lyrics.TagTitle] = token.Name;
         if (token.Artists is [{ Name: { } artistName }, ..])

@@ -37,7 +37,14 @@ public static class LyricsQuality
                       + DurationQuality(lyrics) * DurationWeight;
         var quality = Math.Clamp(baseScore, 0.0, 1.0);
 
-        if (lyrics.HasTranslation()) quality += TranslationBonus;
+        if (lyrics.HasTranslation())
+        {
+            var (nonEmpty, realTr) = CountRealTranslations(lyrics);
+            var bonusScale = nonEmpty >= 5
+                ? Math.Clamp((double)realTr / (nonEmpty * 0.45), 0.0, 1.0)
+                : 1.0;
+            quality += TranslationBonus * bonusScale;
+        }
         if (lyrics.Metadata.AttachmentTags.Contains(LineAttachments.TagTimeTag)) quality += InlineTimeTagBonus;
         if (IsUnwantedAlternateVersion(lyrics)) quality -= AlternateVersionPenalty;
 
@@ -45,9 +52,43 @@ public static class LyricsQuality
         return quality;
     }
 
-    /// <summary>是否至少有一行带有翻译</summary>
-    public static bool HasTranslation(this Lyrics lyrics) =>
-        lyrics.Lines.Any(l => l.Attachments.Translation() is not null);
+    /// <summary>是否包含有效翻译（排除仅首行版权声明或极少数误匹配的残缺翻译）</summary>
+    public static bool HasTranslation(this Lyrics lyrics)
+    {
+        var (nonEmpty, realTr) = CountRealTranslations(lyrics);
+        if (realTr == 0) return false;
+        return nonEmpty <= 4 ? realTr >= 1 : realTr >= 2;
+    }
+
+    private static (int NonEmpty, int RealTranslations) CountRealTranslations(Lyrics lyrics)
+    {
+        var nonEmpty = 0;
+        var realTr = 0;
+        foreach (var line in lyrics.Lines)
+        {
+            if (!line.Enabled || string.IsNullOrWhiteSpace(line.Content)) continue;
+            nonEmpty++;
+            var tr = line.Attachments.Translation();
+            if (!string.IsNullOrWhiteSpace(tr) && !IsTranslationBoilerplate(tr, line.Position))
+                realTr++;
+        }
+        return (nonEmpty, realTr);
+    }
+
+    private static bool IsTranslationBoilerplate(string tr, double position)
+    {
+        var t = tr.Trim();
+        if (t.Length == 0 || t == "//") return true;
+        if (position <= 1.0 && (t.Contains("著作权", StringComparison.Ordinal)
+            || t.Contains("版权", StringComparison.Ordinal)
+            || t.Contains("本翻译", StringComparison.Ordinal)
+            || t.Contains("翻译作品", StringComparison.Ordinal)
+            || t.Contains("大模型提供", StringComparison.Ordinal)))
+        {
+            return true;
+        }
+        return false;
+    }
 
     /// <summary>标题与歌手是否与搜索词（达到包含关系级别）匹配 —— 用于判定缓存命中</summary>
     public static bool IsMatched(this Lyrics lyrics)

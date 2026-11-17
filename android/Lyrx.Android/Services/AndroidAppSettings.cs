@@ -9,7 +9,7 @@ namespace Musebase.Android.Services;
 
 /// <summary>
 /// Android 端应用配置（保存在 <c>Context.FilesDir/settings.json</c>）。
-/// 与 Windows 版保持相同的核心语义和默认策略（默认仅使用歌词源自带翻译、动态背景取色）。
+/// 与核心语义对齐，并默认开启免费在线翻译补充与歌词源自带译文显示。
 /// </summary>
 public sealed class AndroidAppSettings
 {
@@ -19,7 +19,7 @@ public sealed class AndroidAppSettings
     [JsonIgnore]
     private string _settingsPath = "";
 
-    public bool ShowTranslation { get; set; }
+    public bool ShowTranslation { get; set; } = true;
 
     public bool ShowOnlyTargetTranslation { get; set; } = true;
 
@@ -73,9 +73,9 @@ public sealed class AndroidAppSettings
 
     public List<string> EnabledLyricsSources { get; set; } = LyricsSourceRegistry.AllIds.ToList();
 
-    public string? TranslationEngine { get; set; } = TranslatorRegistry.None;
+    public string? TranslationEngine { get; set; } = TranslatorRegistry.DefaultFreeEngine;
 
-    public bool ApiTranslationEnabled { get; set; }
+    public bool ApiTranslationEnabled { get; set; } = true;
 
     public string TargetLanguage { get; set; } = DefaultTargetLanguage();
 
@@ -100,7 +100,7 @@ public sealed class AndroidAppSettings
     /// <summary>是否已向用户发起过 Android 12+ 蓝牙设备连接权限请求。</summary>
     public bool BluetoothPermissionRequested { get; set; }
 
-    private const int CurrentSettingsSchemaVersion = 2;
+    private const int CurrentSettingsSchemaVersion = 3;
 
     /// <summary>用于升级旧版本默认配置的一次性版本号。</summary>
     public int SettingsSchemaVersion { get; set; }
@@ -115,12 +115,20 @@ public sealed class AndroidAppSettings
 
     /// <summary>歌词分享卡片默认样式："spotify" | "apple-music"。</summary>
     public string LyricShareStyle { get; set; } = "spotify";
+    public string LyricShareBackgroundMode { get; set; } = "gradient";
+    public int LyricShareFontPercent { get; set; } = 100;
+    public string LyricShareCoverEffectPreset { get; set; } = "SoftBlur";
+    public int? LyricShareCoverBlur { get; set; }
+    public int? LyricShareCoverDim { get; set; }
+    public int? LyricShareCoverFade { get; set; }
+    public int? LyricShareCoverTint { get; set; }
+    public bool LyricShareClipboardKeepBackdrop { get; set; } = true;
 
     [JsonIgnore]
     public string EffectiveTranslationEngine =>
         !string.IsNullOrWhiteSpace(TranslationEngine) ? TranslationEngine!.Trim().ToLowerInvariant()
         : !string.IsNullOrWhiteSpace(DeeplApiKey) ? "deepl"
-        : TranslatorRegistry.None;
+        : TranslatorRegistry.DefaultFreeEngine;
 
     [JsonIgnore]
     public string EffectiveTargetLanguage =>
@@ -143,8 +151,7 @@ public sealed class AndroidAppSettings
                     || culture.Name.EndsWith("-TW", StringComparison.OrdinalIgnoreCase)
                     || culture.Name.EndsWith("-HK", StringComparison.OrdinalIgnoreCase)
                     || culture.Name.EndsWith("-MO", StringComparison.OrdinalIgnoreCase) ? "ZH-HANT" : "ZH",
-            "EN" => "EN-US",
-            "JA" or "KO" or "DE" or "FR" or "ES" or "IT" => two,
+            "JA" or "KO" => two,
             _ => "ZH",
         };
     }
@@ -164,10 +171,26 @@ public sealed class AndroidAppSettings
                 loaded.ResolveSecrets();
                 if (loaded.SettingsSchemaVersion < CurrentSettingsSchemaVersion)
                 {
-                    if (string.IsNullOrWhiteSpace(loaded.OrientationMode)
-                        || string.Equals(loaded.OrientationMode, "auto", StringComparison.OrdinalIgnoreCase))
+                    if (loaded.SettingsSchemaVersion < 2
+                        && (string.IsNullOrWhiteSpace(loaded.OrientationMode)
+                            || string.Equals(loaded.OrientationMode, "auto", StringComparison.OrdinalIgnoreCase)))
                     {
                         loaded.OrientationMode = "sensor";
+                    }
+                    if (loaded.SettingsSchemaVersion < 3)
+                    {
+                        if ((string.IsNullOrWhiteSpace(loaded.TranslationEngine)
+                             || string.Equals(loaded.TranslationEngine, TranslatorRegistry.None, StringComparison.OrdinalIgnoreCase))
+                            && !loaded.ApiTranslationEnabled)
+                        {
+                            loaded.TranslationEngine = TranslatorRegistry.DefaultFreeEngine;
+                            loaded.ApiTranslationEnabled = true;
+                            loaded.ShowTranslation = true;
+                        }
+                        if (string.Equals(loaded.TargetLanguage, "EN-US", StringComparison.OrdinalIgnoreCase))
+                        {
+                            loaded.TargetLanguage = "ZH";
+                        }
                     }
                     loaded.SettingsSchemaVersion = CurrentSettingsSchemaVersion;
                     loaded.Save();

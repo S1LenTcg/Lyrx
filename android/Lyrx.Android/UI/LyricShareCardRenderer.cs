@@ -13,7 +13,7 @@ internal enum LyricShareStyle
 
 internal readonly record struct ShareLyricLine(string Original, string? Translation);
 
-internal readonly record struct SharePalettePreset(string Id, string Label, Color BaseColor, bool IsDynamic = false);
+internal readonly record struct SharePalettePreset(string Label, Color BaseColor, Color GradientEndColor);
 
 internal sealed record ShareCardOptions(
     LyricShareStyle Style,
@@ -23,7 +23,20 @@ internal sealed record ShareCardOptions(
     string? ArtistName,
     Bitmap? CoverBitmap,
     IReadOnlyList<ShareLyricLine> Lines,
-    Bitmap? CustomBackgroundBitmap = null);
+    Bitmap? CustomBackgroundBitmap,
+    ShareBackgroundMode BackgroundMode,
+    Color GradientEndColor,
+    ShareCoverEffectSettings CoverEffect,
+    ShareLyricsFont LyricsFont,
+    float FontScale)
+{
+    public Bitmap? BackgroundImage => BackgroundMode switch
+    {
+        ShareBackgroundMode.AlbumCover => CoverBitmap,
+        ShareBackgroundMode.CustomImage => CustomBackgroundBitmap,
+        _ => null,
+    };
+}
 
 /// <summary>
 /// 高分辨率歌词分享卡片位图渲染器，同时供预览窗与导出/分享使用：
@@ -31,71 +44,88 @@ internal sealed record ShareCardOptions(
 /// </summary>
 internal static class LyricShareCardRenderer
 {
-    public static IReadOnlyList<SharePalettePreset> BuildPresets(Color dynamicBaseColor) =>
-    [
-        new("dynamic", "封面取色", dynamicBaseColor, IsDynamic: true),
-        new("forest-green", "经典深绿", Color.Rgb(27, 77, 52)),
-        new("spotify-teal", "深海青灰", Color.Rgb(36, 61, 68)),
-        new("apple-amber", "温暖琥珀", Color.Rgb(84, 68, 42)),
-        new("ocean-blue", "午夜蓝", Color.Rgb(28, 56, 86)),
-        new("burgundy", "酒红", Color.Rgb(79, 29, 40)),
-        new("warm-gray", "高级暖灰", Color.Rgb(54, 54, 58)),
-        new("charcoal", "极夜黑", Color.Rgb(24, 24, 26)),
-    ];
+    public const int MinFontPercent = 75;
+    public const int MaxFontPercent = 135;
+    private const float ExportScale = 2f;
 
-    public static Bitmap Render(Context context, ShareCardOptions options) =>
+    public static IReadOnlyList<SharePalettePreset> BuildPresets(Color coverColor)
+    {
+        var dynamicColor = LyricsPalette.ShareCardColor(coverColor);
+        return
+        [
+            new("封面取色", dynamicColor, LyricsPalette.BlendColor(dynamicColor, Color.Black, 0.28)),
+            new("松林幽绿", Color.Rgb(24, 106, 77), Color.Rgb(11, 61, 44)),
+            new("雾霭靛蓝", Color.Rgb(42, 71, 110), Color.Rgb(20, 36, 59)),
+            new("暮光暗紫", Color.Rgb(82, 62, 112), Color.Rgb(40, 29, 59)),
+            new("赤陶暖阳", Color.Rgb(198, 76, 50), Color.Rgb(118, 34, 22)),
+            new("奶油燕麦", Color.Rgb(237, 228, 211), Color.Rgb(210, 195, 170)),
+            new("薄荷苏打", Color.Rgb(198, 240, 219), Color.Rgb(145, 212, 182)),
+            new("曜石深炭", Color.Rgb(42, 42, 46), Color.Rgb(18, 18, 20)),
+        ];
+    }
+
+    public static Bitmap Render(Context context, ShareCardOptions options, bool forPreview = false) =>
         options.Style == LyricShareStyle.AppleMusic
-            ? RenderAppleMusicCard(context, options)
-            : RenderSpotifyCard(context, options);
+            ? RenderAppleMusicCard(context, options, forPreview ? 0.7f : ExportScale)
+            : RenderSpotifyCard(context, options, forPreview ? 0.7f : ExportScale);
 
-    private static Bitmap RenderSpotifyCard(Context ctx, ShareCardOptions opt)
+    public static Bitmap RenderClipboard(Context context, ShareCardOptions options, bool keepBackdrop)
+    {
+        using var card = Render(context, options);
+        var pad = keepBackdrop ? (int)(72 * ExportScale) : 0;
+        var width = card.Width + pad * 2;
+        var height = card.Height + pad * 2;
+        var result = Bitmap.CreateBitmap(width, height, Bitmap.Config.Argb8888!)!;
+        using var canvas = new Canvas(result);
+        using var rect = new RectF(pad, pad, pad + card.Width, pad + card.Height);
+        var radius = (options.Style == LyricShareStyle.Spotify ? 42 : 34) * ExportScale;
+
+        if (keepBackdrop)
+        {
+            using var bounds = new RectF(0, 0, width, height);
+            LyricShareBackground.DrawGradient(canvas, bounds,
+                [Color.Rgb(10, 10, 12), LyricsPalette.BlendColor(options.BaseColor, Color.Black, 0.42),
+                    LyricsPalette.BlendColor(options.BaseColor, Color.Black, 0.12)],
+                [0f, 0.46f, 1f]);
+            using var shadow = new Paint(PaintFlags.AntiAlias) { Color = Color.Argb(148, 0, 0, 0) };
+            using var filter = new BlurMaskFilter(36 * ExportScale, BlurMaskFilter.Blur.Normal!);
+            shadow.SetMaskFilter(filter);
+            canvas.DrawRoundRect(rect.Left, rect.Top + 14, rect.Right, rect.Bottom + 14, radius, radius, shadow);
+        }
+
+        using var paint = new Paint(PaintFlags.AntiAlias | PaintFlags.FilterBitmap);
+        using var shader = new BitmapShader(card, Shader.TileMode.Clamp!, Shader.TileMode.Clamp!);
+        using var matrix = new Matrix();
+        matrix.SetTranslate(pad, pad);
+        shader.SetLocalMatrix(matrix);
+        paint.SetShader(shader);
+        canvas.DrawRoundRect(rect, radius, radius, paint);
+        return result;
+    }
+
+    private static Bitmap RenderSpotifyCard(Context ctx, ShareCardOptions opt, float scale)
     {
         const int size = 1080;
         const float padX = 68f;
         const float padTop = 64f;
         const float coverSize = 106f;
 
-        var bitmap = Bitmap.CreateBitmap(size, size, Bitmap.Config.Argb8888!)!;
-        var canvas = new Canvas(bitmap);
-
-        var hasCustomBg = opt.CustomBackgroundBitmap is { IsRecycled: false } customBg
-            && customBg.Width > 0 && customBg.Height > 0;
-        Color badgeBottomBg;
-
-        if (hasCustomBg)
-        {
-            DrawBitmapCenterCrop(canvas, opt.CustomBackgroundBitmap!, new RectF(0f, 0f, size, size));
-            using var scrimPaint = new Paint(PaintFlags.AntiAlias);
-            scrimPaint.SetShader(new LinearGradient(
-                0f, 0f, 0f, size,
-                [Color.Argb(96, 0, 0, 0).ToArgb(), Color.Argb(148, 0, 0, 0).ToArgb()],
-                null,
-                Shader.TileMode.Clamp!));
-            canvas.DrawRect(0f, 0f, size, size, scrimPaint);
-            var (customDark, _) = LyricsPalette.FromCover(opt.CustomBackgroundBitmap);
-            badgeBottomBg = LyricsPalette.BlendColor(customDark, Color.Black, 0.45);
-        }
-        else
-        {
-            var topBg = LyricsPalette.BlendColor(opt.BaseColor, Color.White, 0.08);
-            var bottomBg = LyricsPalette.BlendColor(opt.BaseColor, Color.Black, 0.30);
-
-            using var bgPaint = new Paint(PaintFlags.AntiAlias);
-            bgPaint.SetShader(new LinearGradient(
-                0f, 0f, size * 0.35f, size,
-                [topBg.ToArgb(), bottomBg.ToArgb()],
-                null,
-                Shader.TileMode.Clamp!));
-            canvas.DrawRect(0f, 0f, size, size, bgPaint);
-            badgeBottomBg = LyricsPalette.BlendColor(topBg, bottomBg, 0.90);
-        }
-
+        var bitmap = Bitmap.CreateBitmap((int)(size * scale), (int)(size * scale), Bitmap.Config.Argb8888!)!;
+        using var canvas = new Canvas(bitmap);
+        canvas.Scale(scale, scale);
+        using var bounds = new RectF(0, 0, size, size);
+        var image = opt.BackgroundImage;
+        var badgeBottomBg = LyricShareBackground.Draw(canvas, bounds, opt, image);
+        var isLight = image is null && LyricsPalette.RelativeLuminance(opt.BaseColor) > 0.36;
+        var ink = isLight ? Color.Rgb(20, 23, 22) : Color.White;
+        var subdued = isLight ? Color.Rgb(49, 53, 50) : Color.Argb(214, 255, 255, 255);
         var titleTf = UiHelpers.ResolveFontWeight(ctx, UiHelpers.FontWeightBold, useTitleFont: true);
         var boldTf = UiHelpers.ResolveFontWeight(ctx, UiHelpers.FontWeightBold);
         var regTf = UiHelpers.ResolveFontWeight(ctx, UiHelpers.FontWeightRegular);
+        var (lyricTf, translationTf) = ResolveLyricsFonts(ctx, opt.LyricsFont, titleTf, regTf);
 
         // 1. 顶部专辑封面 + 歌曲名 + 「歌曲 · 歌手」
-        var coverRect = new RectF(padX, padTop, padX + coverSize, padTop + coverSize);
+        using var coverRect = new RectF(padX, padTop, padX + coverSize, padTop + coverSize);
         DrawCoverThumbnail(canvas, opt.CoverBitmap, coverRect, radius: 14f, titleTf);
 
         var metaX = padX + coverSize + 24f;
@@ -103,10 +133,10 @@ internal static class LyricShareCardRenderer
         var titleText = string.IsNullOrWhiteSpace(opt.TrackTitle) ? "未知歌曲" : opt.TrackTitle!.Trim();
         var subText = string.IsNullOrWhiteSpace(opt.ArtistName) ? "歌曲" : $"歌曲 · {opt.ArtistName!.Trim()}";
 
-        var titlePaint = CreateTextPaint(boldTf, 34f, Color.White);
-        var subPaint = CreateTextPaint(regTf, 27f, Color.Argb(224, 255, 255, 255));
-        var titleLayout = BuildSingleLineLayout(titleText, titlePaint, metaW);
-        var subLayout = BuildSingleLineLayout(subText, subPaint, metaW);
+        using var titlePaint = CreateTextPaint(boldTf, 34f, ink, shadow: image is not null);
+        using var subPaint = CreateTextPaint(regTf, 27f, subdued, shadow: image is not null);
+        using var titleLayout = BuildSingleLineLayout(titleText, titlePaint, metaW);
+        using var subLayout = BuildSingleLineLayout(subText, subPaint, metaW);
         var metaTotalH = titleLayout.Height + 6f + subLayout.Height;
         var metaTop = padTop + (coverSize - metaTotalH) / 2f;
 
@@ -114,7 +144,7 @@ internal static class LyricShareCardRenderer
         DrawLayoutAt(canvas, subLayout, metaX, metaTop + titleLayout.Height + 6f);
 
         // 2. 底部左下角 Spotify 样式标识
-        DrawSpotifyBrand(canvas, padX, size - 78f, boldTf, badgeBottomBg);
+        DrawSpotifyBrand(canvas, padX, size - 78f, boldTf, ink, badgeBottomBg, image is not null);
 
         // 3. 中部自适应歌词块
         const float lyricsTopBound = 216f;
@@ -122,15 +152,14 @@ internal static class LyricShareCardRenderer
         var lyricsMaxW = size - padX * 2f;
         var maxAvailH = lyricsBottomBound - lyricsTopBound;
 
-        var (fontSize, _, _, totalH) = FitLyricsMetrics(
+        var (fontSize, totalH, lineLimit) = FitLyricsMetrics(
             opt.Lines,
             opt.ShowTranslation,
-            titleTf,
-            regTf,
+            lyricTf,
+            translationTf,
             lyricsMaxW,
             maxAvailH,
-            maxFontSp: opt.Lines.Count <= 2 ? 70f : 62f,
-            minFontSp: 28f,
+            maxFontSp: (opt.Lines.Count <= 2 ? 70f : 62f) * opt.FontScale,
             lineSpacingMult: 1.12f);
 
         var startY = lyricsTopBound + MathF.Max(0f, (maxAvailH - totalH) / 2f);
@@ -138,20 +167,22 @@ internal static class LyricShareCardRenderer
             canvas,
             opt.Lines,
             opt.ShowTranslation,
-            titleTf,
-            regTf,
+            lyricTf,
+            translationTf,
             fontSize,
             lineSpacingMult: 1.12f,
             x: padX,
             y: startY,
             maxW: lyricsMaxW,
-            mainColor: Color.White,
-            subColor: Color.Argb(196, 255, 255, 255));
+            mainColor: ink,
+            subColor: subdued,
+            lineLimit: lineLimit,
+            shadow: image is not null);
 
         return bitmap;
     }
 
-    private static Bitmap RenderAppleMusicCard(Context ctx, ShareCardOptions opt)
+    private static Bitmap RenderAppleMusicCard(Context ctx, ShareCardOptions opt, float scale)
     {
         // 四周外边距严格等宽（上 = 下 = 左 = 右 = outerMargin）
         const int canvasW = 1200;
@@ -166,97 +197,61 @@ internal static class LyricShareCardRenderer
         var lyricRegTf = UiHelpers.ResolveSystemFontWeight(UiHelpers.FontWeightRegular);
         var metaMedTf = UiHelpers.ResolveSystemFontWeight(UiHelpers.FontWeightMedium);
         var brandTf = UiHelpers.ResolveFontWeight(ctx, UiHelpers.FontWeightSemiBold);
+        var (mainTf, translationTf) = ResolveLyricsFonts(ctx, opt.LyricsFont, lyricRegTf, lyricRegTf);
 
-        var (fontSize, _, _, lyricsH) = FitLyricsMetrics(
+        var (fontSize, lyricsH, lineLimit) = FitLyricsMetrics(
             opt.Lines,
             opt.ShowTranslation,
-            lyricRegTf,
-            lyricRegTf,
+            mainTf,
+            translationTf,
             textW,
             maxAvailH: 760f,
-            maxFontSp: opt.Lines.Count <= 3 ? 58f : 52f,
-            minFontSp: 30f,
+            maxFontSp: (opt.Lines.Count <= 3 ? 58f : 52f) * opt.FontScale,
             lineSpacingMult: 1.16f);
 
         var upperH = MathF.Max(236f, lyricsH + upperPadY * 2f);
         var cardH = upperH + lowerH;
         var canvasH = (int)MathF.Round(cardH + outerMargin * 2f);
 
-        var bitmap = Bitmap.CreateBitmap(canvasW, canvasH, Bitmap.Config.Argb8888!)!;
-        var canvas = new Canvas(bitmap);
-
-        var hasCustomBg = opt.CustomBackgroundBitmap is { IsRecycled: false } customBg
-            && customBg.Width > 0 && customBg.Height > 0;
-
-        Color effectiveBase = opt.BaseColor;
-        if (hasCustomBg)
-        {
-            DrawBitmapCenterCrop(canvas, opt.CustomBackgroundBitmap!, new RectF(0f, 0f, canvasW, canvasH));
-            using var outerDim = new Paint(PaintFlags.AntiAlias) { Color = Color.Argb(64, 0, 0, 0) };
-            canvas.DrawRect(0f, 0f, canvasW, canvasH, outerDim);
-            (effectiveBase, _) = LyricsPalette.FromCover(opt.CustomBackgroundBitmap);
-        }
-        else
-        {
-            // 1. 封面色调外背景底衬（保持饱和度与四周等宽留白）
-            var backdropBase = EnsureMinBrightness(LyricsPalette.BlendColor(effectiveBase, Color.White, 0.06), minSum: 115);
-            var backdropTop = LyricsPalette.BlendColor(backdropBase, Color.White, 0.06);
-            var backdropBottom = LyricsPalette.BlendColor(backdropBase, Color.Black, 0.10);
-
-            using (var outerPaint = new Paint(PaintFlags.AntiAlias))
-            {
-                outerPaint.SetShader(new LinearGradient(
-                    0f, 0f, 0f, canvasH,
-                    [backdropTop.ToArgb(), backdropBottom.ToArgb()],
-                    null,
-                    Shader.TileMode.Clamp!));
-                canvas.DrawRect(0f, 0f, canvasW, canvasH, outerPaint);
-            }
-
-            if (opt.CoverBitmap is { IsRecycled: false } coverBmp && (coverBmp.Width > 12 || coverBmp.Height > 12))
-            {
-                using var tiny = Bitmap.CreateScaledBitmap(coverBmp, 12, 12, true);
-                if (tiny is not null)
-                {
-                    using var washPaint = new Paint(PaintFlags.AntiAlias | PaintFlags.FilterBitmap)
-                    {
-                        Alpha = 28,
-                    };
-                    canvas.DrawBitmap(tiny, null, new RectF(0f, 0f, canvasW, canvasH), washPaint);
-                }
-            }
-            effectiveBase = backdropBase;
-        }
+        var bitmap = Bitmap.CreateBitmap((int)MathF.Ceiling(canvasW * scale), (int)MathF.Ceiling(canvasH * scale), Bitmap.Config.Argb8888!)!;
+        using var canvas = new Canvas(bitmap);
+        canvas.Scale(bitmap.Width / (float)canvasW, bitmap.Height / (float)canvasH);
+        var image = opt.BackgroundImage;
+        using var bounds = new RectF(0, 0, canvasW, canvasH);
+        LyricShareBackground.Draw(canvas, bounds, opt, image);
 
         // 2. 卡片柔和投影
         var cardLeft = outerMargin;
         var cardTop = outerMargin;
-        var cardRect = new RectF(cardLeft, cardTop, cardLeft + cardW, cardTop + cardH);
+        using var cardRect = new RectF(cardLeft, cardTop, cardLeft + cardW, cardTop + cardH);
 
         using (var shadowPaint = new Paint(PaintFlags.AntiAlias) { Color = Color.Argb(72, 0, 0, 0) })
         {
-            shadowPaint.SetMaskFilter(new BlurMaskFilter(20f, BlurMaskFilter.Blur.Normal!));
-            var shadowRect = new RectF(cardRect.Left, cardRect.Top + 6f, cardRect.Right, cardRect.Bottom + 6f);
-            canvas.DrawRoundRect(shadowRect, cardRadius, cardRadius, shadowPaint);
+            using var blur = new BlurMaskFilter(20f, BlurMaskFilter.Blur.Normal!);
+            shadowPaint.SetMaskFilter(blur);
+            canvas.DrawRoundRect(cardRect.Left, cardRect.Top + 6f, cardRect.Right, cardRect.Bottom + 6f, cardRadius, cardRadius, shadowPaint);
         }
 
         // 3. 圆角双色卡片主体
-        var clipPath = new Path();
+        using var clipPath = new Path();
         clipPath.AddRoundRect(cardRect, cardRadius, cardRadius, Path.Direction.Cw!);
 
         canvas.Save();
         canvas.ClipPath(clipPath);
 
-        var upperColor = EnsureMinBrightness(LyricsPalette.BlendColor(effectiveBase, Color.Black, 0.16), minRgb: 38);
-        var lowerColor = EnsureMinBrightness(LyricsPalette.BlendColor(effectiveBase, Color.Black, 0.30), minRgb: 26);
-        var panelAlpha = hasCustomBg ? 232 : 255;
+        var isLight = image is null && LyricsPalette.RelativeLuminance(opt.BaseColor) > 0.36;
+        var ink = isLight ? Color.Rgb(20, 23, 22) : Color.White;
+        var secondaryInk = isLight ? Color.Rgb(55, 58, 55) : Color.Argb(209, 255, 255, 255);
+        var panelBase = image is null ? opt.BaseColor : LyricsPalette.ShareCardColor(opt.BaseColor);
+        var upperColor = LyricsPalette.BlendColor(panelBase, isLight ? Color.White : Color.Black, isLight ? 0.42 : 0.13);
+        var lowerColor = LyricsPalette.BlendColor(panelBase, isLight ? Color.White : Color.Black, isLight ? 0.18 : 0.35);
 
         using (var panelPaint = new Paint(PaintFlags.AntiAlias))
         {
-            panelPaint.Color = Color.Argb(panelAlpha, upperColor.R, upperColor.G, upperColor.B);
+            panelPaint.Color = Color.Argb(image is null ? 255 : 172, upperColor.R, upperColor.G, upperColor.B);
             canvas.DrawRect(cardLeft, cardTop, cardLeft + cardW, cardTop + upperH, panelPaint);
 
-            panelPaint.Color = Color.Argb(panelAlpha, lowerColor.R, lowerColor.G, lowerColor.B);
+            panelPaint.Color = Color.Argb(image is null ? 255 : 222, lowerColor.R, lowerColor.G, lowerColor.B);
             canvas.DrawRect(cardLeft, cardTop + upperH, cardLeft + cardW, cardTop + cardH, panelPaint);
         }
 
@@ -266,20 +261,22 @@ internal static class LyricShareCardRenderer
             canvas,
             opt.Lines,
             opt.ShowTranslation,
-            lyricRegTf,
-            lyricRegTf,
+            mainTf,
+            translationTf,
             fontSize,
             lineSpacingMult: 1.16f,
             x: cardLeft + cardPadX,
             y: lyricsStartY,
             maxW: textW,
-            mainColor: Color.Argb(245, 255, 255, 255),
-            subColor: Color.Argb(182, 255, 255, 255));
+            mainColor: ink,
+            subColor: secondaryInk,
+            lineLimit: lineLimit,
+            shadow: image is not null);
 
         // 下半区专辑封面 + 歌名（Medium） + 歌手（Regular） + Apple Music 标识
         const float appleCoverSize = 142f;
         var lowerTop = cardTop + upperH;
-        var appleCoverRect = new RectF(
+        using var appleCoverRect = new RectF(
             cardLeft + cardPadX,
             lowerTop + (lowerH - appleCoverSize) / 2f,
             cardLeft + cardPadX + appleCoverSize,
@@ -291,15 +288,10 @@ internal static class LyricShareCardRenderer
         var titleStr = string.IsNullOrWhiteSpace(opt.TrackTitle) ? "未知歌曲" : opt.TrackTitle!.Trim();
         var artistStr = string.IsNullOrWhiteSpace(opt.ArtistName) ? "" : opt.ArtistName!.Trim();
 
-        var aTitlePaint = CreateTextPaint(metaMedTf, 35f, Color.Argb(245, 255, 255, 255));
-        var aTitleLayout = BuildSingleLineLayout(titleStr, aTitlePaint, infoW);
-
-        StaticLayout? aArtistLayout = null;
-        if (!string.IsNullOrEmpty(artistStr))
-        {
-            var aArtistPaint = CreateTextPaint(lyricRegTf, 32f, Color.Argb(204, 255, 255, 255));
-            aArtistLayout = BuildSingleLineLayout(artistStr, aArtistPaint, infoW);
-        }
+        using var aTitlePaint = CreateTextPaint(metaMedTf, 35f, ink);
+        using var aTitleLayout = BuildSingleLineLayout(titleStr, aTitlePaint, infoW);
+        using var aArtistPaint = CreateTextPaint(lyricRegTf, 32f, secondaryInk);
+        using var aArtistLayout = artistStr.Length > 0 ? BuildSingleLineLayout(artistStr, aArtistPaint, infoW) : null;
 
         const float brandHeight = 32f;
         const float gap1 = 6f;
@@ -316,13 +308,24 @@ internal static class LyricShareCardRenderer
             curY += aArtistLayout.Height;
         }
         curY += gap2;
-        DrawAppleMusicBrand(canvas, infoX, curY, brandTf, Color.Argb(115, 255, 255, 255));
+        DrawAppleMusicBrand(canvas, infoX, curY, brandTf, secondaryInk);
 
         canvas.Restore();
         return bitmap;
     }
 
-    private static (float FontSize, float LineGap, float TrGap, float TotalHeight) FitLyricsMetrics(
+    private static (Typeface? Original, Typeface? Translation) ResolveLyricsFonts(
+        Context context, ShareLyricsFont font, Typeface? defaultMain, Typeface? defaultTranslation) => font switch
+    {
+        ShareLyricsFont.SansSerif => (Typeface.SansSerif, Typeface.SansSerif),
+        ShareLyricsFont.Serif => (Typeface.Serif, Typeface.Serif),
+        ShareLyricsFont.Monospace => (Typeface.Monospace, Typeface.Monospace),
+        ShareLyricsFont.Spotify => (UiHelpers.ResolveFontWeight(context, UiHelpers.FontWeightBold, useTitleFont: true),
+            UiHelpers.ResolveFontWeight(context, UiHelpers.FontWeightRegular)),
+        _ => (defaultMain, defaultTranslation),
+    };
+
+    private static (float FontSize, float TotalHeight, int LineLimit) FitLyricsMetrics(
         IReadOnlyList<ShareLyricLine> lines,
         bool showTranslation,
         Typeface? mainTf,
@@ -330,22 +333,25 @@ internal static class LyricShareCardRenderer
         float maxW,
         float maxAvailH,
         float maxFontSp,
-        float minFontSp,
         float lineSpacingMult)
     {
-        for (var size = maxFontSp; size >= minFontSp; size -= 2f)
+        const float minSize = 24f;
+        for (var size = maxFontSp; ; size = Math.Max(minSize, size - 2f))
         {
-            var lineGap = MathF.Round(size * 0.24f);
-            var trGap = MathF.Round(size * 0.10f);
-            var h = MeasureLyricsHeight(lines, showTranslation, mainTf, subTf, size, lineGap, trGap, lineSpacingMult, maxW);
-            if (h <= maxAvailH || size <= minFontSp)
-                return (size, lineGap, trGap, h);
+            var height = MeasureLyricsHeight(lines, showTranslation, mainTf, subTf, size, lineSpacingMult, maxW, int.MaxValue);
+            if (height <= maxAvailH)
+                return (size, height, int.MaxValue);
+            if (size <= minSize)
+                break;
         }
 
-        var fallbackGap = MathF.Round(minFontSp * 0.24f);
-        var fallbackTrGap = MathF.Round(minFontSp * 0.10f);
-        var fallbackH = MeasureLyricsHeight(lines, showTranslation, mainTf, subTf, minFontSp, fallbackGap, fallbackTrGap, lineSpacingMult, maxW);
-        return (minFontSp, fallbackGap, fallbackTrGap, fallbackH);
+        // 对超长单行保留每条选中歌词的位置，并在卡片可容纳的行数后显示省略号。
+        for (var limit = 16; ; limit--)
+        {
+            var height = MeasureLyricsHeight(lines, showTranslation, mainTf, subTf, minSize, lineSpacingMult, maxW, limit);
+            if (height <= maxAvailH || limit == 1)
+                return (minSize, height, limit);
+        }
     }
 
     private static float MeasureLyricsHeight(
@@ -354,26 +360,27 @@ internal static class LyricShareCardRenderer
         Typeface? mainTf,
         Typeface? subTf,
         float mainSize,
-        float lineGap,
-        float trGap,
         float lineSpacingMult,
-        float maxW)
+        float maxW,
+        int lineLimit)
     {
-        var mainPaint = CreateTextPaint(mainTf, mainSize, Color.White);
+        var lineGap = MathF.Round(mainSize * 0.24f);
+        var trGap = MathF.Round(mainSize * 0.10f);
+        using var mainPaint = CreateTextPaint(mainTf, mainSize, Color.White);
         var subSize = MathF.Max(18f, MathF.Round(mainSize * 0.54f));
-        var subPaint = CreateTextPaint(subTf, subSize, Color.White);
+        using var subPaint = CreateTextPaint(subTf, subSize, Color.White);
 
         float total = 0f;
         for (var i = 0; i < lines.Count; i++)
         {
             var item = lines[i];
             var text = string.IsNullOrWhiteSpace(item.Original) ? "♪" : item.Original;
-            var mainLayout = BuildMultilineLayout(text, mainPaint, maxW, lineSpacingMult);
+            using var mainLayout = BuildMultilineLayout(text, mainPaint, maxW, lineSpacingMult, lineLimit);
             total += mainLayout.Height;
 
             if (showTranslation && !string.IsNullOrWhiteSpace(item.Translation))
             {
-                var trLayout = BuildMultilineLayout(item.Translation!, subPaint, maxW, 1.15f);
+                using var trLayout = BuildMultilineLayout(item.Translation!, subPaint, maxW, 1.15f, lineLimit);
                 total += trGap + trLayout.Height;
             }
 
@@ -395,27 +402,29 @@ internal static class LyricShareCardRenderer
         float y,
         float maxW,
         Color mainColor,
-        Color subColor)
+        Color subColor,
+        int lineLimit,
+        bool shadow)
     {
         var lineGap = MathF.Round(mainSize * 0.24f);
         var trGap = MathF.Round(mainSize * 0.10f);
-        var mainPaint = CreateTextPaint(mainTf, mainSize, mainColor);
+        using var mainPaint = CreateTextPaint(mainTf, mainSize, mainColor, shadow);
         var subSize = MathF.Max(18f, MathF.Round(mainSize * 0.54f));
-        var subPaint = CreateTextPaint(subTf, subSize, subColor);
+        using var subPaint = CreateTextPaint(subTf, subSize, subColor, shadow);
 
         var curY = y;
         for (var i = 0; i < lines.Count; i++)
         {
             var item = lines[i];
             var text = string.IsNullOrWhiteSpace(item.Original) ? "♪" : item.Original;
-            var mainLayout = BuildMultilineLayout(text, mainPaint, maxW, lineSpacingMult);
+            using var mainLayout = BuildMultilineLayout(text, mainPaint, maxW, lineSpacingMult, lineLimit);
             DrawLayoutAt(canvas, mainLayout, x, curY);
             curY += mainLayout.Height;
 
             if (showTranslation && !string.IsNullOrWhiteSpace(item.Translation))
             {
                 curY += trGap;
-                var trLayout = BuildMultilineLayout(item.Translation!, subPaint, maxW, 1.15f);
+                using var trLayout = BuildMultilineLayout(item.Translation!, subPaint, maxW, 1.15f, lineLimit);
                 DrawLayoutAt(canvas, trLayout, x, curY);
                 curY += trLayout.Height;
             }
@@ -424,31 +433,9 @@ internal static class LyricShareCardRenderer
         }
     }
 
-    private static void DrawBitmapCenterCrop(Canvas canvas, Bitmap src, RectF dst)
-    {
-        var srcRatio = (float)src.Width / src.Height;
-        var dstRatio = dst.Width() / dst.Height();
-        Rect srcRect;
-        if (srcRatio > dstRatio)
-        {
-            var cropW = (int)MathF.Round(src.Height * dstRatio);
-            var left = (src.Width - cropW) / 2;
-            srcRect = new Rect(left, 0, left + cropW, src.Height);
-        }
-        else
-        {
-            var cropH = (int)MathF.Round(src.Width / dstRatio);
-            var top = (src.Height - cropH) / 2;
-            srcRect = new Rect(0, top, src.Width, top + cropH);
-        }
-
-        using var bmpPaint = new Paint(PaintFlags.AntiAlias | PaintFlags.FilterBitmap);
-        canvas.DrawBitmap(src, srcRect, dst, bmpPaint);
-    }
-
     private static void DrawCoverThumbnail(Canvas canvas, Bitmap? cover, RectF rect, float radius, Typeface? noteTf)
     {
-        var clip = new Path();
+        using var clip = new Path();
         clip.AddRoundRect(rect, radius, radius, Path.Direction.Cw!);
 
         canvas.Save();
@@ -459,7 +446,7 @@ internal static class LyricShareCardRenderer
 
         if (cover is { IsRecycled: false } && cover.Width > 0 && cover.Height > 0)
         {
-            DrawBitmapCenterCrop(canvas, cover, rect);
+            LyricShareBackground.DrawCenterCrop(canvas, cover, rect);
         }
         else
         {
@@ -478,13 +465,14 @@ internal static class LyricShareCardRenderer
         canvas.Restore();
     }
 
-    private static void DrawSpotifyBrand(Canvas canvas, float leftX, float centerY, Typeface? boldTf, Color waveCutColor)
+    private static void DrawSpotifyBrand(Canvas canvas, float leftX, float centerY, Typeface? boldTf, Color ink, Color waveCutColor, bool shadow)
     {
         const float r = 24f;
         var cx = leftX + r;
 
-        using (var circlePaint = new Paint(PaintFlags.AntiAlias) { Color = Color.White })
+        using (var circlePaint = new Paint(PaintFlags.AntiAlias) { Color = ink })
         {
+            if (shadow) circlePaint.SetShadowLayer(4f, 0f, 1.5f, Color.Black);
             circlePaint.SetStyle(Paint.Style.Fill);
             canvas.DrawCircle(cx, centerY, r, circlePaint);
         }
@@ -499,7 +487,7 @@ internal static class LyricShareCardRenderer
         })
         {
             wavePaint.SetStyle(Paint.Style.Stroke);
-            var arcPath = new Path();
+            using var arcPath = new Path();
 
             wavePaint.StrokeWidth = r * 0.165f;
             arcPath.MoveTo(-r * 0.62f, -r * 0.22f);
@@ -520,14 +508,9 @@ internal static class LyricShareCardRenderer
         }
         canvas.Restore();
 
-        using var wordPaint = new Paint(PaintFlags.AntiAlias)
-        {
-            Color = Color.White,
-            TextSize = 40f,
-            LetterSpacing = -0.02f,
-        };
-        if (boldTf is not null) wordPaint.SetTypeface(boldTf);
-        var fm = wordPaint.GetFontMetrics()!;
+        using var wordPaint = CreateTextPaint(boldTf, 40f, ink, shadow);
+        wordPaint.LetterSpacing = -0.02f;
+        using var fm = wordPaint.GetFontMetrics()!;
         var baseline = centerY - (fm.Ascent + fm.Descent) / 2f;
         var wordX = cx + r + 14f;
         canvas.DrawText("Spotify", wordX, baseline, wordPaint);
@@ -549,14 +532,14 @@ internal static class LyricShareCardRenderer
         using (var applePaint = new Paint(PaintFlags.AntiAlias) { Color = inkColor })
         {
             applePaint.SetStyle(Paint.Style.Fill);
-            var leaf = new Path();
+            using var leaf = new Path();
             leaf.MoveTo(12.2f, 6.2f);
             leaf.CubicTo(12.0f, 2.8f, 14.4f, 0.4f, 17.2f, 0.2f);
             leaf.CubicTo(17.3f, 3.4f, 14.9f, 6.0f, 12.2f, 6.2f);
             leaf.Close();
             canvas.DrawPath(leaf, applePaint);
 
-            var body = new Path();
+            using var body = new Path();
             body.MoveTo(12.0f, 8.2f);
             body.CubicTo(14.2f, 6.4f, 18.2f, 6.4f, 20.4f, 8.8f);
             body.CubicTo(17.8f, 10.6f, 17.5f, 16.4f, 21.3f, 18.6f);
@@ -582,7 +565,7 @@ internal static class LyricShareCardRenderer
         canvas.DrawText("music", leftX + 24f * scale + 5f, baseline, musicPaint);
     }
 
-    private static TextPaint CreateTextPaint(Typeface? typeface, float textSizePx, Color color)
+    private static TextPaint CreateTextPaint(Typeface? typeface, float textSizePx, Color color, bool shadow = false)
     {
         var tp = new TextPaint(PaintFlags.AntiAlias | PaintFlags.SubpixelText)
         {
@@ -590,29 +573,34 @@ internal static class LyricShareCardRenderer
             TextSize = textSizePx,
         };
         if (typeface is not null) tp.SetTypeface(typeface);
+        if (shadow) tp.SetShadowLayer(4f, 0f, 1.5f, Color.Black);
         return tp;
     }
 
     private static StaticLayout BuildSingleLineLayout(string text, TextPaint paint, float widthPx)
     {
         var w = Math.Max(1, (int)MathF.Floor(widthPx));
-        return StaticLayout.Builder
-            .Obtain(text, 0, text.Length, paint, w)!
+        var builder = StaticLayout.Builder.Obtain(text, 0, text.Length, paint, w)!;
+        return builder
             .SetAlignment(global::Android.Text.Layout.Alignment.AlignNormal!)
             .SetMaxLines(1)
             .SetEllipsize(TextUtils.TruncateAt.End!)
-            .SetIncludePad(false)
+            .SetIncludePad(true)
             .Build()!;
     }
 
-    private static StaticLayout BuildMultilineLayout(string text, TextPaint paint, float widthPx, float spacingMult)
+    private static StaticLayout BuildMultilineLayout(string text, TextPaint paint, float widthPx, float spacingMult, int lineLimit)
     {
         var w = Math.Max(1, (int)MathF.Floor(widthPx));
-        return StaticLayout.Builder
-            .Obtain(text, 0, text.Length, paint, w)!
+        var builder = StaticLayout.Builder.Obtain(text, 0, text.Length, paint, w)!;
+        if (OperatingSystem.IsAndroidVersionAtLeast(28))
+            builder.SetUseLineSpacingFromFallbacks(true);
+        if (lineLimit != int.MaxValue)
+            builder.SetMaxLines(lineLimit).SetEllipsize(TextUtils.TruncateAt.End!);
+        return builder
             .SetAlignment(global::Android.Text.Layout.Alignment.AlignNormal!)
             .SetLineSpacing(0f, spacingMult)
-            .SetIncludePad(false)
+            .SetIncludePad(true)
             .Build()!;
     }
 
@@ -624,24 +612,4 @@ internal static class LyricShareCardRenderer
         canvas.Restore();
     }
 
-    private static Color EnsureMinBrightness(Color color, int minRgb = 0, int minSum = 0)
-    {
-        int r = color.R;
-        int g = color.G;
-        int b = color.B;
-        if (minRgb > 0)
-        {
-            r = Math.Max(r, minRgb);
-            g = Math.Max(g, minRgb);
-            b = Math.Max(b, minRgb);
-        }
-        if (minSum > 0 && r + g + b < minSum)
-        {
-            var delta = (minSum - (r + g + b) + 2) / 3;
-            r = Math.Min(255, r + delta);
-            g = Math.Min(255, g + delta);
-            b = Math.Min(255, b + delta);
-        }
-        return Color.Rgb(r, g, b);
-    }
 }

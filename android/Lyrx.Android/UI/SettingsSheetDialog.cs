@@ -66,8 +66,8 @@ internal static class SettingsSheetDialog
 
     private static readonly (string Id, string Label)[] TranslationEngines =
     [
-        ("none", "仅使用歌词源自带翻译（推荐 / 免 Key）"),
-        ("mymemory", "MyMemory（免费在线机器翻译）"),
+        ("none", "仅使用歌词源自带翻译（关闭在线机器翻译）"),
+        ("mymemory", "MyMemory（免费在线机器翻译 · 推荐免 Key）"),
         ("deepl", "DeepL API"),
         ("google", "Google Cloud Translation"),
         ("openrouter", "OpenRouter (AI 大模型翻译)"),
@@ -653,6 +653,8 @@ internal static class SettingsSheetDialog
         {
             app.Settings.ShowTranslation = val;
             app.SaveSettings();
+            if (val && app.Settings.ApiTranslationEnabled)
+                _ = app.Coordinator.RetranslateCurrentAsync();
             onAppearanceOrLayoutChanged();
         });
         displayCard.AddView(CreateSettingRow(
