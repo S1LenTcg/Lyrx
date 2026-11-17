@@ -321,11 +321,8 @@ internal sealed partial class ClassicLyricsWindow : Window
         {
             var compact = width < 720;
             var fullscreenBar = !compact && _isFullscreen;
-            _footerBar.Padding = compact
-                ? new Thickness(12, 8, 12, 10)
-                : fullscreenBar
-                    ? new Thickness(26, 10, 26, 12)
-                    : new Thickness(18, 8, 18, 8);
+            var (footerPadding, footerMinHeight) = ResolveFooterMetrics(compact, fullscreenBar);
+            _footerBar.Padding = footerPadding;
             _captionBar.Margin = compact
                 ? new Thickness(0, 12, 12, 0)
                 : fullscreenBar
@@ -348,7 +345,7 @@ internal sealed partial class ClassicLyricsWindow : Window
                 transportWidth = Math.Clamp(innerWidth * 0.44, 280, Math.Min(722, maxTransportWidth));
             }
             _footerBar.Height = double.NaN;
-            _footerBar.MinHeight = compact ? 0 : fullscreenBar ? 102 : 84;
+            _footerBar.MinHeight = footerMinHeight;
             footer.RowDefinitions[0].Height = compact ? GridLength.Auto : new GridLength(1, GridUnitType.Star);
             footer.RowDefinitions[1].Height = compact ? GridLength.Auto : new GridLength(0);
             footer.ColumnDefinitions[1].Width = compact
@@ -2486,6 +2483,13 @@ internal sealed partial class ClassicLyricsWindow : Window
         geometry.Freeze();
         return geometry;
     }
+
+    internal static (Thickness Padding, double MinHeight) ResolveFooterMetrics(bool compact, bool fullscreenBar) =>
+        compact
+            ? (new Thickness(12, 14, 12, 14), 0)
+            : fullscreenBar
+                ? (new Thickness(26, 14, 26, 16), 108)
+                : (new Thickness(18, 12, 18, 12), 88);
 
     private void ToggleFullscreen() => SetFullscreen(!_isFullscreen);
 
